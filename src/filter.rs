@@ -82,7 +82,6 @@ impl NoiseFilter {
     ///
     /// Useful when the caller wants to preserve the original ordering but
     /// drop noise entries without re-allocating the message vector.
-    #[must_use]
     pub fn retain_indices<'a>(
         &'a self,
         messages: &'a [Message],

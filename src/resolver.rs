@@ -25,7 +25,7 @@ pub enum Resolution {
         /// Identifier of the memory to remove from the store.
         old_id: String,
         /// The new memory that supersedes the old one.
-        new_memory: Memory,
+        new_memory: Box<Memory>,
     },
     /// The new memory is sufficiently different; keep both.
     KeepBoth,
@@ -99,7 +99,7 @@ impl ConflictResolver {
         if new_memory.importance > existing_confidence {
             Resolution::ReplaceOld {
                 old_id: existing.id.clone(),
-                new_memory: new_memory.clone(),
+                new_memory: Box::new(new_memory.clone()),
             }
         } else {
             Resolution::KeepBoth

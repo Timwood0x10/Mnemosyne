@@ -12,6 +12,7 @@ use clap::Parser;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
+use memory_distill::compiler::ConversationCompiler;
 use memory_distill::config::{CliArgs, Command, EmbeddingProvider};
 use memory_distill::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 use memory_distill::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
@@ -238,7 +239,27 @@ fn build_retrieval_engine(
     Arc::new(RetrievalEngine::new(embedder, store, mode))
 }
 
-/// Build the MCP server with all 5 `memory_*` tools registered.
+/// Tool: compile conversation into structured state (`memory_compile`).
+struct MemoryCompileTool;
+
+#[async_trait::async_trait]
+impl ToolHandler for MemoryCompileTool {
+    async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
+        let messages_raw = args
+            .get("messages")
+            .and_then(Value::as_array)
+            .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
+        let messages = parse_messages(messages_raw)?;
+
+        let compiler = ConversationCompiler::new();
+        let compiled = compiler.compile(&messages);
+
+        let payload = serde_json::json!(compiled);
+        Ok(ToolCallResult::text(payload.to_string()))
+    }
+}
+
+/// Build the MCP server with all 6 `memory_*` tools registered.
 async fn build_server(
     cfg: &memory_distill::config::Config,
 ) -> AnyhowResult<(MCPServer, Arc<PipelineDistiller>, Arc<RetrievalEngine>)> {
@@ -389,6 +410,34 @@ async fn build_server(
             Arc::new(MemoryStatsTool {
                 store: store.clone(),
             }),
+        )
+        .await;
+
+    // memory_compile
+    builder = builder
+        .tool(
+            ToolDefinition {
+                name: "memory_compile".into(),
+                description: "Compile conversation into structured knowledge + decisions + session state".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "messages": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "role": {"type": "string", "enum": ["user", "assistant", "system"]},
+                                    "content": {"type": "string"}
+                                },
+                                "required": ["role", "content"]
+                            }
+                        }
+                    },
+                    "required": ["messages"]
+                }),
+            },
+            Arc::new(MemoryCompileTool),
         )
         .await;
 

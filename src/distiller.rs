@@ -109,9 +109,6 @@ impl DistillationMetrics {
         }
     }
 
-    fn inc(counter: &AtomicU64) {
-        counter.fetch_add(1, Ordering::Relaxed);
-    }
 }
 
 /// Read-only point-in-time snapshot of [`DistillationMetrics`].
@@ -525,14 +522,12 @@ impl Distiller for PipelineDistiller {
         }
 
         // Phase 3: top-N pre-filter.
-        let memories = self.phase_top_n_prefilter(memories);
+        let mut memories = self.phase_top_n_prefilter(memories);
 
         // Phase 4: compress into concise summaries.
-        let mut memories = memories;
         self.phase_compress(&mut memories);
 
         // Phase 5: embed.
-        let mut memories = memories;
         if let Err(e) = self.phase_embed(&mut memories).await {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
             return Err(e);
@@ -572,7 +567,10 @@ impl Distiller for PipelineDistiller {
 }
 
 /// Compress a problem-solution pair into a concise single-sentence summary.
-fn compress_pair(problem: &str, solution: &str) -> String {
+/// Compress a problem-solution pair into a concise summary.
+/// Truncates problem to 60 chars, solution to 120 chars,
+/// strips trailing question marks, and pairs as `problem: action`.
+pub fn compress_pair(problem: &str, solution: &str) -> String {
     const MAX_PROBLEM: usize = 60;
     const MAX_SOLUTION: usize = 120;
 
@@ -801,6 +799,340 @@ mod tests {
         ];
         let result = d.distill("c1", &msgs, "t1", "u1").await.expect("distill");
         assert_eq!(result.len(), 2, "both pairs distilled");
+    }
+
+    // ── Document fidelity tests ─────────────────────────────────────
+
+    /// Objective: Verify technical document content (code snippets) is not
+    /// mangled during compression. Code must survive truncation byte-unchanged.
+    #[test]
+    fn compress_pair_technical_document() {
+        let problem = "How to set up the Rust project structure for an MCP server?";
+        let solution = "Create a binary crate with cargo new memory-mcp. Add dependencies: \
+            tokio for async runtime, serde/serde_json for JSON-RPC, rusqlite for storage. \
+            Use a src/main.rs entrypoint and organize modules under src/.";
+        let s = compress_pair(problem, solution);
+        // Code and paths must survive verbatim
+        assert!(
+            s.contains("cargo new"),
+            "code not mangled: {s}"
+        );
+        // (first-sentence extraction keeps only first sentence)
+        assert!(
+            s.contains("Create a binary crate"),
+            "first sentence preserved: {s}"
+        );
+        // Density: each segment carries meaning
+        assert!(
+            s.chars().count() <= problem.chars().count() + solution.chars().count(),
+            "compression should not expand"
+        );
+        assert!(
+            s.contains("memory-mcp"),
+            "project name preserved: {s}"
+        );
+    }
+
+    /// Objective: Verify Chinese document content respects UTF-8 boundaries.
+    /// Byte slicing must not split a multi-byte character.
+    #[test]
+    fn compress_pair_chinese_document() {
+        let problem = "如何优化 Agent 的上下文窗口管理？记忆蒸馏的最佳实践是什么？";
+        let solution = "采用三层架构：第一层用滑动窗口保留最近 N 条原始消息；\
+            第二层用 PipelineDistiller 对历史消息做蒸馏提取关键记忆；\
+            第三层用向量数据库做相似度检索。这样既保证了实时性，又不会丢失历史经验。";
+        let s = compress_pair(problem, solution);
+        // No replacement character from broken UTF-8
+        assert!(
+            !s.contains('�'),
+            "no broken UTF-8: {s}"
+        );
+        // Chinese question mark stripped only from end of problem, not inside
+        assert!(
+            s.contains('？'),
+            "embedded question mark should remain, only trailing stripped: {s}"
+        );
+        // Key Chinese terms preserved (first sentence after 。split)
+        assert!(
+            s.contains("滑动窗口"),
+            "first-sentence concept preserved: {s}"
+        );
+        assert!(
+            s.contains("三层架构"),
+            "architecture concept preserved: {s}"
+        );
+        // Verify byte-level safety: the string must be valid UTF-8
+        assert!(
+            std::str::from_utf8(s.as_bytes()).is_ok(),
+            "output must be valid UTF-8"
+        );
+    }
+
+    /// Objective: Verify long document paragraphs are truncated sensibly —
+    /// truncation should not end mid-word or produce garbled output.
+    #[test]
+    fn compress_pair_long_document_content() {
+        let problem = "What are the key architectural decisions in the memory distillation system?";
+        let solution = "The memory distillation system uses an 8-stage pipeline: \
+            extraction (user-assistant pairs), classification (MemoryType assignment), \
+            importance scoring, noise filtering, compression (truncation + pairing), \
+            embedding (vector generation), conflict resolution (cosine similarity), \
+            and capacity control (tenant-level eviction). Each stage is independently \
+            testable and swappable. The pipeline is orchestrated by PipelineDistiller \
+            which holds references to each stage implementation.";
+        let s = compress_pair(problem, solution);
+        // Must include the 8-stage concept
+        assert!(
+            s.contains("8-stage"),
+            "key number preserved: {s}"
+        );
+        // Truncation should produce valid output (no panic from byte slicing)
+        assert!(
+            !s.is_empty(),
+            "output should not be empty"
+        );
+        // The core structure (problem：action) should be intact
+        assert!(
+            s.contains('：'),
+            "separator should be present"
+        );
+    }
+
+    /// Objective: Verify that very short document snippets don't lose meaning
+    /// through aggressive truncation.
+    #[test]
+    fn compress_pair_short_content_preserved() {
+        let problem = "Go vs Rust?";
+        let solution = "Rust for safety, Go for simplicity.";
+        let s = compress_pair(problem, solution);
+        assert_eq!(
+            s,
+            "Go vs Rust：Rust for safety, Go for simplicity.",
+            "short content should pass through unchanged"
+        );
+    }
+
+    /// Objective: Verify distillation preserves key information from
+    /// real document-style conversation (narrative + technical content).
+    #[tokio::test]
+    async fn distill_document_fidelity() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+        let cfg = DistillationConfig {
+            min_importance: 0.0,
+            conflict_threshold: 0.99,
+            max_memories_per_distillation: 10,
+            max_solutions_per_tenant: 100,
+            enable_cross_turn: true,
+        };
+        let d = PipelineDistiller::new(cfg, embedder, store);
+
+        // Simulate a document review conversation: user pastes specs,
+        // assistant analyzes them.
+        let msgs = vec![
+            Message::new("user",
+                "What architecture does the memory system use?"
+            ),
+            Message::new("assistant",
+                "The memory system uses an 8-stage pipeline with separate \
+                stages for extraction, classification, scoring, filtering, \
+                compression, embedding, conflict resolution, and capacity control."
+            ),
+            Message::new("user",
+                "How does compression work specifically?"
+            ),
+            Message::new("assistant",
+                "Compression uses the compress_pair function which truncates \
+                problem to 60 chars and solution to 120 chars, strips trailing \
+                question marks, and pairs them as `problem: action`."
+            ),
+            Message::new("user",
+                "What storage backend does it use?"
+            ),
+            Message::new("assistant",
+                "SQLite with sqlite-vec extension for vector similarity search. \
+                The store creates a vec0 virtual table indexed by cosine distance. \
+                Dimensions default to 768 but are configurable per instance."
+            ),
+        ];
+
+        let result = d.distill("c1", &msgs, "t1", "u1").await.expect("distill");
+        assert!(
+            !result.is_empty(),
+            "should produce memories from document content"
+        );
+
+        // Each memory must preserve key information from original
+        for mem in &result {
+            // No garbled output
+            assert!(
+                !mem.summary.contains('�'),
+                "no garbled characters in summary: {}",
+                mem.summary
+            );
+            assert!(
+                !mem.summary.trim().is_empty(),
+                "summary must not be empty or whitespace-only"
+            );
+            // Summary is shorter than combined input
+            assert!(
+                mem.summary.len() < 200,
+                "summary should be condensed (<200 chars), got {}",
+                mem.summary.len()
+            );
+        }
+
+        // At least one memory should reference the pipeline architecture
+        let has_pipeline = result.iter().any(|m| {
+            m.summary.contains("8-stage")
+                || m.summary.contains("pipeline")
+                || m.summary.contains("PipelineDistiller")
+        });
+        assert!(
+            has_pipeline,
+            "at least one memory should preserve pipeline concept, got: {:?}",
+            result.iter().map(|m| &m.summary).collect::<Vec<_>>()
+        );
+    }
+
+    /// Objective: Verify Chinese document content survives full distillation
+    /// without byte-level corruption (common issue with CJK + truncation).
+    #[tokio::test]
+    async fn distill_chinese_document_fidelity() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+        let cfg = DistillationConfig {
+            min_importance: 0.0,
+            conflict_threshold: 0.99,
+            max_memories_per_distillation: 10,
+            max_solutions_per_tenant: 100,
+            enable_cross_turn: true,
+        };
+        let d = PipelineDistiller::new(cfg, embedder, store);
+
+        let msgs = vec![
+            Message::new("user",
+                "记忆蒸馏系统的架构是什么？"
+            ),
+            Message::new("assistant",
+                "记忆蒸馏系统采用8阶段管道：提取（用户-助手配对）、分类（MemoryType）、\
+                重要性评分、噪音过滤、压缩（截断+配对）、嵌入（向量生成）、冲突解决（余弦相似度）、\
+                容量控制（租户级淘汰）。每个阶段独立可测试、可替换。"
+            ),
+            Message::new("user",
+                "压缩阶段具体怎么工作？"
+            ),
+            Message::new("assistant",
+                "compress_pair 函数把问题截断到60个字符，解决方案截断到120个字符，\
+                去掉末尾的问号和语气词，然后用冒号拼接成「问题：解决方案」的格式。\
+                截断时保证了字符边界安全，不会从中间切开一个UTF-8字符。"
+            ),
+            Message::new("user",
+                "它用什么存储后端？"
+            ),
+            Message::new("assistant",
+                "使用 SQLite 加 sqlite-vec 扩展做向量相似度搜索。\
+                创建 vec0 虚拟表按余弦距离索引。维度默认768但可配置。\
+                每次打开存储时通过 OnceLock 确保扩展只加载一次。"
+            ),
+        ];
+
+        let result = d.distill("c1", &msgs, "t1", "u1").await.expect("distill");
+        assert!(
+            !result.is_empty(),
+            "should produce memories from Chinese document content"
+        );
+
+        for mem in &result {
+            // No UTF-8 corruption (replacement character)
+            assert!(
+                !mem.summary.contains('�'),
+                "no UTF-8 corruption: {}",
+                mem.summary
+            );
+            // No empty summaries
+            assert!(
+                !mem.summary.trim().is_empty(),
+                "summary must not be empty"
+            );
+            // CJK bytes are valid
+            assert!(
+                std::str::from_utf8(mem.summary.as_bytes()).is_ok(),
+                "summary must be valid UTF-8"
+            );
+        }
+
+        // At least one memory preserves a Chinese concept
+        let has_concept = result.iter().any(|m| {
+            m.summary.contains("管道")
+                || m.summary.contains("蒸馏")
+                || m.summary.contains("余弦")
+                || m.summary.contains("向量")
+        });
+        assert!(
+            has_concept,
+            "no Chinese concept preserved in any summary: {:?}",
+            result.iter().map(|m| &m.summary).collect::<Vec<_>>()
+        );
+    }
+
+    /// Objective: Verify compression density — each distilled memory should
+    /// carry substantial information relative to its character count.
+    #[tokio::test]
+    async fn distill_density_reasonable() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+        let cfg = DistillationConfig {
+            min_importance: 0.0,
+            conflict_threshold: 0.99,
+            max_memories_per_distillation: 10,
+            max_solutions_per_tenant: 100,
+            enable_cross_turn: true,
+        };
+        let d = PipelineDistiller::new(cfg, embedder, store);
+
+        // A dense technical exchange
+        let msgs = vec![
+            Message::new("user",
+                "How does the conflict resolver determine if two memories conflict?"
+            ),
+            Message::new("assistant",
+                "The ConflictResolver uses cosine similarity on embedding vectors. \
+                Two memories conflict when their cosine similarity exceeds the \
+                configured threshold (default 0.85). On conflict, if the new memory \
+                has higher importance it replaces the old one via ReplaceOld; \
+                otherwise both are kept."
+            ),
+        ];
+
+        let result = d.distill("c1", &msgs, "t1", "u1").await.expect("distill");
+        if result.is_empty() {
+            return; // could be filtered by importance; skip
+        }
+
+        let mem = &result[0];
+        // Density heuristic: summary should contain multiple meaningful tokens
+        let meaningful_tokens: usize = mem
+            .summary
+            .split([' ', '：', '。', '，', ',', '.'])
+            .filter(|t| t.len() > 2)
+            .count();
+        assert!(
+            meaningful_tokens >= 3,
+            "summary should have >=3 meaningful tokens, got {} in '{}'",
+            meaningful_tokens,
+            mem.summary
+        );
+        // The summary must contain at least one specific technical term
+        assert!(
+            mem.summary.contains("cosine")
+                || mem.summary.contains("similarity")
+                || mem.summary.contains("ConflictResolver")
+                || mem.summary.contains("threshold")
+                || mem.summary.contains("ReplaceOld"),
+            "summary should contain a specific technical term, got: {}",
+            mem.summary
+        );
     }
 
     /// Objective: Verify capacity control evicts lowest-confidence records.

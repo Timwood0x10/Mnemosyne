@@ -36,9 +36,11 @@ pub const ERR_INVALID_PARAMS: i64 = -32602;
 /// JSON-RPC error code: internal error.
 pub const ERR_INTERNAL: i64 = -32603;
 
+type ToolEntry = (ToolDefinition, Arc<dyn ToolHandler>);
+
 /// Mutable tool registry protected by a mutex.
 pub struct ToolRegistry {
-    tools: Mutex<HashMap<String, (ToolDefinition, Arc<dyn ToolHandler>)>>,
+    tools: Mutex<HashMap<String, ToolEntry>>,
 }
 
 impl ToolRegistry {

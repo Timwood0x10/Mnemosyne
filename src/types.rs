@@ -388,6 +388,47 @@ impl Metadata {
     }
 }
 
+/// A decision extracted from conversation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Decision {
+    /// What was decided (summary).
+    pub decision: String,
+    /// Rationale.
+    pub rationale: String,
+    /// The module/area this decision applies to.
+    pub module: String,
+    /// Importance.
+    pub importance: f64,
+}
+
+/// Short-term working state — not persisted as long-term memory.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SessionState {
+    /// Current active goal.
+    pub current_goal: String,
+    /// Module being worked on.
+    pub current_module: String,
+    /// Files being edited.
+    pub current_files: Vec<String>,
+    /// Open/unresolved problems.
+    pub open_problems: Vec<String>,
+    /// Pending tasks.
+    pub todo: Vec<String>,
+    /// Recent decisions made this session.
+    pub recent_decisions: Vec<String>,
+}
+
+/// Output of the conversation compiler.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompiledConversation {
+    /// Long-term knowledge facts.
+    pub knowledge: Vec<Memory>,
+    /// Decisions made.
+    pub decisions: Vec<Decision>,
+    /// Session working state.
+    pub session: SessionState,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

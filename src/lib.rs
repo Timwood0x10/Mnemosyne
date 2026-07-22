@@ -27,6 +27,7 @@
 //! | `mcp` | MCP server framework (types, transport, server) |
 
 pub mod classifier;
+pub mod compiler;
 pub mod config;
 pub mod detector;
 pub mod distiller;
@@ -35,6 +36,7 @@ pub mod error;
 pub mod extractor;
 pub mod filter;
 pub mod mcp;
+pub mod prompt;
 pub mod resolver;
 pub mod retrieval;
 pub mod scorer;
