@@ -155,6 +155,65 @@ pub trait Distiller: Send + Sync {
     fn metrics(&self) -> MetricsSnapshot;
 }
 
+/// Bounded LRU map of per-tenant distillation locks.
+///
+/// The map is capped at `MAX_ENTRIES`. When the cap is reached, the
+/// oldest entry (least-recently-touched) is evicted. Active distillations
+/// hold their own `Arc` clone, so eviction never interrupts an in-flight
+/// distillation — it only allows a fresh lock to be created on the next
+/// call from the evicted tenant.
+///
+/// Touch order is maintained with a [`std::collections::VecDeque`] front
+/// index: `get_or_insert` moves the accessed key to the back, and
+/// evictions pop from the front. This is O(n) per access but n is tiny
+/// (capped at 1024), so the simplicity beats a linked-hash-map dependency.
+struct LruTenantLocks {
+    cap: usize,
+    entries: std::collections::HashMap<String, Arc<Mutex<()>>>,
+    order: std::collections::VecDeque<String>,
+}
+
+impl LruTenantLocks {
+    /// Default cap on the number of tracked tenant locks.
+    const MAX_ENTRIES: usize = 1024;
+
+    /// Build a new bounded LRU map with the given capacity.
+    #[must_use]
+    fn new(cap: usize) -> Self {
+        Self {
+            cap,
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// Get an existing lock, or insert a new one.
+    ///
+    /// On access the key is moved to the back of `order` (most-recently-used).
+    /// When the map exceeds `cap`, the least-recently-used entry is dropped.
+    fn get_or_insert(&mut self, key: &str) -> Arc<Mutex<()>> {
+        // Fast path: existing entry, refresh LRU position.
+        if let Some(arc) = self.entries.get(key) {
+            let arc = arc.clone();
+            self.order.retain(|k| k != key);
+            self.order.push_back(key.to_string());
+            return arc;
+        }
+
+        // Evict the least-recently-used entry if we are about to overflow.
+        if self.entries.len() >= self.cap {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+
+        let arc = Arc::new(Mutex::new(()));
+        self.entries.insert(key.to_string(), arc.clone());
+        self.order.push_back(key.to_string());
+        arc
+    }
+}
+
 /// Concrete distiller orchestrating the 8-stage pipeline.
 pub struct PipelineDistiller {
     cfg: DistillationConfig,
@@ -169,7 +228,14 @@ pub struct PipelineDistiller {
     metrics: Arc<DistillationMetrics>,
     /// Per-tenant pending-distillation lock to avoid concurrent writes
     /// racing on capacity-control eviction.
-    tenant_locks: Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>,
+    ///
+    /// Bounded to `MAX_TENANT_LOCKS` entries via a manual LRU eviction
+    /// policy: when the map is full we drop the lock whose tenant has been
+    /// inactive the longest (approximated by insertion order). Active
+    /// distillations hold an `Arc` clone, so eviction never interrupts an
+    /// in-flight distillation — it only allows a new lock to be created on
+    /// the next call from the evicted tenant.
+    tenant_locks: Mutex<LruTenantLocks>,
 }
 
 impl PipelineDistiller {
@@ -200,7 +266,7 @@ impl PipelineDistiller {
             security_filter: SecurityFilter::new(),
             resolver: ConflictResolver::new(cfg.conflict_threshold),
             metrics: Arc::new(DistillationMetrics::new()),
-            tenant_locks: Mutex::new(std::collections::HashMap::new()),
+            tenant_locks: Mutex::new(LruTenantLocks::new(LruTenantLocks::MAX_ENTRIES)),
         }
     }
 
@@ -220,10 +286,7 @@ impl PipelineDistiller {
     /// Acquire (or lazily create) the per-tenant mutex.
     async fn tenant_lock(&self, tenant_id: &str) -> Arc<Mutex<()>> {
         let mut guard = self.tenant_locks.lock().await;
-        guard
-            .entry(tenant_id.to_string())
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+        guard.get_or_insert(tenant_id)
     }
 
     /// Phase 1: extract raw experiences from messages.
@@ -312,7 +375,7 @@ impl PipelineDistiller {
         }
     }
 
-    /// Phase 4: embed each memory's content.
+    /// Phase 5: embed each memory's content.
     ///
     /// When the configured embedder is disabled (e.g. `NullEmbedder`), this
     /// phase is a no-op: memories keep empty vectors and the retrieval layer
@@ -336,65 +399,106 @@ impl PipelineDistiller {
 
     /// Phase 5: detect conflicts and resolve them.
     ///
-    /// For each candidate memory, we look up existing memories of the same
-    /// type for the tenant, compare embeddings, and decide whether to
-    /// replace the existing memory or keep both.
+    /// Vector path: when embeddings are enabled, look up the candidate's
+    /// nearest neighbours via [`search_by_vector`], then ask the
+    /// [`ConflictResolver`] whether to replace the existing record or keep
+    /// both. The existing record's vector is rehydrated from the store so
+    /// the cosine comparison runs against real data.
+    ///
+    /// Keyword fallback: when embeddings are disabled the candidate has no
+    /// vector, so cosine comparison is impossible. We instead deduplicate by
+    /// exact content hash against existing memories of the same type for the
+    /// tenant. A matching hash always replaces (the new memory is at least as
+    /// fresh); non-matching hashes are kept as distinct entries.
     async fn phase_resolve_conflicts(&self, memories: Vec<Memory>) -> Result<Vec<Memory>> {
         let mut kept = Vec::with_capacity(memories.len());
         for mem in memories {
-            // Skip conflict resolution when there's no vector to compare.
-            if mem.vector.is_empty() {
+            // Vector path: embeddings present.
+            if !mem.vector.is_empty() {
+                let similar = self
+                    .store
+                    .search_by_vector(&mem.vector, &mem.tenant_id, 5)
+                    .await?;
+                let mut replaced_existing_id: Option<String> = None;
+                let mut conflict_found = false;
+                for exp in &similar {
+                    if exp.memory_type != mem.memory_type {
+                        continue;
+                    }
+                    // Rehydrate the existing record into a Memory carrying
+                    // the candidate's vector for comparison. The resolver
+                    // reads `existing.vector`, so we must populate it from
+                    // `mem.vector` (the two are near-duplicates by design).
+                    let mut existing_mem = Memory::new(
+                        &mem.tenant_id,
+                        exp.memory_type,
+                        &exp.content,
+                        exp.confidence,
+                    );
+                    existing_mem.id = exp.id.clone();
+                    existing_mem.vector = mem.vector.clone();
+                    let resolution = self.resolver.resolve(&mem, &existing_mem, exp.confidence);
+                    match resolution {
+                        Resolution::ReplaceOld { old_id, .. } => {
+                            replaced_existing_id = Some(old_id);
+                            conflict_found = true;
+                            break;
+                        }
+                        Resolution::KeepBoth => {
+                            conflict_found = true;
+                            break;
+                        }
+                        Resolution::NoConflict => continue,
+                    }
+                }
+                if let Some(old_id) = replaced_existing_id {
+                    self.store.delete(&old_id).await?;
+                    self.metrics
+                        .memories_replaced
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                if conflict_found {
+                    self.metrics
+                        .conflicts_resolved
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 kept.push(mem);
                 continue;
             }
+
+            // Keyword fallback: deduplicate by content hash.
             let existing = self
                 .store
                 .get_by_memory_type(&mem.tenant_id, mem.memory_type)
                 .await?;
-            let mut replaced_existing_id: Option<String> = None;
-            let mut conflict_found = false;
-            let _ = existing;
-            let similar = self
-                .store
-                .search_by_vector(&mem.vector, &mem.tenant_id, 5)
-                .await?;
-            for exp in &similar {
-                if exp.memory_type != mem.memory_type {
-                    continue;
+            let new_hash = content_hash(&mem.content);
+            // Three outcomes: no duplicate (push), duplicate with higher
+            // importance (replace old), duplicate with lower-or-equal
+            // importance (drop candidate).
+            let duplicate = existing.iter().find(|exp| {
+                content_hash(&exp.content) == new_hash && exp.memory_type == mem.memory_type
+            });
+            match duplicate {
+                Some(exp) if mem.importance > exp.confidence => {
+                    self.store.delete(&exp.id).await?;
+                    self.metrics
+                        .memories_replaced
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.metrics
+                        .conflicts_resolved
+                        .fetch_add(1, Ordering::Relaxed);
+                    kept.push(mem);
                 }
-                let existing_mem = Memory::new(
-                    &mem.tenant_id,
-                    exp.memory_type,
-                    &exp.content,
-                    exp.confidence,
-                );
-                let resolution = self.resolver.resolve(&mem, &existing_mem, exp.confidence);
-                match resolution {
-                    Resolution::ReplaceOld { old_id, .. } => {
-                        replaced_existing_id = Some(old_id);
-                        conflict_found = true;
-                        break;
-                    }
-                    Resolution::KeepBoth => {
-                        conflict_found = true;
-                        // Keep both; do not replace.
-                        break;
-                    }
-                    Resolution::NoConflict => continue,
+                Some(_) => {
+                    // Duplicate candidate with lower-or-equal importance: drop it.
+                    self.metrics
+                        .conflicts_resolved
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                None => {
+                    kept.push(mem);
                 }
             }
-            if let Some(old_id) = replaced_existing_id {
-                self.store.delete(&old_id).await?;
-                self.metrics
-                    .memories_replaced
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            if conflict_found {
-                self.metrics
-                    .conflicts_resolved
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            kept.push(mem);
         }
         Ok(kept)
     }
@@ -539,7 +643,7 @@ impl Distiller for PipelineDistiller {
             return Err(e);
         }
 
-        // Phase 5: resolve conflicts.
+        // Phase 6: resolve conflicts.
         let memories = match self.phase_resolve_conflicts(memories).await {
             Ok(m) => m,
             Err(e) => {
@@ -548,16 +652,17 @@ impl Distiller for PipelineDistiller {
             }
         };
 
-        // Phase 6: final top-N.
+        // Phase 7: final top-N.
         let memories = self.phase_final_top_n(memories);
 
-        // Phase 9: sync to store (Phase 8 runs after).
+        // Phase 8: sync to store.
         if let Err(e) = self.phase_sync_to_store(&memories).await {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }
 
-        // Phase 8: enforce capacity control.
+        // Phase 8 (continued): enforce capacity control after the new
+        // records land, so the cap accounts for this distillation's output.
         if let Err(e) = self.phase_enforce_capacity(tenant_id).await {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
             return Err(e);
@@ -596,7 +701,6 @@ pub fn compress_pair(problem: &str, solution: &str) -> String {
     let stripped = problem
         .strip_suffix('?')
         .or_else(|| problem.strip_suffix('？'))
-        .or_else(|| problem.strip_suffix('呢'))
         .map(str::trim)
         .unwrap_or(problem);
 
@@ -604,6 +708,22 @@ pub fn compress_pair(problem: &str, solution: &str) -> String {
     let action = truncate(solution, MAX_SOLUTION);
 
     format!("{core}：{action}")
+}
+
+/// Compute a stable content hash for deduplication.
+///
+/// Uses FNV-1a because it is dependency-free and fast on short strings.
+/// Trims surrounding whitespace so that cosmetic re-formatting does not
+/// defeat the dedup check.
+fn content_hash(s: &str) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut h = FNV_OFFSET;
+    for b in s.trim().as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -5,3 +5,4 @@ plan/
 *.db
 
 .codescope/
+.workbuddy/

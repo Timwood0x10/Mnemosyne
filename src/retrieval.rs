@@ -191,12 +191,12 @@ impl RetrievalEngine {
         if let Some(mt) = memory_type_filter {
             experiences.retain(|e| e.memory_type == mt);
         }
-        let max_sim = 1.0_f64;
         let mut results = Vec::with_capacity(experiences.len());
         for exp in experiences {
-            // sqlite-vec returns results ordered by similarity; we approximate
-            // semantic_score by a linear decay based on rank position.
-            let semantic_score = max_sim; // sqlite-vec already ranked
+            // sqlite-vec reports cosine distance in `[0, 2]`; convert to
+            // similarity in `[0, 1]` so the weighted-fusion formula stays
+            // honest.
+            let semantic_score = (1.0 - exp.distance).clamp(0.0, 1.0);
             let importance = exp.confidence;
             let score = semantic_score * WEIGHT_SEMANTIC + importance * WEIGHT_IMPORTANCE_HYBRID;
             results.push(RetrievalResult {
@@ -229,17 +229,18 @@ impl RetrievalEngine {
             .await?;
         let query_terms = tokenize(query);
 
-        // Build a map of experience id -> semantic score (if embeddings available).
+        // Build a map of experience id -> cosine similarity (if embeddings
+        // available). sqlite-vec reports cosine distance in `[0, 2]`; we
+        // convert to similarity `1.0 - distance`, clamped to `[0, 1]`.
         let mut semantic_map: HashMap<String, f64> = HashMap::new();
         if !query_vec.is_empty() {
             let vector_results = self
                 .store
                 .search_by_vector(&query_vec, tenant_id, candidates.len().max(limit))
                 .await?;
-            for (rank, exp) in vector_results.iter().enumerate() {
-                // Linear decay: top result = 1.0, decaying by rank.
-                let decay = 1.0 / (1.0 + rank as f64);
-                semantic_map.insert(exp.id.clone(), decay);
+            for exp in &vector_results {
+                let similarity = (1.0 - exp.distance).clamp(0.0, 1.0);
+                semantic_map.insert(exp.id.clone(), similarity);
             }
         }
 

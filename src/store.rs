@@ -188,6 +188,8 @@ fn row_to_experience(row: &rusqlite::Row) -> rusqlite::Result<Experience> {
     let metadata_str: String = row.get("metadata").unwrap_or_default();
     let metadata: Metadata = serde_json::from_str(&metadata_str).unwrap_or_default();
 
+    // distance is only present on vector-search joins; default to 0.
+    let distance: f64 = row.get("distance").unwrap_or(0.0);
     Ok(Experience {
         id: row.get("id")?,
         tenant_id: row.get("tenant_id")?,
@@ -204,6 +206,7 @@ fn row_to_experience(row: &rusqlite::Row) -> rusqlite::Result<Experience> {
         ),
         created_at,
         metadata,
+        distance,
     })
 }
 
@@ -334,6 +337,7 @@ impl ExperienceRepository for SQLiteVecStore {
         for row in rows {
             results.push(row?);
         }
+        // results is already ordered by distance ASC by the SQL.
         Ok(results)
     }
 

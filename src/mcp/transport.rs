@@ -50,9 +50,14 @@ impl Default for StdioTransport {
 #[async_trait]
 impl Transport for StdioTransport {
     async fn recv(&mut self) -> Result<Option<JSONRPCMessage>> {
-        // Read one JSON-RPC line synchronously from stdin. The BufReader
-        // over Stdin is Send + Sync, and `read_line` blocks until a newline
-        // or EOF, so no spawn_blocking is needed.
+        // Read one JSON-RPC line synchronously from stdin.
+        //
+        // NOTE: `read_line` is a blocking call executed directly on the
+        // tokio worker thread (no `spawn_blocking`). This is acceptable for
+        // an MCP stdio server because stdin is pipe-fed by the host process
+        // and never blocks for long, but it DOES stall the worker while
+        // waiting. If this transport is ever used in a multi-tenant server
+        // where stdin could be slow, wrap this in `tokio::task::spawn_blocking`.
         let mut line = String::new();
         let n = self
             .stdin

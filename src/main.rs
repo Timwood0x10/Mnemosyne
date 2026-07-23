@@ -263,8 +263,12 @@ impl ToolHandler for MemoryCompileTool {
         let recent_count = std::cmp::min(messages.len(), 6);
         let prompt = builder.build(&messages[messages.len() - recent_count..], &compiled);
 
-        // Optionally run distillation
-        let distill = args.get("distill").and_then(Value::as_bool).unwrap_or(true);
+        // Optionally run distillation. Default is false, matching the MCP
+        // tool schema's declared default — callers must opt in explicitly.
+        let distill = args
+            .get("distill")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         let memories = if distill {
             match &self.distiller {
                 Some(d) => {
@@ -281,10 +285,35 @@ impl ToolHandler for MemoryCompileTool {
                     // Run distillation pipeline — persists knowledge memories
                     let memories = d.distill(conv_id, &messages, tenant_id, user_id).await?;
 
-                    // Also persist decisions as Knowledge-type memories
+                    // Also persist decisions as Knowledge-type memories.
+                    // Each decision goes through the same security gate as
+                    // the distiller (Phase 2) and is deduplicated against
+                    // existing knowledge memories by content hash, so that
+                    // re-stated decisions don't stack up unbounded.
+                    let noise_filter = memory_distill::filter::NoiseFilter::new();
+                    let security_filter = memory_distill::filter::SecurityFilter::new();
+                    let existing = d
+                        .store()
+                        .get_by_memory_type(tenant_id, MemoryType::Knowledge)
+                        .await?;
                     for dec in &compiled.decisions {
                         let content =
                             format!("Decision: {} — Rationale: {}", dec.decision, dec.rationale);
+                        let probe = Message::new("user", &content);
+                        if security_filter.is_sensitive(&probe) {
+                            // Skip decisions that look like secrets.
+                            continue;
+                        }
+                        if noise_filter.is_noise(&probe) {
+                            // Skip decisions that are pure chatter.
+                            continue;
+                        }
+                        // Deduplicate: if a knowledge memory with identical
+                        // content already exists, skip the insert.
+                        let dup = existing.iter().any(|e| e.content == content);
+                        if dup {
+                            continue;
+                        }
                         let mut exp = Experience::new(
                             tenant_id,
                             MemoryType::Knowledge,

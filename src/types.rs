@@ -181,6 +181,12 @@ pub struct Experience {
     /// Free-form metadata bag (JSON object in storage).
     #[serde(default, skip_serializing_if = "Metadata::is_empty")]
     pub metadata: Metadata,
+    /// Cosine distance reported by sqlite-vec for vector searches.
+    ///
+    /// Populated only by [`crate::store::SQLiteVecStore::search_by_vector`];
+    /// zero otherwise. Convert to similarity with `1.0 - distance`.
+    #[serde(default)]
+    pub distance: f64,
 }
 
 impl Experience {
@@ -206,6 +212,7 @@ impl Experience {
             extraction_method: ExtractionMethod::Direct,
             created_at: Utc::now(),
             metadata: Metadata::default(),
+            distance: 0.0,
         }
     }
 }

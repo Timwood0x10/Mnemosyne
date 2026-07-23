@@ -17,6 +17,10 @@ pub const MAX_MESSAGE_LENGTH: usize = 8_000;
 pub const MIN_MEANINGFUL_LENGTH: usize = 8;
 
 /// Phrases that mark an utterance as social chatter, not a problem.
+///
+/// Matching is boundary-aware: a phrase matches only if it is followed by
+/// end-of-string or a non-alphanumeric character (whitespace, punctuation).
+/// This prevents `"hi"` from swallowing `"hi, how do I parse JSON?"`.
 const CHATTER_PHRASES: &[&str] = &[
     "thank you",
     "thanks",
@@ -28,7 +32,7 @@ const CHATTER_PHRASES: &[&str] = &[
     "got it",
     "sounds good",
     "hello",
-    "hi ",
+    "hi",
     "hey",
     "bye",
     "lol",
@@ -40,6 +44,22 @@ const CHATTER_PHRASES: &[&str] = &[
     "yes please",
     "no thanks",
 ];
+
+/// Boundary-aware prefix match for chatter phrases.
+///
+/// Returns `true` when `text` starts with `phrase` AND the next character
+/// (if any) is non-alphanumeric. This treats `"hi there"` as chatter but
+/// lets `"hi, how do I parse JSON?"` pass through.
+#[must_use]
+fn matches_chatter_prefix(text: &str, phrase: &str) -> bool {
+    if !text.starts_with(phrase) {
+        return false;
+    }
+    match text[phrase.len()..].chars().next() {
+        None => true,
+        Some(c) => !c.is_alphanumeric(),
+    }
+}
 
 /// Noise filter — rejects chatter and over-long/short messages.
 #[derive(Debug, Clone, Copy, Default)]
@@ -72,7 +92,10 @@ impl NoiseFilter {
             return true;
         }
         let lower = trimmed.to_lowercase();
-        if CHATTER_PHRASES.iter().any(|p| lower.starts_with(p)) {
+        if CHATTER_PHRASES
+            .iter()
+            .any(|p| matches_chatter_prefix(&lower, p))
+        {
             return true;
         }
         false

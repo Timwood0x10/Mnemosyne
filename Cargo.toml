@@ -5,6 +5,11 @@ edition = "2024"
 authors = ["TimWood"]
 description = "Memory Distillation MCP Server - extracts and distills memories from conversations"
 license = "Apache-2.0"
+repository = "https://github.com/TimWood/memory_distill"
+homepage = "https://github.com/TimWood/memory_distill"
+documentation = "https://github.com/TimWood/memory_distill#readme"
+keywords = ["mcp", "memory", "llm", "agent", "sqlite-vec"]
+categories = ["asynchronous", "database-implementations"]
 
 [lib]
 name = "memory_distill"

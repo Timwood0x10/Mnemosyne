@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json.schemastore.org/claude-desktop-config.json",
+  "mcpServers": {
+    "cognitive-memory": {
+      "command": "cargo",
+      "args": [
+        "run",
+        "--bin",
+        "memory-mcp",
+        "--",
+        "serve",
+        "--embedding-provider",
+        "none",
+        "--retrieval-mode",
+        "keyword",
+        "--db-path",
+        "${HOME}/.cognitive-memory/memory.db"
+      ],
+      "env": {
+        "RUST_LOG": "memory_distill=info"
+      }
+    }
+  },
+  "_comment_embedded": "To enable vector search, set embedding-provider to 'openai' or 'ollama', supply MEMORY_EMBEDDING_URL (and MEMORY_OPENAI_API_KEY for OpenAI), and bump MEMORY_VECTOR_DIM to match your embedding model (e.g. 1536 for OpenAI text-embedding-3-small).",
+  "_comment_rebuild": "Cargo rebuilds on every launch when invoked via 'cargo run'. For a faster cold start, replace 'cargo' with the absolute path to your release binary ('/path/to/memory-mcp') after 'cargo build --release', and drop the 'run --bin memory-mcp --' prefix from args.",
+  "_comment_dim": "MEMORY_VECTOR_DIM defaults to 1024. It must equal the dimension of your embedding model AND match the dimension used when the database was first created — changing it after the DB exists will not migrate existing vectors."
+}
