@@ -201,10 +201,10 @@ impl LruTenantLocks {
         }
 
         // Evict the least-recently-used entry if we are about to overflow.
-        if self.entries.len() >= self.cap {
-            if let Some(evicted) = self.order.pop_front() {
-                self.entries.remove(&evicted);
-            }
+        if self.entries.len() >= self.cap
+            && let Some(evicted) = self.order.pop_front()
+        {
+            self.entries.remove(&evicted);
         }
 
         let arc = Arc::new(Mutex::new(()));

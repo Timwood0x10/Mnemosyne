@@ -48,7 +48,7 @@ chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"], default-features = false, optional = true }
 
 # SQLite + sqlite-vec for vector search
-rusqlite = { version = "0.34", features = ["bundled"] }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 sqlite-vec = "0.1"
 
 # CLI
