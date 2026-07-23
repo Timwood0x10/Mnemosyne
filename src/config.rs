@@ -200,9 +200,10 @@ impl Config {
             cfg.db_path = v;
         }
         if let Ok(v) = std::env::var("MEMORY_VECTOR_DIM")
-            && let Ok(dim) = v.parse::<usize>() {
-                cfg.vector_dim = dim;
-            }
+            && let Ok(dim) = v.parse::<usize>()
+        {
+            cfg.vector_dim = dim;
+        }
         if let Ok(v) = std::env::var("MEMORY_EMBEDDING_URL") {
             cfg.embedding_url = v;
         }
@@ -210,40 +211,48 @@ impl Config {
             cfg.embedding_model = v;
         }
         if let Ok(v) = std::env::var("MEMORY_EMBEDDING_TIMEOUT_MS")
-            && let Ok(ms) = v.parse::<u64>() {
-                cfg.embedding_timeout = Duration::from_millis(ms);
-            }
+            && let Ok(ms) = v.parse::<u64>()
+        {
+            cfg.embedding_timeout = Duration::from_millis(ms);
+        }
         if let Ok(v) = std::env::var("MEMORY_MIN_IMPORTANCE")
-            && let Ok(f) = v.parse::<f64>() {
-                cfg.min_importance = f;
-            }
+            && let Ok(f) = v.parse::<f64>()
+        {
+            cfg.min_importance = f;
+        }
         if let Ok(v) = std::env::var("MEMORY_CONFLICT_THRESHOLD")
-            && let Ok(f) = v.parse::<f64>() {
-                cfg.conflict_threshold = f;
-            }
+            && let Ok(f) = v.parse::<f64>()
+        {
+            cfg.conflict_threshold = f;
+        }
         if let Ok(v) = std::env::var("MEMORY_MAX_PER_DISTILL")
-            && let Ok(n) = v.parse::<usize>() {
-                cfg.max_memories_per_distillation = n;
-            }
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.max_memories_per_distillation = n;
+        }
         if let Ok(v) = std::env::var("MEMORY_MAX_SOLUTIONS")
-            && let Ok(n) = v.parse::<usize>() {
-                cfg.max_solutions_per_tenant = n;
-            }
+            && let Ok(n) = v.parse::<usize>()
+        {
+            cfg.max_solutions_per_tenant = n;
+        }
         if let Ok(v) = std::env::var("MEMORY_DISABLE_CROSS_TURN")
-            && (v == "1" || v.eq_ignore_ascii_case("true")) {
-                cfg.enable_cross_turn = false;
-            }
+            && (v == "1" || v.eq_ignore_ascii_case("true"))
+        {
+            cfg.enable_cross_turn = false;
+        }
         if let Ok(v) = std::env::var("MEMORY_SSE_ADDR") {
             cfg.sse_addr = v;
         }
         if let Ok(v) = std::env::var("MEMORY_EMBEDDING_PROVIDER")
-            && let Ok(p) = v.parse::<EmbeddingProvider>() {
-                cfg.embedding_provider = p;
-            }
+            && let Ok(p) = v.parse::<EmbeddingProvider>()
+        {
+            cfg.embedding_provider = p;
+        }
         if let Ok(v) = std::env::var("MEMORY_RETRIEVAL_MODE")
-            && let Ok(m) = v.parse::<RetrievalMode>() {
-                cfg.retrieval_mode = m;
-            }
+            && let Ok(m) = v.parse::<RetrievalMode>()
+        {
+            cfg.retrieval_mode = m;
+        }
         if let Ok(v) = std::env::var("MEMORY_OPENAI_API_KEY") {
             cfg.openai_api_key = Some(v);
         }

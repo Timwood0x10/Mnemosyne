@@ -19,6 +19,7 @@ use memory_distill::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
 use memory_distill::error::Error;
 use memory_distill::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use memory_distill::mcp::{MCPServer, ServerBuilder, StdioTransport};
+use memory_distill::prompt::PromptBuilder;
 use memory_distill::retrieval::RetrievalEngine;
 use memory_distill::store::{ExperienceRepository, SQLiteVecStore};
 use memory_distill::types::{Experience, MemoryType, Message};
@@ -240,7 +241,10 @@ fn build_retrieval_engine(
 }
 
 /// Tool: compile conversation into structured state (`memory_compile`).
-struct MemoryCompileTool;
+/// Optionally distills and builds a reconstruction prompt.
+struct MemoryCompileTool {
+    distiller: Option<Arc<PipelineDistiller>>,
+}
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryCompileTool {
@@ -254,7 +258,58 @@ impl ToolHandler for MemoryCompileTool {
         let compiler = ConversationCompiler::new();
         let compiled = compiler.compile(&messages);
 
-        let payload = serde_json::json!(compiled);
+        // Build reconstruction prompt
+        let builder = PromptBuilder;
+        let recent_count = std::cmp::min(messages.len(), 6);
+        let prompt = builder.build(&messages[messages.len() - recent_count..], &compiled);
+
+        // Optionally run distillation
+        let distill = args.get("distill").and_then(Value::as_bool).unwrap_or(true);
+        let memories = if distill {
+            match &self.distiller {
+                Some(d) => {
+                    let conv_id = args
+                        .get("conversation_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("compile");
+                    let tenant_id = args
+                        .get("tenant_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("default");
+                    let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
+
+                    // Run distillation pipeline — persists knowledge memories
+                    let memories = d.distill(conv_id, &messages, tenant_id, user_id).await?;
+
+                    // Also persist decisions as Knowledge-type memories
+                    for dec in &compiled.decisions {
+                        let content =
+                            format!("Decision: {} — Rationale: {}", dec.decision, dec.rationale);
+                        let mut exp = Experience::new(
+                            tenant_id,
+                            MemoryType::Knowledge,
+                            content,
+                            dec.importance,
+                        );
+                        exp.source = "compile".to_string();
+                        d.store().create(&exp).await?;
+                    }
+
+                    Some(memories)
+                }
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        let payload = serde_json::json!({
+            "knowledge": compiled.knowledge,
+            "decisions": compiled.decisions,
+            "session": compiled.session,
+            "prompt": prompt,
+            "distilled_memories": memories,
+        });
         Ok(ToolCallResult::text(payload.to_string()))
     }
 }
@@ -418,7 +473,7 @@ async fn build_server(
         .tool(
             ToolDefinition {
                 name: "memory_compile".into(),
-                description: "Compile conversation into structured knowledge + decisions + session state".into(),
+                description: "Compile conversation into structured knowledge + decisions + session state. Optionally distill memories.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -432,12 +487,18 @@ async fn build_server(
                                 },
                                 "required": ["role", "content"]
                             }
-                        }
+                        },
+                        "distill": {"type": "boolean", "default": false, "description": "Also run distillation pipeline"},
+                        "conversation_id": {"type": "string", "description": "Required when distill=true"},
+                        "tenant_id": {"type": "string", "default": "default"},
+                        "user_id": {"type": "string"}
                     },
                     "required": ["messages"]
                 }),
             },
-            Arc::new(MemoryCompileTool),
+            Arc::new(MemoryCompileTool {
+                distiller: Some(distiller.clone()),
+            }),
         )
         .await;
 

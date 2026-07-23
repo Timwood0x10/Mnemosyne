@@ -3,11 +3,11 @@ use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use tokio::sync::Mutex;
 
 use crate::error::{Result, StorageError};
-use crate::types::{Experience, MemoryType, Metadata, ExtractionMethod};
+use crate::types::{Experience, ExtractionMethod, MemoryType, Metadata};
 
 static SQLITE_VEC_INIT: OnceLock<()> = OnceLock::new();
 
@@ -83,8 +83,17 @@ pub trait ExperienceRepository: Send + Sync {
     async fn update(&self, exp: &Experience) -> Result<()>;
     async fn delete(&self, id: &str) -> Result<()>;
     async fn delete_batch(&self, ids: &[String]) -> Result<()>;
-    async fn search_by_vector(&self, query_embedding: &[f32], tenant_id: &str, limit: usize) -> Result<Vec<Experience>>;
-    async fn get_by_memory_type(&self, tenant_id: &str, memory_type: MemoryType) -> Result<Vec<Experience>>;
+    async fn search_by_vector(
+        &self,
+        query_embedding: &[f32],
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Experience>>;
+    async fn get_by_memory_type(
+        &self,
+        tenant_id: &str,
+        memory_type: MemoryType,
+    ) -> Result<Vec<Experience>>;
     async fn count_by_memory_type(&self, tenant_id: &str, memory_type: MemoryType) -> Result<i64>;
     async fn count_for_tenant(&self, tenant_id: &str) -> Result<i64>;
     async fn counts_by_type(&self, tenant_id: &str) -> Result<Vec<(MemoryType, i64)>>;
@@ -109,8 +118,8 @@ impl SQLiteVecStore {
         if dim == 0 {
             return Err(StorageError::Schema("dimension must be > 0".into()).into());
         }
-        let conn = Connection::open(path)
-            .map_err(|e| StorageError::Schema(format!("open: {e}")))?;
+        let conn =
+            Connection::open(path).map_err(|e| StorageError::Schema(format!("open: {e}")))?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             dim,
@@ -202,8 +211,7 @@ impl ExperienceRepository for SQLiteVecStore {
 
     async fn get(&self, id: &str) -> Result<Option<Experience>> {
         let conn = self.conn.lock().await;
-        let mut stmt = conn
-            .prepare("SELECT * FROM memories WHERE id = ?1")?;
+        let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
         let mut rows = stmt.query_map(params![id], row_to_experience)?;
         match rows.next() {
             Some(Ok(exp)) => Ok(Some(exp)),
@@ -242,10 +250,7 @@ impl ExperienceRepository for SQLiteVecStore {
 
     async fn delete(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().await;
-        let affected = conn.execute(
-            "DELETE FROM memories WHERE id = ?1",
-            params![id],
-        )?;
+        let affected = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
         if affected == 0 {
             return Err(StorageError::NotFound(id.to_string()).into());
         }
@@ -265,12 +270,18 @@ impl ExperienceRepository for SQLiteVecStore {
         Ok(())
     }
 
-    async fn search_by_vector(&self, query_embedding: &[f32], tenant_id: &str, limit: usize) -> Result<Vec<Experience>> {
+    async fn search_by_vector(
+        &self,
+        query_embedding: &[f32],
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<Vec<Experience>> {
         if query_embedding.len() != self.dim {
             return Err(StorageError::DimensionMismatch {
                 expected: self.dim,
                 actual: query_embedding.len(),
-            }.into());
+            }
+            .into());
         }
         let conn = self.conn.lock().await;
         let vec_json = serde_json::to_string(&query_embedding)
@@ -283,7 +294,10 @@ impl ExperienceRepository for SQLiteVecStore {
                    ORDER BY v.distance ASC
                    LIMIT ?2";
         let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map(params![vec_json, limit as i64, tenant_id], row_to_experience)?;
+        let rows = stmt.query_map(
+            params![vec_json, limit as i64, tenant_id],
+            row_to_experience,
+        )?;
 
         let mut results = Vec::new();
         for row in rows {
@@ -292,7 +306,11 @@ impl ExperienceRepository for SQLiteVecStore {
         Ok(results)
     }
 
-    async fn get_by_memory_type(&self, tenant_id: &str, memory_type: MemoryType) -> Result<Vec<Experience>> {
+    async fn get_by_memory_type(
+        &self,
+        tenant_id: &str,
+        memory_type: MemoryType,
+    ) -> Result<Vec<Experience>> {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(
             "SELECT * FROM memories WHERE tenant_id = ?1 AND memory_type = ?2 ORDER BY created_at DESC"
@@ -360,7 +378,10 @@ mod tests {
     #[tokio::test]
     async fn open_with_zero_dim_fails() {
         let err = SQLiteVecStore::open_in_memory(0).await.unwrap_err();
-        assert!(err.to_string().contains("dimension"), "zero dim should fail");
+        assert!(
+            err.to_string().contains("dimension"),
+            "zero dim should fail"
+        );
     }
 
     #[tokio::test]
@@ -387,7 +408,10 @@ mod tests {
         exp.vector = vec![1.0_f32, 0.0, 0.0, 0.0];
         store.create(&exp).await.expect("create");
 
-        let results = store.search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 5).await.expect("search");
+        let results = store
+            .search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 5)
+            .await
+            .expect("search");
         assert!(!results.is_empty(), "should find at least one result");
         assert_eq!(results[0].id, exp.id);
     }
@@ -402,14 +426,20 @@ mod tests {
         e2.vector = vec![1.0_f32, 0.0, 0.0, 0.0];
         store.create(&e2).await.expect("create");
 
-        let r1 = store.search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 5).await.expect("search");
+        let r1 = store
+            .search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 5)
+            .await
+            .expect("search");
         assert!(r1.iter().all(|e| e.tenant_id == "t1"), "only t1 results");
     }
 
     #[tokio::test]
     async fn search_rejects_dimension_mismatch() {
         let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
-        let err = store.search_by_vector(&[1.0_f32, 0.0, 0.0], "t1", 5).await.unwrap_err();
+        let err = store
+            .search_by_vector(&[1.0_f32, 0.0, 0.0], "t1", 5)
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("dim"), "dim mismatch should error");
     }
 
@@ -443,16 +473,31 @@ mod tests {
     #[tokio::test]
     async fn delete_batch_empty_noop() {
         let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
-        store.delete_batch(&[]).await.expect("empty batch should not error");
+        store
+            .delete_batch(&[])
+            .await
+            .expect("empty batch should not error");
     }
 
     #[tokio::test]
     async fn get_by_memory_type_filters() {
         let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
-        store.create(&sample_exp("t1", MemoryType::Knowledge, "k")).await.expect("create");
-        store.create(&sample_exp("t1", MemoryType::Preference, "p")).await.expect("create");
-        let k = store.get_by_memory_type("t1", MemoryType::Knowledge).await.expect("get");
-        let p = store.get_by_memory_type("t1", MemoryType::Preference).await.expect("get");
+        store
+            .create(&sample_exp("t1", MemoryType::Knowledge, "k"))
+            .await
+            .expect("create");
+        store
+            .create(&sample_exp("t1", MemoryType::Preference, "p"))
+            .await
+            .expect("create");
+        let k = store
+            .get_by_memory_type("t1", MemoryType::Knowledge)
+            .await
+            .expect("get");
+        let p = store
+            .get_by_memory_type("t1", MemoryType::Preference)
+            .await
+            .expect("get");
         assert_eq!(k.len(), 1, "one knowledge");
         assert_eq!(p.len(), 1, "one preference");
     }
@@ -463,7 +508,10 @@ mod tests {
         let mut exp = sample_exp("t1", MemoryType::Knowledge, "rust");
         exp.vector = vec![1.0_f32, 0.0, 0.0, 0.0];
         store.create(&exp).await.expect("create");
-        let results = store.search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 10).await.expect("search");
+        let results = store
+            .search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 10)
+            .await
+            .expect("search");
         assert!(!results.is_empty(), "should find created memory");
     }
 }

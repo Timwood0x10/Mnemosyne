@@ -274,8 +274,8 @@ impl MCPServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
     use crate::mcp::ToolCallResult;
+    use async_trait::async_trait;
 
     /// A test transport that yields pre-loaded messages and collects
     /// responses for assertions.

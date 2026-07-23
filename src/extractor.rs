@@ -103,15 +103,16 @@ impl ExperienceExtractor {
 
             // Cross-turn: assistant asks for clarification, real answer follows.
             if self.cfg.enable_cross_turn
-                && let Some(exp) = self.try_cross_turn_extract(messages, i) {
-                    out.push(exp);
-                    // Skip past the second assistant message.
-                    i = self
-                        .next_after(messages, i + 1, "assistant")
-                        .unwrap_or(messages.len())
-                        + 1;
-                    continue;
-                }
+                && let Some(exp) = self.try_cross_turn_extract(messages, i)
+            {
+                out.push(exp);
+                // Skip past the second assistant message.
+                i = self
+                    .next_after(messages, i + 1, "assistant")
+                    .unwrap_or(messages.len())
+                    + 1;
+                continue;
+            }
 
             i += 1;
         }

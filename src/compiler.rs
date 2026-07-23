@@ -1,28 +1,30 @@
 use std::collections::HashSet;
 
 use crate::classifier::MemoryClassifier;
-use crate::extractor::{ExperienceExtractor, ExtractorConfig, RawExperience};
+use crate::extractor::{ExperienceExtractor, ExtractorConfig};
 use crate::filter::NoiseFilter;
 use crate::scorer::ImportanceScorer;
 use crate::types::{
-    CompiledConversation, Decision, Memory, MemoryType, Message, SessionState,
+    CompiledConversation, Decision, Memory, MemoryType, Message, ReasoningStep, SessionState,
 };
 
 static MODULE_NAMES: &[&str] = &[
-    "compiler", "distiller", "store", "detector", "prompt", "classifier",
-    "scorer", "extractor", "filter", "resolver", "embed", "retrieval",
-    "mcp", "types", "config", "error",
-];
-static FILE_PATTERNS: &[&str] = &[
-    ".rs", ".toml", ".md", ".json", ".yaml", ".lock",
-];
-static TODO_PHRASES: &[&str] = &[
-    "还要", "还需要", "接下来", "下一步", "待办", "剩下的", "未完成",
-    "后续", "还有", "todo", "TODO", "to do", "下一步要",
-];
-static PROBLEM_PHRASES: &[&str] = &[
-    "报错", "失败", "不工作", "坏了", "有问题", "不对", "不行",
-    "错误", "bug", "issue", "问题", "怎么修", "怎么改",
+    "compiler",
+    "distiller",
+    "store",
+    "detector",
+    "prompt",
+    "classifier",
+    "scorer",
+    "extractor",
+    "filter",
+    "resolver",
+    "embed",
+    "retrieval",
+    "mcp",
+    "types",
+    "config",
+    "error",
 ];
 
 pub struct ConversationCompiler {
@@ -35,7 +37,9 @@ pub struct ConversationCompiler {
 impl ConversationCompiler {
     pub fn new() -> Self {
         Self {
-            extractor: ExperienceExtractor::new(ExtractorConfig { enable_cross_turn: true }),
+            extractor: ExperienceExtractor::new(ExtractorConfig {
+                enable_cross_turn: true,
+            }),
             classifier: MemoryClassifier::new(),
             scorer: ImportanceScorer::new(),
             filter: NoiseFilter::new(),
@@ -47,36 +51,130 @@ impl ConversationCompiler {
         let mut decisions: Vec<Decision> = Vec::new();
         let mut session = SessionState::default();
         let mut seen_files = HashSet::new();
-        let mut seen_modules = HashSet::new();
-        let mut resolved_problems: HashSet<String> = HashSet::new();
-        let mut unresolved_problems: HashSet<String> = HashSet::new();
+        let mut unresolved_problems: Vec<String> = Vec::new();
 
-        for window in messages.windows(2) {
-            let (a, b) = (&window[0], &window[1]);
-            if a.is_user() && b.is_assistant() {
-                resolved_problems.insert(a.content.clone());
+        // Pass 1: extract reasoning chain from structured Message fields.
+        // Pattern: user(trigger) → assistant(tool_invocation) → tool(status) → assistant(reasoning)
+        for (i, msg) in messages.iter().enumerate() {
+            // Look for a user message that is followed by a tool invocation
+            if !msg.is_user() {
+                continue;
             }
+            let next = messages.get(i + 1);
+            let inv = match next.and_then(|m| m.tool_invocation.as_ref()) {
+                Some(inv) => inv,
+                None => continue,
+            };
+            // Find the tool result that follows
+            let rest = &messages[i + 2..];
+            let tool_result = rest.iter().find(|m| m.tool_call_id.is_some());
+            let status = match tool_result {
+                Some(r) if r.content.contains("error") || r.content.contains("failed") => "error",
+                Some(_) => "ok",
+                None => "timeout",
+            };
+            // Find the assistant response after the tool result
+            let after_result = rest
+                .iter()
+                .skip_while(|m| m.tool_call_id.is_none())
+                .skip(1)
+                .find(|m| m.is_assistant());
+            let reasoning = after_result.map(|m| m.content.clone()).unwrap_or_default();
+            session.reasoning_chain.push(ReasoningStep {
+                trigger: msg.content.clone(),
+                tool_name: inv.name.clone(),
+                tool_args: inv.arguments.clone(),
+                status: status.to_string(),
+                reasoning,
+            });
+        }
+        // Keep only the last 5 reasoning steps
+        if session.reasoning_chain.len() > 5 {
+            session.reasoning_chain = session
+                .reasoning_chain
+                .split_off(session.reasoning_chain.len() - 5);
         }
 
+        // Pass 2: detect session state from user messages.
         for msg in messages {
+            if !msg.is_user() {
+                continue;
+            }
             let c = &msg.content;
 
-            if msg.is_user() {
-                self.extract_goal(c, &mut session);
-                self.extract_files(c, &mut seen_files, &mut session);
-                self.extract_modules(c, &mut seen_modules, &mut session);
-                self.extract_todo(c, &mut session);
+            // Goal: first substantive user message that isn't a greeting
+            if session.current_goal.is_empty()
+                && c.len() > 15
+                && !c.to_lowercase().starts_with("thanks")
+                && !c.starts_with("好的")
+            {
+                let goal: String = c.chars().take(100).collect();
+                session.current_goal = goal;
+            }
 
-                if !resolved_problems.contains(c)
-                    && PROBLEM_PHRASES.iter().any(|p| c.contains(p))
+            // Files: scan for known extensions
+            for word in c.split(|c: char| {
+                c.is_whitespace()
+                    || c == '，'
+                    || c == '。'
+                    || c == '、'
+                    || c == '？'
+                    || c == '?'
+                    || c == '）'
+                    || c == '('
+                    || c == ')'
+                    || c == ','
+                    || c == ';'
+            }) {
+                let cleaned: String = word
+                    .chars()
+                    .filter(|c| {
+                        c.is_ascii_alphanumeric()
+                            || *c == '.'
+                            || *c == '_'
+                            || *c == '-'
+                            || *c == '/'
+                    })
+                    .collect();
+                if cleaned.len() >= 4
+                    && !seen_files.contains(&cleaned)
+                    && [".rs", ".go", ".ts", ".py", ".toml", ".json", ".yaml", ".md"]
+                        .iter()
+                        .any(|ext| cleaned.ends_with(ext))
                 {
-                    unresolved_problems.insert(c.clone());
+                    seen_files.insert(cleaned.clone());
+                    session.current_files.push(cleaned);
                 }
             }
         }
 
-        session.open_problems = unresolved_problems.into_iter().collect();
+        // Module: scan all messages for known names
+        session.current_module = messages
+            .iter()
+            .filter_map(|m| {
+                MODULE_NAMES
+                    .iter()
+                    .find(|&&mod_name| m.content.contains(mod_name))
+                    .copied()
+            })
+            .next()
+            .unwrap_or("")
+            .to_string();
 
+        // Open problems: user messages that got no assistant reply
+        let answered: HashSet<&str> = messages
+            .windows(2)
+            .filter(|w| w[0].is_user() && w[1].is_assistant())
+            .map(|w| w[0].content.as_str())
+            .collect();
+        for msg in messages {
+            if msg.is_user() && !answered.contains(msg.content.as_str()) {
+                unresolved_problems.push(msg.content.clone());
+            }
+        }
+        session.open_problems = unresolved_problems.iter().take(5).cloned().collect();
+
+        // Pass 2: extract knowledge via pipeline
         let filtered: Vec<Message> = messages
             .iter()
             .filter(|m| !self.filter.is_noise(m))
@@ -97,95 +195,66 @@ impl ConversationCompiler {
                 knowledge.push(mem);
             }
 
-            self.extract_decisions(raw, &mut decisions);
+            // Decision detection: solution mentions an action was taken
+            let sol_lower = raw.solution.to_lowercase();
+            let is_decision = sol_lower.contains("done")
+                || sol_lower.contains("implemented")
+                || sol_lower.contains("replaced")
+                || sol_lower.contains("已")
+                || sol_lower.contains("完成");
+            let prob_lower = raw.problem.to_lowercase();
+            let has_replacement = prob_lower.contains("replace")
+                || prob_lower.contains("换成")
+                || prob_lower.contains("改用");
+
+            if is_decision || has_replacement {
+                let module = raw
+                    .problem
+                    .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
+                    .filter(|w| !w.is_empty())
+                    .find(|w| MODULE_NAMES.contains(w))
+                    .unwrap_or("general")
+                    .to_string();
+                decisions.push(Decision {
+                    decision: raw.problem.clone(),
+                    rationale: raw.solution.clone(),
+                    module,
+                    importance: if is_decision { 0.9 } else { 0.7 },
+                });
+            }
         }
 
-        decisions.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
-        session.recent_decisions = decisions.iter().take(5).map(|d| d.decision.clone()).collect();
+        decisions.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        session.recent_decisions = decisions
+            .iter()
+            .take(3)
+            .map(|d| d.decision.clone())
+            .collect();
+
+        // Dedup + sort knowledge
+        let mut seen = HashSet::new();
+        knowledge.retain(|mem| {
+            let key = if let Some((p, _)) = mem.summary.split_once('：') {
+                p.to_string()
+            } else {
+                mem.summary.chars().take(40).collect()
+            };
+            seen.insert(key)
+        });
+        knowledge.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         CompiledConversation {
             knowledge,
             decisions,
             session,
-        }
-    }
-
-    fn extract_goal(&self, c: &str, state: &mut SessionState) {
-        let prefixes = [
-            "现在目标是", "当前目标是", "现在要", "接下来要", "接下来需要",
-            "需要实现", "帮我写", "帮我实现", "我的目标是", "我想",
-            "我要", "现在需要", "帮我",
-        ];
-        for p in &prefixes {
-            if let Some(rest) = c.strip_prefix(p) {
-                let goal = rest.trim().trim_end_matches('？').trim_end_matches('?');
-                if !goal.is_empty() {
-                    state.current_goal = goal.to_string();
-                    return;
-                }
-            }
-        }
-
-        let markers = ["把", "改为", "替换成", "加上", "实现", "写一个", "创建", "改成", "加一个"];
-        for m in &markers {
-            if let Some(pos) = c.find(m) {
-                let goal = &c[pos..];
-                let goal = goal.trim_end_matches('？').trim_end_matches('?');
-                state.current_goal = goal.to_string();
-                return;
-            }
-        }
-    }
-
-    fn extract_files(&self, c: &str, seen: &mut HashSet<String>, state: &mut SessionState) {
-        for word in c.split(|c: char| c.is_whitespace() || c == '，' || c == '。' || c == '、' || c == '？' || c == '?' || c == '）' || c == '(' || c == ')') {
-            let cleaned: String = word.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '_' || *c == '-').collect();
-            if cleaned.len() >= 4 && FILE_PATTERNS.iter().any(|ext| cleaned.ends_with(ext)) && !seen.contains(&cleaned) {
-                seen.insert(cleaned.clone());
-                state.current_files.push(cleaned);
-            }
-        }
-    }
-
-    fn extract_modules(&self, c: &str, seen: &mut HashSet<String>, state: &mut SessionState) {
-        for m in MODULE_NAMES {
-            if c.contains(m) && !seen.contains(*m) {
-                seen.insert(m.to_string());
-                state.current_module = m.to_string();
-            }
-        }
-    }
-
-    fn extract_todo(&self, c: &str, state: &mut SessionState) {
-        if TODO_PHRASES.iter().any(|p| c.contains(p)) {
-            state.todo.push(c.to_string());
-        }
-    }
-
-    fn extract_decisions(&self, raw: &RawExperience, decisions: &mut Vec<Decision>) {
-        let decision_markers = [
-            "换成", "改用", "替换", "改用", "决定", "decided",
-            "replace", "switch", "改为", "改成",
-        ];
-        let is_decision = decision_markers
-            .iter()
-            .any(|m| raw.problem.contains(m) || raw.solution.contains(m));
-
-        if is_decision {
-            let module = raw
-                .problem
-                .split(|c: char| !c.is_alphanumeric() && c != '_' && c != '.')
-                .filter(|w| !w.is_empty())
-                .find(|w| MODULE_NAMES.contains(w))
-                .unwrap_or("general")
-                .to_string();
-
-            decisions.push(Decision {
-                decision: raw.problem.clone(),
-                rationale: raw.solution.clone(),
-                module,
-                importance: 0.8,
-            });
         }
     }
 }
@@ -204,84 +273,84 @@ mod tests {
     fn compile_extracts_knowledge() {
         let compiler = ConversationCompiler::new();
         let msgs = vec![
-            Message::new("user", "为什么编译那么慢？怎么换成sqlite-vec？"),
-            Message::new("assistant", "因为lancedb的polars feature太重了，换成sqlite-vec即可"),
+            Message::new("user", "为什么编译那么慢？"),
+            Message::new("assistant", "因为lancedb太重"),
         ];
-        let result = compiler.compile(&msgs);
-        assert!(!result.knowledge.is_empty());
-        assert!(result.knowledge[0].summary.contains("sqlite-vec"));
+        let r = compiler.compile(&msgs);
+        assert!(!r.knowledge.is_empty());
     }
 
     #[test]
-    fn compile_extracts_decisions() {
+    fn compile_tracks_files() {
+        let compiler = ConversationCompiler::new();
+        let msgs = vec![Message::new("user", "修改compiler.rs 和 prompt.rs")];
+        let r = compiler.compile(&msgs);
+        assert!(r.session.current_files.contains(&"compiler.rs".to_string()));
+        assert!(r.session.current_files.contains(&"prompt.rs".to_string()));
+    }
+
+    #[test]
+    fn compile_first_user_msg_is_goal() {
+        let compiler = ConversationCompiler::new();
+        let msgs = vec![
+            Message::new("user", "帮我实现prompt模块"),
+            Message::new("assistant", "好的"),
+        ];
+        let r = compiler.compile(&msgs);
+        assert!(r.session.current_goal.contains("prompt"));
+    }
+
+    #[test]
+    fn compile_unanswered_is_open_problem() {
+        let compiler = ConversationCompiler::new();
+        let msgs = vec![
+            Message::new("user", "有个bug"),
+            Message::new("assistant", "修好了"),
+            Message::new("user", "性能太差"),
+        ];
+        let r = compiler.compile(&msgs);
+        assert!(r.session.open_problems.iter().any(|p| p.contains("性能")));
+    }
+
+    #[test]
+    fn compile_detects_decision_via_done() {
         let compiler = ConversationCompiler::new();
         let msgs = vec![
             Message::new("user", "把lancedb换成sqlite-vec行不行？"),
-            Message::new("assistant", "done，已替换"),
+            Message::new("assistant", "Done，已经替换了"),
         ];
-        let result = compiler.compile(&msgs);
-        assert!(!result.decisions.is_empty());
+        let r = compiler.compile(&msgs);
+        assert!(!r.decisions.is_empty());
+        assert!(r.decisions[0].decision.contains("lancedb"));
     }
 
     #[test]
-    fn compile_tracks_session_state() {
+    fn compile_knowledge_deduped() {
         let compiler = ConversationCompiler::new();
         let msgs = vec![
-            Message::new("user", "现在目标是实现compiler模块，在compiler.rs里"),
+            Message::new("user", "为什么慢？"),
+            Message::new("assistant", "因为lancedb太重"),
+            Message::new("user", "为什么慢？"),
+            Message::new("assistant", "因为lancedb太重"),
         ];
-        let result = compiler.compile(&msgs);
-        assert!(result.session.current_goal.contains("compiler"));
-        assert!(result.session.current_files.contains(&"compiler.rs".to_string()));
+        let r = compiler.compile(&msgs);
+        assert!(r.knowledge.len() <= 1);
     }
+}
+
+#[cfg(test)]
+mod bench_tests {
+    use super::*;
+    use crate::types::*;
 
     #[test]
-    fn compile_detects_open_problems() {
+    fn no_tool_invocation_fields_yields_empty() {
         let compiler = ConversationCompiler::new();
         let msgs = vec![
-            Message::new("user", "为什么编译那么慢？怎么换成sqlite-vec？"),
-            Message::new("assistant", "因为lancedb太重了，换成sqlite-vec即可"),
-            Message::new("user", "compiler模块还有bug，不工作"),
+            Message::new("user", "hello"),
+            Message::new("assistant", "hi"),
         ];
         let result = compiler.compile(&msgs);
-        assert!(!result.session.open_problems.is_empty(), "should detect open problems");
-        assert!(result.session.open_problems[0].contains("bug"), "problem mentions bug");
-    }
-
-    #[test]
-    fn compile_detects_todo() {
-        let compiler = ConversationCompiler::new();
-        let msgs = vec![
-            Message::new("user", "接下来还要把prompt模块写完"),
-        ];
-        let result = compiler.compile(&msgs);
-        assert!(!result.session.todo.is_empty(), "should detect todo");
-        assert!(result.session.todo[0].contains("prompt"));
-    }
-
-    #[test]
-    fn compile_tracks_multiple_files() {
-        let compiler = ConversationCompiler::new();
-        let msgs = vec![
-            Message::new("user", "修改compiler.rs 和 prompt.rs"),
-        ];
-        let result = compiler.compile(&msgs);
-        assert!(result.session.current_files.contains(&"compiler.rs".to_string()));
-        assert!(result.session.current_files.contains(&"prompt.rs".to_string()));
-    }
-
-    #[test]
-    fn compile_resolved_problems_not_open() {
-        let compiler = ConversationCompiler::new();
-        let msgs = vec![
-            Message::new("user", "100行有个bug，怎么修？"),
-            Message::new("assistant", "改成42就行了"),
-            Message::new("user", "还有个新问题：性能太差"),
-        ];
-        let result = compiler.compile(&msgs);
-        // "有bug" was resolved (assistant replied), "性能太差" is still open (no assistant reply yet if it's the last msg)
-        assert!(
-            result.session.open_problems.iter().any(|p| p.contains("性能")),
-            "unanswered problem should be open"
-        );
+        assert!(result.session.reasoning_chain.is_empty());
     }
 }

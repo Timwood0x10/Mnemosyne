@@ -108,7 +108,6 @@ impl DistillationMetrics {
             capacity_evictions: self.capacity_evictions.load(Ordering::Relaxed),
         }
     }
-
 }
 
 /// Read-only point-in-time snapshot of [`DistillationMetrics`].
@@ -209,6 +208,13 @@ impl PipelineDistiller {
     #[must_use]
     pub fn metrics_ref(&self) -> Arc<DistillationMetrics> {
         self.metrics.clone()
+    }
+
+    /// Expose the store for callers that need to persist additional records
+    /// alongside the distillation (e.g. decisions from the compiler).
+    #[must_use]
+    pub fn store(&self) -> Arc<dyn ExperienceRepository> {
+        self.store.clone()
     }
 
     /// Acquire (or lazily create) the per-tenant mutex.
@@ -597,20 +603,7 @@ pub fn compress_pair(problem: &str, solution: &str) -> String {
     let core = truncate(stripped, MAX_PROBLEM);
     let action = truncate(solution, MAX_SOLUTION);
 
-    // Try to extract a short action from the solution (first sentence).
-    let first_action = solution
-        .split(['。', '.', '；'])
-        .next()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| truncate(s, MAX_SOLUTION))
-        .unwrap_or_default();
-
-    if first_action.len() < solution.len() / 2 {
-        format!("{core}：{first_action}")
-    } else {
-        format!("{core}：{action}")
-    }
+    format!("{core}：{action}")
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -691,7 +684,10 @@ mod tests {
     #[test]
     fn compress_pair_chinese_question() {
         let s = compress_pair("编译为什么这么慢？", "主要原因是lancedb太重");
-        assert!(!s.contains('？'), "Chinese question mark should be stripped");
+        assert!(
+            !s.contains('？'),
+            "Chinese question mark should be stripped"
+        );
         assert!(s.contains("lancedb"), "solution included");
     }
 
@@ -813,10 +809,7 @@ mod tests {
             Use a src/main.rs entrypoint and organize modules under src/.";
         let s = compress_pair(problem, solution);
         // Code and paths must survive verbatim
-        assert!(
-            s.contains("cargo new"),
-            "code not mangled: {s}"
-        );
+        assert!(s.contains("cargo new"), "code not mangled: {s}");
         // (first-sentence extraction keeps only first sentence)
         assert!(
             s.contains("Create a binary crate"),
@@ -827,10 +820,7 @@ mod tests {
             s.chars().count() <= problem.chars().count() + solution.chars().count(),
             "compression should not expand"
         );
-        assert!(
-            s.contains("memory-mcp"),
-            "project name preserved: {s}"
-        );
+        assert!(s.contains("memory-mcp"), "project name preserved: {s}");
     }
 
     /// Objective: Verify Chinese document content respects UTF-8 boundaries.
@@ -843,10 +833,7 @@ mod tests {
             第三层用向量数据库做相似度检索。这样既保证了实时性，又不会丢失历史经验。";
         let s = compress_pair(problem, solution);
         // No replacement character from broken UTF-8
-        assert!(
-            !s.contains('�'),
-            "no broken UTF-8: {s}"
-        );
+        assert!(!s.contains('�'), "no broken UTF-8: {s}");
         // Chinese question mark stripped only from end of problem, not inside
         assert!(
             s.contains('？'),
@@ -882,20 +869,11 @@ mod tests {
             which holds references to each stage implementation.";
         let s = compress_pair(problem, solution);
         // Must include the 8-stage concept
-        assert!(
-            s.contains("8-stage"),
-            "key number preserved: {s}"
-        );
+        assert!(s.contains("8-stage"), "key number preserved: {s}");
         // Truncation should produce valid output (no panic from byte slicing)
-        assert!(
-            !s.is_empty(),
-            "output should not be empty"
-        );
+        assert!(!s.is_empty(), "output should not be empty");
         // The core structure (problem：action) should be intact
-        assert!(
-            s.contains('：'),
-            "separator should be present"
-        );
+        assert!(s.contains('：'), "separator should be present");
     }
 
     /// Objective: Verify that very short document snippets don't lose meaning
@@ -906,9 +884,37 @@ mod tests {
         let solution = "Rust for safety, Go for simplicity.";
         let s = compress_pair(problem, solution);
         assert_eq!(
-            s,
-            "Go vs Rust：Rust for safety, Go for simplicity.",
+            s, "Go vs Rust：Rust for safety, Go for simplicity.",
             "short content should pass through unchanged"
+        );
+    }
+
+    /// Objective: Verify long solution is truncated to 120 chars.
+    #[test]
+    fn compress_pair_truncates_long_solution() {
+        let s = compress_pair(
+            "How does the conflict resolver work?",
+            "Let me explain how the conflict resolver determines if two memories conflict. \
+             It uses cosine similarity on embedding vectors with a configurable threshold. \
+             Two memories conflict when their cosine similarity exceeds the threshold.",
+        );
+        assert!(!s.is_empty(), "output should not be empty");
+        assert!(
+            s.len() <= 60 + 3 + 120,
+            "output should be truncated to reasonable length: {s}"
+        );
+    }
+
+    /// Objective: Verify markdown bold syntax doesn't break the output.
+    #[test]
+    fn compress_pair_handles_markdown_bold() {
+        let s = compress_pair(
+            "设计原则是什么？",
+            "**分层清晰**：每一层职责单一。**可测试**：每个阶段独立可测。",
+        );
+        assert!(
+            s.contains("分层清晰"),
+            "markdown bold content should survive: {s}"
         );
     }
 
@@ -930,29 +936,26 @@ mod tests {
         // Simulate a document review conversation: user pastes specs,
         // assistant analyzes them.
         let msgs = vec![
-            Message::new("user",
-                "What architecture does the memory system use?"
-            ),
-            Message::new("assistant",
+            Message::new("user", "What architecture does the memory system use?"),
+            Message::new(
+                "assistant",
                 "The memory system uses an 8-stage pipeline with separate \
                 stages for extraction, classification, scoring, filtering, \
-                compression, embedding, conflict resolution, and capacity control."
+                compression, embedding, conflict resolution, and capacity control.",
             ),
-            Message::new("user",
-                "How does compression work specifically?"
-            ),
-            Message::new("assistant",
+            Message::new("user", "How does compression work specifically?"),
+            Message::new(
+                "assistant",
                 "Compression uses the compress_pair function which truncates \
                 problem to 60 chars and solution to 120 chars, strips trailing \
-                question marks, and pairs them as `problem: action`."
+                question marks, and pairs them as `problem: action`.",
             ),
-            Message::new("user",
-                "What storage backend does it use?"
-            ),
-            Message::new("assistant",
+            Message::new("user", "What storage backend does it use?"),
+            Message::new(
+                "assistant",
                 "SQLite with sqlite-vec extension for vector similarity search. \
                 The store creates a vec0 virtual table indexed by cosine distance. \
-                Dimensions default to 768 but are configurable per instance."
+                Dimensions default to 768 but are configurable per instance.",
             ),
         ];
 
@@ -1011,29 +1014,26 @@ mod tests {
         let d = PipelineDistiller::new(cfg, embedder, store);
 
         let msgs = vec![
-            Message::new("user",
-                "记忆蒸馏系统的架构是什么？"
-            ),
-            Message::new("assistant",
+            Message::new("user", "记忆蒸馏系统的架构是什么？"),
+            Message::new(
+                "assistant",
                 "记忆蒸馏系统采用8阶段管道：提取（用户-助手配对）、分类（MemoryType）、\
                 重要性评分、噪音过滤、压缩（截断+配对）、嵌入（向量生成）、冲突解决（余弦相似度）、\
-                容量控制（租户级淘汰）。每个阶段独立可测试、可替换。"
+                容量控制（租户级淘汰）。每个阶段独立可测试、可替换。",
             ),
-            Message::new("user",
-                "压缩阶段具体怎么工作？"
-            ),
-            Message::new("assistant",
+            Message::new("user", "压缩阶段具体怎么工作？"),
+            Message::new(
+                "assistant",
                 "compress_pair 函数把问题截断到60个字符，解决方案截断到120个字符，\
                 去掉末尾的问号和语气词，然后用冒号拼接成「问题：解决方案」的格式。\
-                截断时保证了字符边界安全，不会从中间切开一个UTF-8字符。"
+                截断时保证了字符边界安全，不会从中间切开一个UTF-8字符。",
             ),
-            Message::new("user",
-                "它用什么存储后端？"
-            ),
-            Message::new("assistant",
+            Message::new("user", "它用什么存储后端？"),
+            Message::new(
+                "assistant",
                 "使用 SQLite 加 sqlite-vec 扩展做向量相似度搜索。\
                 创建 vec0 虚拟表按余弦距离索引。维度默认768但可配置。\
-                每次打开存储时通过 OnceLock 确保扩展只加载一次。"
+                每次打开存储时通过 OnceLock 确保扩展只加载一次。",
             ),
         ];
 
@@ -1051,10 +1051,7 @@ mod tests {
                 mem.summary
             );
             // No empty summaries
-            assert!(
-                !mem.summary.trim().is_empty(),
-                "summary must not be empty"
-            );
+            assert!(!mem.summary.trim().is_empty(), "summary must not be empty");
             // CJK bytes are valid
             assert!(
                 std::str::from_utf8(mem.summary.as_bytes()).is_ok(),
@@ -1093,15 +1090,17 @@ mod tests {
 
         // A dense technical exchange
         let msgs = vec![
-            Message::new("user",
-                "How does the conflict resolver determine if two memories conflict?"
+            Message::new(
+                "user",
+                "How does the conflict resolver determine if two memories conflict?",
             ),
-            Message::new("assistant",
+            Message::new(
+                "assistant",
                 "The ConflictResolver uses cosine similarity on embedding vectors. \
                 Two memories conflict when their cosine similarity exceeds the \
                 configured threshold (default 0.85). On conflict, if the new memory \
                 has higher importance it replaces the old one via ReplaceOld; \
-                otherwise both are kept."
+                otherwise both are kept.",
             ),
         ];
 

@@ -105,6 +105,9 @@ pub struct Message {
     /// Optional tool call identifier that produced this message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    /// If this message is a tool invocation (role=assistant), the tool details.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_invocation: Option<ToolInvocation>,
     /// Optional logical turn identifier for grouping messages.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
@@ -118,6 +121,7 @@ impl Message {
             role: role.into(),
             content: content.into(),
             tool_call_id: None,
+            tool_invocation: None,
             turn_id: None,
         }
     }
@@ -401,6 +405,36 @@ pub struct Decision {
     pub importance: f64,
 }
 
+/// A tool invocation attached to a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolInvocation {
+    /// Tool name (e.g. `web_search`, `read_file`).
+    pub name: String,
+    /// Arguments as JSON string.
+    pub arguments: String,
+}
+
+/// A single step in the LLM's reasoning chain via tool use.
+///
+/// This captures the *why → what → how* arc, not just I/O:
+/// 1. What user need triggered this step (`trigger`)
+/// 2. Which tool was selected (`tool_name` + `tool_args`)
+/// 3. Whether the call succeeded or failed (`status`)
+/// 4. How the LLM reasoned about the result (`reasoning`)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningStep {
+    /// The user message (or context) that triggered this tool use — full, undistorted.
+    pub trigger: String,
+    /// Tool name invoked.
+    pub tool_name: String,
+    /// Arguments passed to the tool — full JSON, undistorted.
+    pub tool_args: String,
+    /// Execution outcome: `"ok"`, `"error"`, or `"timeout"`.
+    pub status: String,
+    /// How the LLM processed the tool output to form its response — full, undistorted.
+    pub reasoning: String,
+}
+
 /// Short-term working state — not persisted as long-term memory.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
@@ -416,6 +450,8 @@ pub struct SessionState {
     pub todo: Vec<String>,
     /// Recent decisions made this session.
     pub recent_decisions: Vec<String>,
+    /// Recent reasoning chain steps (up to 5).
+    pub reasoning_chain: Vec<ReasoningStep>,
 }
 
 /// Output of the conversation compiler.
