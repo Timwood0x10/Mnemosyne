@@ -12,21 +12,17 @@ use crate::types::{Experience, ExtractionMethod, MemoryType, Metadata};
 static SQLITE_VEC_INIT: OnceLock<()> = OnceLock::new();
 
 fn ensure_vec_loaded() {
-    SQLITE_VEC_INIT.get_or_init(|| {
-        unsafe {
-            rusqlite::ffi::sqlite3_auto_extension(Some(
-                // SAFETY: sqlite-vec's init function matches the expected
-                // `sqlite3_auto_extension` callback signature.
-                std::mem::transmute::<
-                    *const (),
-                    unsafe extern "C" fn(
-                        *mut rusqlite::ffi::sqlite3,
-                        *mut *mut std::os::raw::c_char,
-                        *const rusqlite::ffi::sqlite3_api_routines,
-                    ) -> i32,
-                >(sqlite_vec::sqlite3_vec_init as *const ()),
-            ));
-        }
+    SQLITE_VEC_INIT.get_or_init(|| unsafe {
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *mut std::os::raw::c_char,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(
+            sqlite_vec::sqlite3_vec_init as *const ()
+        )));
     });
 }
 
@@ -55,6 +51,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
     id TEXT PRIMARY KEY,
     vector float[?] distance_metric=cosine
 );
+";
+
+static FTS_SCHEMA: &str = "
+CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+    content, problem, solution,
+    tokenize='unicode61'
+);
+CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+    INSERT INTO memories_fts(rowid, content, problem, solution)
+    VALUES (new.rowid, new.content, new.problem, new.solution);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, problem, solution)
+    VALUES ('delete', old.rowid, NULL, NULL, NULL);
+END;
+CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
+    INSERT INTO memories_fts(memories_fts, rowid, content, problem, solution)
+    VALUES ('delete', old.rowid, NULL, NULL, NULL);
+    INSERT INTO memories_fts(rowid, content, problem, solution)
+    VALUES (new.rowid, new.content, new.problem, new.solution);
+END;
 ";
 
 fn memory_type_from_str(s: &str) -> MemoryType {
@@ -97,6 +114,14 @@ pub trait ExperienceRepository: Send + Sync {
     async fn count_by_memory_type(&self, tenant_id: &str, memory_type: MemoryType) -> Result<i64>;
     async fn count_for_tenant(&self, tenant_id: &str) -> Result<i64>;
     async fn counts_by_type(&self, tenant_id: &str) -> Result<Vec<(MemoryType, i64)>>;
+    /// Keyword search: FTS5 when no vector dim, BM25 full-scan otherwise.
+    async fn search_by_keyword(
+        &self,
+        query: &str,
+        tenant_id: &str,
+        limit: usize,
+        memory_type: Option<MemoryType>,
+    ) -> Result<Vec<Experience>>;
 }
 
 pub struct SQLiteVecStore {
@@ -114,9 +139,8 @@ impl std::fmt::Debug for SQLiteVecStore {
 
 impl SQLiteVecStore {
     pub async fn open(path: &str, dim: usize) -> Result<Self> {
-        ensure_vec_loaded();
-        if dim == 0 {
-            return Err(StorageError::Schema("dimension must be > 0".into()).into());
+        if dim > 0 {
+            ensure_vec_loaded();
         }
         let conn =
             Connection::open(path).map_err(|e| StorageError::Schema(format!("open: {e}")))?;
@@ -129,9 +153,8 @@ impl SQLiteVecStore {
     }
 
     pub async fn open_in_memory(dim: usize) -> Result<Self> {
-        ensure_vec_loaded();
-        if dim == 0 {
-            return Err(StorageError::Schema("dimension must be > 0".into()).into());
+        if dim > 0 {
+            ensure_vec_loaded();
         }
         let conn = Connection::open_in_memory()
             .map_err(|e| StorageError::Schema(format!("open_in_memory: {e}")))?;
@@ -147,9 +170,14 @@ impl SQLiteVecStore {
         let conn = self.conn.lock().await;
         conn.execute_batch(SCHEMA)
             .map_err(|e| StorageError::Schema(format!("init schema: {e}")))?;
-        let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
-        conn.execute_batch(&vec_sql)
-            .map_err(|e| StorageError::Schema(format!("init vec: {e}")))?;
+        if self.dim > 0 {
+            let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
+            conn.execute_batch(&vec_sql)
+                .map_err(|e| StorageError::Schema(format!("init vec: {e}")))?;
+        } else {
+            conn.execute_batch(FTS_SCHEMA)
+                .map_err(|e| StorageError::Schema(format!("init fts: {e}")))?;
+        }
         Ok(())
     }
 }
@@ -276,6 +304,9 @@ impl ExperienceRepository for SQLiteVecStore {
         tenant_id: &str,
         limit: usize,
     ) -> Result<Vec<Experience>> {
+        if self.dim == 0 {
+            return Ok(Vec::new());
+        }
         if query_embedding.len() != self.dim {
             return Err(StorageError::DimensionMismatch {
                 expected: self.dim,
@@ -304,6 +335,96 @@ impl ExperienceRepository for SQLiteVecStore {
             results.push(row?);
         }
         Ok(results)
+    }
+
+    async fn search_by_keyword(
+        &self,
+        query: &str,
+        tenant_id: &str,
+        limit: usize,
+        memory_type: Option<MemoryType>,
+    ) -> Result<Vec<Experience>> {
+        if self.dim == 0 {
+            // FTS5 path with LIKE fallback for CJK.
+            let conn = self.conn.lock().await;
+            let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+            let has_type_filter = memory_type.is_some();
+            let sql = if has_type_filter {
+                "SELECT m.* FROM memories m \
+                 WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
+                        OR m.content LIKE ?3 ESCAPE '\\' \
+                        OR m.problem LIKE ?3 ESCAPE '\\') \
+                   AND m.tenant_id = ?2 AND m.memory_type = ?4 \
+                 ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
+                 LIMIT ?5"
+            } else {
+                "SELECT m.* FROM memories m \
+                 WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
+                        OR m.content LIKE ?3 ESCAPE '\\' \
+                        OR m.problem LIKE ?3 ESCAPE '\\') \
+                   AND m.tenant_id = ?2 \
+                 ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
+                 LIMIT ?4"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let rows: Vec<rusqlite::Result<Experience>> = match memory_type {
+                Some(mt) => {
+                    let r = stmt.query_map(
+                        params![query, tenant_id, like, memory_type_to_str(mt), limit as i64],
+                        row_to_experience,
+                    )?;
+                    r.collect()
+                }
+                None => {
+                    let r = stmt.query_map(
+                        params![query, tenant_id, like, limit as i64],
+                        row_to_experience,
+                    )?;
+                    r.collect()
+                }
+            };
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        } else {
+            // vec0 path: full-scan + Rust BM25
+            use crate::config::{WEIGHT_IMPORTANCE_ONLY, WEIGHT_KEYWORD_ONLY};
+            use crate::retrieval::{bm25_score, tokenize};
+            let candidates = if let Some(mt) = memory_type {
+                self.get_by_memory_type(tenant_id, mt).await?
+            } else {
+                let mut all = Vec::new();
+                for mt in [
+                    MemoryType::Knowledge,
+                    MemoryType::Preference,
+                    MemoryType::Skill,
+                    MemoryType::Experience,
+                    MemoryType::Interaction,
+                    MemoryType::Profile,
+                ] {
+                    let exps = self.get_by_memory_type(tenant_id, mt).await?;
+                    all.extend(exps);
+                }
+                all
+            };
+            let query_terms = tokenize(query);
+            let mut scored: Vec<(f64, Experience)> = Vec::new();
+            for exp in candidates {
+                let kw = bm25_score(&query_terms, &exp.content);
+                if kw <= 0.0 {
+                    continue;
+                }
+                scored.push((
+                    kw * WEIGHT_KEYWORD_ONLY + exp.confidence * WEIGHT_IMPORTANCE_ONLY,
+                    exp,
+                ));
+            }
+            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+            scored.truncate(limit);
+            Ok(scored.into_iter().map(|(_, e)| e).collect())
+        }
     }
 
     async fn get_by_memory_type(
@@ -376,12 +497,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn open_with_zero_dim_fails() {
-        let err = SQLiteVecStore::open_in_memory(0).await.unwrap_err();
-        assert!(
-            err.to_string().contains("dimension"),
-            "zero dim should fail"
-        );
+    async fn open_in_memory_zero_dim_succeeds() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        assert_eq!(store.dim, 0);
+    }
+
+    #[tokio::test]
+    async fn fts5_keyword_search_works() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let mut exp = sample_exp("t1", MemoryType::Knowledge, "Rust async runtime uses tokio");
+        exp.id = "e1".to_string();
+        store.create(&exp).await.expect("create");
+        let results = store
+            .search_by_keyword("rust", "t1", 5, None)
+            .await
+            .expect("search");
+        assert!(!results.is_empty(), "FTS5 should find 'rust'");
+        assert_eq!(results[0].id, "e1");
     }
 
     #[tokio::test]

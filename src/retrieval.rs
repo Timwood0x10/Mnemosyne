@@ -136,7 +136,7 @@ impl RetrievalEngine {
         }
     }
 
-    /// Keyword-only search: BM25-style scoring over all tenant memories.
+    /// Keyword-only search: delegates to store's FTS5 or BM25 full-scan.
     async fn keyword_search(
         &self,
         query: &str,
@@ -144,14 +144,14 @@ impl RetrievalEngine {
         limit: usize,
         memory_type_filter: Option<MemoryType>,
     ) -> Result<Vec<RetrievalResult>> {
-        let candidates = self.fetch_candidates(tenant_id, memory_type_filter).await?;
+        let experiences = self
+            .store
+            .search_by_keyword(query, tenant_id, limit.max(50), memory_type_filter)
+            .await?;
         let query_terms = tokenize(query);
-        let mut results = Vec::with_capacity(candidates.len());
-        for exp in candidates {
+        let mut results = Vec::with_capacity(experiences.len());
+        for exp in experiences {
             let keyword_score = bm25_score(&query_terms, &exp.content);
-            if keyword_score <= 0.0 {
-                continue;
-            }
             let importance = exp.confidence;
             let score = keyword_score * WEIGHT_KEYWORD_ONLY + importance * WEIGHT_IMPORTANCE_ONLY;
             results.push(RetrievalResult {
@@ -223,7 +223,10 @@ impl RetrievalEngine {
         } else {
             Vec::new()
         };
-        let candidates = self.fetch_candidates(tenant_id, memory_type_filter).await?;
+        let candidates = self
+            .store
+            .search_by_keyword(query, tenant_id, limit.max(50), memory_type_filter)
+            .await?;
         let query_terms = tokenize(query);
 
         // Build a map of experience id -> semantic score (if embeddings available).
@@ -266,42 +269,9 @@ impl RetrievalEngine {
         results.truncate(limit);
         Ok(results)
     }
-
-    /// Fetch candidate experiences for keyword/hybrid scoring.
-    ///
-    /// We pull all memories of the relevant types for the tenant, then score
-    /// them in-memory. This is O(n) over the tenant's memories, acceptable for
-    /// the default `max_solutions_per_tenant = 5000` scale.
-    async fn fetch_candidates(
-        &self,
-        tenant_id: &str,
-        memory_type_filter: Option<MemoryType>,
-    ) -> Result<Vec<Experience>> {
-        if let Some(mt) = memory_type_filter {
-            return self.store.get_by_memory_type(tenant_id, mt).await;
-        }
-        // No filter: gather all types.
-        let mut all = Vec::new();
-        for mt in [
-            MemoryType::Knowledge,
-            MemoryType::Preference,
-            MemoryType::Skill,
-            MemoryType::Experience,
-            MemoryType::Interaction,
-            MemoryType::Profile,
-        ] {
-            let exps = self.store.get_by_memory_type(tenant_id, mt).await?;
-            all.extend(exps);
-        }
-        Ok(all)
-    }
 }
 
-/// Tokenize a text string into lowercase terms for BM25 scoring.
-///
-/// Splits on non-alphanumeric characters and filters out empty tokens and
-/// common English stopwords.
-fn tokenize(text: &str) -> Vec<String> {
+pub(crate) fn tokenize(text: &str) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
         "a", "an", "the", "and", "or", "but", "is", "are", "was", "were", "be", "been", "being",
         "have", "has", "had", "do", "does", "did", "will", "would", "could", "should", "may",
@@ -332,7 +302,7 @@ fn tokenize(text: &str) -> Vec<String> {
 ///
 /// * `query_terms` - Pre-tokenized query terms (lowercase).
 /// * `document` - The document text to score against.
-fn bm25_score(query_terms: &[String], document: &str) -> f64 {
+pub(crate) fn bm25_score(query_terms: &[String], document: &str) -> f64 {
     if query_terms.is_empty() {
         return 0.0;
     }

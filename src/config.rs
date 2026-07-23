@@ -173,7 +173,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             db_path: "./memory.db".to_string(),
-            vector_dim: 1024,
+            vector_dim: 0,
             embedding_url: "http://localhost:8000".to_string(),
             embedding_model: "e5-large".to_string(),
             embedding_timeout: Duration::from_secs(30),
@@ -264,14 +264,16 @@ impl Config {
     /// # Errors
     ///
     /// Returns [`Error::Config`] when:
-    /// - `vector_dim` is 0.
+    /// - `vector_dim` is 0 when `embedding_provider` produces embeddings.
     /// - `min_importance` or `conflict_threshold` are outside `[0.0, 1.0]`.
     /// - `max_memories_per_distillation` or `max_solutions_per_tenant` are 0.
     /// - `embedding_provider` is set but no OpenAI API key is present.
     /// - `retrieval_mode` requires embeddings but `embedding_provider` is `None`.
     pub fn validate(&self) -> Result<()> {
-        if self.vector_dim == 0 {
-            return Err(Error::Config("vector_dim must be > 0".into()));
+        if self.embedding_provider.produces_embeddings() && self.vector_dim == 0 {
+            return Err(Error::Config(
+                "vector_dim must be > 0 when embedding provider is enabled".into(),
+            ));
         }
         if !(0.0..=1.0).contains(&self.min_importance) {
             return Err(Error::Config(format!(
@@ -325,8 +327,8 @@ pub struct CliArgs {
     #[arg(long, env = "MEMORY_DB_PATH", default_value = "./memory.db")]
     pub db_path: String,
 
-    /// Vector embedding dimension.
-    #[arg(long, env = "MEMORY_VECTOR_DIM", default_value_t = 1024)]
+    /// Vector embedding dimension. Set to 0 for keyword-only mode (FTS5).
+    #[arg(long, env = "MEMORY_VECTOR_DIM", default_value_t = 0)]
     pub vector_dim: usize,
 
     /// Upstream embedding service URL.
@@ -405,7 +407,7 @@ impl CliArgs {
             .retrieval_mode
             .parse::<RetrievalMode>()
             .map_err(Error::Config)?;
-        let cfg = Config {
+        let mut cfg = Config {
             db_path: self.db_path,
             vector_dim: self.vector_dim,
             embedding_url: self.embedding_url,
@@ -421,6 +423,10 @@ impl CliArgs {
             retrieval_mode,
             openai_api_key: self.openai_api_key,
         };
+        // Auto-set vector_dim=0 when no embeddings are used
+        if !cfg.embedding_provider.produces_embeddings() {
+            cfg.vector_dim = 0;
+        }
         cfg.validate()?;
         Ok(cfg)
     }
@@ -443,6 +449,8 @@ mod tests {
     fn validate_rejects_zero_dim() {
         let mut cfg = Config::default();
         cfg.vector_dim = 0;
+        cfg.embedding_provider = EmbeddingProvider::Openai;
+        cfg.openai_api_key = Some("sk-test".into());
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, Error::Config(_)), "expected Config error");
     }
@@ -490,7 +498,7 @@ mod tests {
         };
         let cfg = args.into_config().expect("config");
         assert_eq!(cfg.db_path, "/tmp/test.db");
-        assert_eq!(cfg.vector_dim, 512);
+        assert_eq!(cfg.vector_dim, 0, "auto-set to 0 when provider=none");
         assert!(!cfg.enable_cross_turn, "cross-turn disabled");
         assert_eq!(cfg.embedding_timeout, Duration::from_millis(60_000));
         assert_eq!(cfg.embedding_provider, EmbeddingProvider::None);
@@ -501,6 +509,7 @@ mod tests {
     fn validate_rejects_openai_without_key() {
         let mut cfg = Config::default();
         cfg.embedding_provider = EmbeddingProvider::Openai;
+        cfg.vector_dim = 768;
         cfg.openai_api_key = None;
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
@@ -533,6 +542,7 @@ mod tests {
     fn validate_accepts_hybrid_with_embedding_provider() {
         let mut cfg = Config::default();
         cfg.embedding_provider = EmbeddingProvider::Openai;
+        cfg.vector_dim = 768;
         cfg.openai_api_key = Some("sk-test".into());
         cfg.retrieval_mode = RetrievalMode::Hybrid;
         assert!(cfg.validate().is_ok(), "hybrid+openai must validate");
@@ -606,7 +616,7 @@ mod tests {
         }
         let default = Config::default();
         assert_eq!(cfg.db_path, default.db_path);
-        assert_eq!(cfg.vector_dim, default.vector_dim);
+        assert_eq!(cfg.vector_dim, 0);
         assert_eq!(cfg.min_importance, default.min_importance);
         assert_eq!(cfg.enable_cross_turn, default.enable_cross_turn);
     }
