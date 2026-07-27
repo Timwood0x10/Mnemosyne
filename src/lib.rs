@@ -40,6 +40,7 @@ pub mod distiller;
 pub mod embed;
 pub mod error;
 pub mod extractor;
+pub mod faction;
 pub mod filter;
 pub mod ingest;
 pub mod mcp;

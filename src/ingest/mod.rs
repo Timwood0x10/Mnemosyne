@@ -21,6 +21,7 @@ use crate::character::{
     CharacterAttribute, CharacterEvent, CharacterRelation, CharacterStore, SQLiteCharacterStore,
 };
 use crate::error::Result;
+use crate::faction;
 use crate::types::Metadata;
 
 /// Overall ingestion statistics.
@@ -174,6 +175,17 @@ impl IngestionPipeline {
             })
             .collect();
 
+        // Build (alias→canonical) pairs for dialog-chain relation extraction
+        let mut name_pairs: Vec<(String, String)> = char_search_names
+            .iter()
+            .flat_map(|(canonical, aliases)| {
+                aliases
+                    .iter()
+                    .map(move |a| (a.clone(), canonical.to_string()))
+            })
+            .collect();
+        name_pairs.sort_by_key(|(alias, _)| std::cmp::Reverse(alias.len()));
+
         // Initialize char info
         let mut char_info: HashMap<&str, CharInfo> = HashMap::new();
         for cdef in cdefs {
@@ -186,7 +198,7 @@ impl IngestionPipeline {
 
         // Scan chapters
         for ch in &chapters {
-            self.process_chapter(ch, novel_name, &char_search_names, &mut char_info)?;
+            self.process_chapter(ch, &char_search_names, &mut char_info, &name_pairs)?;
         }
 
         // Insert into DB
@@ -197,14 +209,15 @@ impl IngestionPipeline {
         Ok(stats)
     }
 
-    /// Process a single chapter: resolve aliases, extract events, track co-occurrence.
+    /// Process a single chapter: resolve aliases, extract events, track co-occurrence,
+    /// and extract directed relations from dialog chain.
     #[allow(clippy::too_many_arguments)]
     fn process_chapter(
         &self,
         ch: &corpus::Chapter,
-        _novel_name: &str,
         char_search_names: &HashMap<&str, Vec<String>>,
         char_info: &mut HashMap<&str, CharInfo>,
+        name_pairs: &[(String, String)],
     ) -> Result<()> {
         let text = &ch.text;
 
@@ -376,6 +389,46 @@ impl IngestionPipeline {
             }
         }
 
+        // Dialog-chain-based directed relation extraction.
+        //
+        // Parses every `曰：` occurrence, builds a dialog chain, identifies address
+        // keywords (主公/哥哥/师父/陛下 etc.), and resolves the addressee from
+        // dialog context (`对曰` = reply to previous speaker, `谓X曰` = explicit).
+        // Overrides relation types from generic/ambiguous proximity to precise
+        // directed relations.
+        let dialog_relations = relation::extract_dialog_relations(text, name_pairs);
+        for dr in &dialog_relations {
+            let key = if dr.speaker < dr.addressee {
+                (dr.speaker.clone(), dr.addressee.clone())
+            } else {
+                (dr.addressee.clone(), dr.speaker.clone())
+            };
+
+            // Only override if currently generic
+            let current_is_generic = char_info
+                .get(dr.speaker.as_str())
+                .map(|info| info.relation_type_for(&key) == "关联")
+                .unwrap_or(true);
+            let has_context = char_info
+                .get(dr.speaker.as_str())
+                .map(|info| info.relation_text.contains_key(&key))
+                .unwrap_or(false);
+
+            if current_is_generic || !has_context {
+                let ctx =
+                    find_relation_context(text, &dr.speaker, &dr.addressee, char_search_names);
+                let ctx_str = ctx.unwrap_or_default();
+                for name in [dr.speaker.as_str(), dr.addressee.as_str()] {
+                    if let Some(info) = char_info.get_mut(name) {
+                        info.relation_text.insert(key.clone(), ctx_str.clone());
+                        info.relation_type
+                            .insert(key.clone(), dr.relation_type.clone());
+                        info.relation_chapter.insert(key.clone(), ch.num);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -532,9 +585,13 @@ impl IngestionPipeline {
                 };
                 let relation_type_score = if rel_type == "关联" { 0.3 } else { 1.0 };
 
-                let rel_imp = (0.5 * co_occurrence_score
+                // Faction bonus: same faction +20%, different -20%, unknown → 1.0
+                let faction_bonus = faction::faction_bonus(novel_name, name, other).unwrap_or(1.0);
+
+                let rel_imp = ((0.5 * co_occurrence_score
                     + 0.3 * event_coupling_score
                     + 0.2 * relation_type_score)
+                    * faction_bonus)
                     .min(1.0);
 
                 // Persist the dimensional breakdown so downstream consumers
@@ -553,6 +610,7 @@ impl IngestionPipeline {
                     "relation_type_score",
                     serde_json::json!(relation_type_score),
                 );
+                metadata.insert("faction_bonus", serde_json::json!(faction_bonus));
                 metadata.insert(
                     "shared_event_count",
                     serde_json::json!(shared_event_count as u64),
