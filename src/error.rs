@@ -35,6 +35,10 @@ pub enum Error {
     #[error("not found: {0}")]
     NotFound(String),
 
+    /// An I/O operation failed (file read/write).
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
     /// A catch-all for errors that don't fit a specific category.
     #[error("internal error: {0}")]
     Internal(String),

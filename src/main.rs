@@ -1,9 +1,11 @@
 //! Main entry point for the Cognitive Memory MCP Server.
 //!
 //! Wires together the configuration, store, embedder, distiller, retrieval
-//! engine, and MCP server, then registers the six `memory_*` MCP tools
-//! (`memory_distill`, `memory_compile`, `memory_search`, `memory_store`,
-//! `memory_feedback`, `memory_stats`) and runs the protocol loop over stdio.
+//! engine, and MCP server, then registers the `memory_*` and `character_*`
+//! MCP tools (`memory_distill`, `memory_compile`, `memory_search`,
+//! `memory_store`, `memory_feedback`, `memory_stats`, `character_search`,
+//! `character_network`, `character_ingest`, `character_graph`) and runs the
+//! protocol loop over stdio.
 
 use std::sync::Arc;
 
@@ -12,11 +14,13 @@ use clap::Parser;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
+use memory_distill::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
 use memory_distill::compiler::ConversationCompiler;
 use memory_distill::config::{CliArgs, Command, EmbeddingProvider};
 use memory_distill::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 use memory_distill::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
 use memory_distill::error::Error;
+use memory_distill::ingest::IngestionPipeline;
 use memory_distill::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use memory_distill::mcp::{MCPServer, ServerBuilder, StdioTransport};
 use memory_distill::prompt::PromptBuilder;
@@ -343,7 +347,264 @@ impl ToolHandler for MemoryCompileTool {
     }
 }
 
-/// Build the MCP server with all 6 `memory_*` tools registered.
+/// Tool: search character knowledge graph (`character_search`).
+struct CharacterSearchTool {
+    store: Arc<SQLiteCharacterStore>,
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CharacterSearchTool {
+    async fn call(&self, args: &serde_json::Value) -> Result<ToolCallResult, Error> {
+        let query = args
+            .get("query")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::InvalidInput("missing `query`".into()))?;
+        let tenant_id = args
+            .get("tenant_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("novels");
+        let novel = args.get("novel").and_then(serde_json::Value::as_str);
+        let limit = args
+            .get("limit")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(50) as usize;
+        let include_events = args
+            .get("include_events")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let include_relations = args
+            .get("include_relations")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        let characters = self
+            .store
+            .search_characters(query, tenant_id, novel, limit)
+            .await?;
+
+        let mut result_list = Vec::with_capacity(characters.len());
+        for c in characters {
+            let mut entry = serde_json::json!({
+                "id": c.id,
+                "name": c.name,
+                "novel": c.novel,
+                "aliases": c.aliases,
+                "clothing": c.clothing,
+                "personality": c.personality,
+                "description": c.description,
+                "importance": c.importance,
+            });
+            if include_events {
+                let events = self
+                    .store
+                    .get_character_events(c.name.as_str(), tenant_id, novel)
+                    .await?;
+                entry["events"] = serde_json::to_value(events)?;
+            }
+            if include_relations {
+                let relations = self
+                    .store
+                    .get_relations_for_character(c.name.as_str(), tenant_id, novel)
+                    .await?;
+                entry["relations"] = serde_json::to_value(relations)?;
+            }
+            result_list.push(entry);
+        }
+
+        let stats = serde_json::json!({
+            "total_characters": self.store.count_characters(tenant_id, novel).await?,
+            "total_events": self.store.count_events(tenant_id, novel).await?,
+            "total_relations": self.store.count_relations(tenant_id, novel).await?,
+        });
+
+        let payload = serde_json::json!({
+            "results": result_list,
+            "stats": stats,
+        });
+        Ok(ToolCallResult::text(payload.to_string()))
+    }
+}
+
+/// Tool: traverse character knowledge network (`character_network`).
+struct CharacterNetworkTool {
+    store: Arc<SQLiteCharacterStore>,
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CharacterNetworkTool {
+    async fn call(&self, args: &serde_json::Value) -> Result<ToolCallResult, Error> {
+        let name = args
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::InvalidInput("missing `name`".into()))?;
+        let tenant_id = args
+            .get("tenant_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("novels");
+        let novel = args.get("novel").and_then(serde_json::Value::as_str);
+        let depth = args
+            .get("depth")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(2)
+            .min(5) as usize;
+
+        let node =
+            traverse_character_network(self.store.as_ref(), name, tenant_id, novel, depth).await?;
+
+        let payload = serde_json::to_value(&node)?;
+        Ok(ToolCallResult::text(payload.to_string()))
+    }
+}
+
+/// Tool: distill the character knowledge graph from corpus text files
+/// (`character_ingest`).
+///
+/// Runs the full ingestion pipeline over the four classical Chinese novels,
+/// extracting characters, events, descriptions, and relationships into the
+/// character store. This is a heavy operation (30-60s on full corpus).
+struct CharacterIngestTool {
+    store: Arc<SQLiteCharacterStore>,
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CharacterIngestTool {
+    async fn call(&self, args: &serde_json::Value) -> Result<ToolCallResult, Error> {
+        let corpus_dir = args
+            .get("corpus_dir")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("corpus");
+
+        let pipeline = IngestionPipeline::new(self.store.clone(), corpus_dir);
+        let stats = pipeline.run().await?;
+
+        let payload = serde_json::json!({
+            "status": "completed",
+            "characters": stats.characters,
+            "events": stats.events,
+            "relations": stats.relations,
+        });
+        Ok(ToolCallResult::text(payload.to_string()))
+    }
+}
+
+/// Tool: export the 3D character relationship graph as structured JSON
+/// (`character_graph`).
+///
+/// Returns nodes (characters with appearance/personality/action attributes)
+/// and edges (relations with dimensional scores) for frontend visualization.
+/// This is the "立体人物关系网络": character → events → related characters,
+/// with multi-dimensional edge weights.
+struct CharacterGraphTool {
+    store: Arc<SQLiteCharacterStore>,
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CharacterGraphTool {
+    async fn call(&self, args: &serde_json::Value) -> Result<ToolCallResult, Error> {
+        let tenant_id = args
+            .get("tenant_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("novels");
+        let novel = args.get("novel").and_then(serde_json::Value::as_str);
+        let max_nodes = args
+            .get("max_nodes")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(200) as usize;
+
+        // Retrieve characters (empty query matches all via LIKE '%%')
+        let characters = self
+            .store
+            .search_characters("", tenant_id, novel, max_nodes)
+            .await?;
+
+        // Build node list with multi-dimensional attributes:
+        //   - clothing  → 外貌 (appearance)
+        //   - personality → 心理/性格 (psychology/character)
+        //   - description → composite summary
+        let nodes: Vec<serde_json::Value> = characters
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.name,
+                    "label": c.name,
+                    "novel": c.novel,
+                    "aliases": c.aliases,
+                    "dimensions": {
+                        "appearance": c.clothing,
+                        "personality": c.personality,
+                        "description": c.description,
+                    },
+                    "importance": c.importance,
+                })
+            })
+            .collect();
+
+        // Collect edges (deduplicated bidirectional relations).
+        //
+        // Each edge surfaces three independent dimensional scores from the
+        // relation's `metadata` bag, so frontend visualizations can render
+        // *why* a relation is strong rather than only the combined weight:
+        //   - co_occurrence_score : raw frequency / 15 (how often together)
+        //   - event_coupling_score : shared events / total events (semantic)
+        //   - relation_type_score : 1.0 for typed, 0.3 for generic "关联"
+        // `weight` is the weighted combination (0.5/0.3/0.2) persisted as
+        // `importance` by the ingestion pipeline.
+        let mut edges: Vec<serde_json::Value> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for c in &characters {
+            let rels = self
+                .store
+                .get_relations_for_character(c.name.as_str(), tenant_id, novel)
+                .await?;
+            for r in rels {
+                // Normalize edge key so (A,B) and (B,A) are the same edge
+                let key = if r.source_character <= r.target_character {
+                    format!("{}|{}", r.source_character, r.target_character)
+                } else {
+                    format!("{}|{}", r.target_character, r.source_character)
+                };
+                if seen.insert(key) {
+                    let md = &r.metadata.entries;
+                    let get_f64 =
+                        |k: &str| -> f64 { md.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0) };
+                    let get_u64 =
+                        |k: &str| -> u64 { md.get(k).and_then(|v| v.as_u64()).unwrap_or(0) };
+                    edges.push(serde_json::json!({
+                        "source": r.source_character,
+                        "target": r.target_character,
+                        "relation_type": r.relation_type,
+                        "weight": r.importance,
+                        "description": r.description,
+                        "chapter": r.chapter,
+                        "dimensions": {
+                            "co_occurrence_score": get_f64("co_occurrence_score"),
+                            "event_coupling_score": get_f64("event_coupling_score"),
+                            "relation_type_score": get_f64("relation_type_score"),
+                            "co_occurrence_count": get_u64("co_occurrence_count"),
+                            "shared_event_count": get_u64("shared_event_count"),
+                            "detected_at_chapter": r.chapter,
+                        },
+                    }));
+                }
+            }
+        }
+
+        let payload = serde_json::json!({
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "total_characters": self.store.count_characters(tenant_id, novel).await?,
+                "total_events": self.store.count_events(tenant_id, novel).await?,
+                "total_relations": self.store.count_relations(tenant_id, novel).await?,
+                "visible_nodes": nodes.len(),
+                "visible_edges": edges.len(),
+            },
+        });
+        Ok(ToolCallResult::text(payload.to_string()))
+    }
+}
+
+/// Build the MCP server with all `memory_*` and `character_*` tools registered.
 async fn build_server(
     cfg: &memory_distill::config::Config,
 ) -> AnyhowResult<(MCPServer, Arc<PipelineDistiller>, Arc<RetrievalEngine>)> {
@@ -531,6 +792,102 @@ async fn build_server(
         )
         .await;
 
+    // ── Character knowledge tools ─────────────────────────────
+
+    let char_store = Arc::new(
+        SQLiteCharacterStore::open(&cfg.db_path)
+            .await
+            .context("open character store")?,
+    );
+
+    // character_search
+    builder = builder
+        .tool(
+            ToolDefinition {
+                name: "character_search".into(),
+                description: "Search characters by name/attribute/novel in the knowledge graph".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "Search query – matches name, clothing, personality, description"},
+                        "tenant_id": {"type": "string", "default": "novels"},
+                        "novel": {"type": "string", "description": "Optional novel filter (e.g. 水浒传, 西游记, 三国演义, 红楼梦)"},
+                        "limit": {"type": "integer", "default": 10},
+                        "include_events": {"type": "boolean", "default": false, "description": "Include events for each character"},
+                        "include_relations": {"type": "boolean", "default": false, "description": "Include relations for each character"}
+                    },
+                    "required": ["query"]
+                }),
+            },
+            Arc::new(CharacterSearchTool {
+                store: char_store.clone(),
+            }),
+        )
+        .await;
+
+    // character_network
+    builder = builder
+        .tool(
+            ToolDefinition {
+                name: "character_network".into(),
+                description: "Traverse the character knowledge graph: character → events → related characters → their events (BFS up to depth)".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Starting character name"},
+                        "tenant_id": {"type": "string", "default": "novels"},
+                        "novel": {"type": "string", "description": "Optional novel filter"},
+                        "depth": {"type": "integer", "default": 2, "description": "Traversal depth (1-5, default 2)"}
+                    },
+                    "required": ["name"]
+                }),
+            },
+            Arc::new(CharacterNetworkTool {
+                store: char_store.clone(),
+            }),
+        )
+        .await;
+
+    // character_ingest — run the corpus distillation pipeline
+    builder = builder
+        .tool(
+            ToolDefinition {
+                name: "character_ingest".into(),
+                description: "Distill character knowledge graph from classical novel corpus text files. Extracts characters, events, descriptions, and relationships. Heavy operation (30-60s).".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "corpus_dir": {"type": "string", "default": "corpus", "description": "Path to directory containing novel .txt files (水浒传.txt, 三国演义.txt, 红楼梦.txt, 西游记.txt)"}
+                    }
+                }),
+            },
+            Arc::new(CharacterIngestTool {
+                store: char_store.clone(),
+            }),
+        )
+        .await;
+
+    // character_graph — export 3D relationship graph for visualization
+    builder = builder
+        .tool(
+            ToolDefinition {
+                name: "character_graph".into(),
+                description: "Export the 3D character relationship graph as structured JSON: nodes (characters with appearance/personality/action dimensions) + edges (relations with weights) for visualization".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tenant_id": {"type": "string", "default": "novels"},
+                        "novel": {"type": "string", "description": "Optional novel filter (e.g. 水浒传)"},
+                        "max_nodes": {"type": "integer", "default": 200, "description": "Maximum nodes to return"}
+                    }
+                }),
+            },
+            Arc::new(CharacterGraphTool {
+                store: char_store.clone(),
+            }),
+        )
+        .await;
+
     Ok((builder.build(), distiller, engine))
 }
 
@@ -549,6 +906,21 @@ async fn main() -> AnyhowResult<()> {
             let (server, _distiller, _engine) = build_server(&cfg).await?;
             let mut transport = StdioTransport::new();
             server.serve(&mut transport).await?;
+        }
+        Some(Command::Ingest { corpus_dir }) => {
+            // `cli.command` is moved by this binding, so read `db_path` directly
+            // from the remaining (un-moved) fields instead of `into_config()`.
+            let store = Arc::new(
+                SQLiteCharacterStore::open(&cli.db_path)
+                    .await
+                    .context("open character store")?,
+            );
+            let pipeline = IngestionPipeline::new(store, &corpus_dir);
+            let stats = pipeline.run().await.context("distill character corpus")?;
+            println!(
+                "Ingestion complete: {} characters, {} events, {} relations",
+                stats.characters, stats.events, stats.relations
+            );
         }
     }
     Ok(())

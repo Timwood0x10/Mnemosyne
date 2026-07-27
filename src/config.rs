@@ -378,6 +378,12 @@ pub struct CliArgs {
 pub enum Command {
     /// Run the MCP server (default behavior if no subcommand given).
     Serve,
+    /// Distill character knowledge graph from corpus text files.
+    Ingest {
+        /// Path to corpus text files directory.
+        #[arg(long, default_value = "corpus")]
+        corpus_dir: String,
+    },
 }
 
 impl CliArgs {

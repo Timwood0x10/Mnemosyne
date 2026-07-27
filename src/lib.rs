@@ -5,9 +5,11 @@
 //!
 //! ## Architecture
 //!
-//! The server exposes 6 MCP tools (`memory_distill`, `memory_compile`,
-//! `memory_search`, `memory_store`, `memory_feedback`, `memory_stats`)
-//! backed by an 8-stage distillation pipeline and a SQLite-vec vector store.
+//! The server exposes 10 MCP tools (`memory_distill`, `memory_compile`,
+//! `memory_search`, `memory_store`, `memory_feedback`, `memory_stats`,
+//! `character_search`, `character_network`, `character_ingest`,
+//! `character_graph`) backed by an 8-stage distillation pipeline, a
+//! SQLite-vec vector store, and a character knowledge graph store.
 //!
 //! ## Modules
 //!
@@ -24,9 +26,12 @@
 //! | `embed` | EmbeddingService trait + remote impl |
 //! | `store` | ExperienceRepository trait + sqlite-vec impl |
 //! | `distiller` | 8-stage distillation pipeline orchestrator |
+//! | `character` | Character knowledge graph store + network traversal |
+//! | `ingest` | Character corpus distillation (Python `ingest_characters.py` port) |
 //! | `config` | Configuration loading |
 //! | `mcp` | MCP server framework (types, transport, server) |
 
+pub mod character;
 pub mod classifier;
 pub mod compiler;
 pub mod config;
@@ -36,6 +41,7 @@ pub mod embed;
 pub mod error;
 pub mod extractor;
 pub mod filter;
+pub mod ingest;
 pub mod mcp;
 pub mod prompt;
 pub mod resolver;
