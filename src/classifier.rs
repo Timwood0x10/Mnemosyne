@@ -12,7 +12,7 @@ use crate::types::MemoryType;
 /// The array is a small, hand-curated list of representative keywords for
 /// each type. The classifier sums matches across all types and picks the
 /// winner; on ties it falls back to the implicit array order.
-const TYPE_KEYWORDS: [(MemoryType, &[&str]); 4] = [
+const TYPE_KEYWORDS: [(MemoryType, &[&str]); 6] = [
     (
         MemoryType::Profile,
         &[
@@ -82,6 +82,43 @@ const TYPE_KEYWORDS: [(MemoryType, &[&str]); 4] = [
             "root cause",
             "workaround",
             "deprecated",
+        ],
+    ),
+    (
+        MemoryType::Skill,
+        &[
+            "tutorial",
+            "guide",
+            "recipe",
+            "playbook",
+            "step-by-step",
+            "how-to",
+            "snippet",
+            "boilerplate",
+            "template",
+            "checklist",
+            "command line",
+            "cli ",
+            "script",
+            "workflow",
+        ],
+    ),
+    (
+        MemoryType::Experience,
+        &[
+            "we tried",
+            "we found",
+            "our project",
+            "in production",
+            "lessons learned",
+            "postmortem",
+            "war story",
+            "we hit",
+            "we built",
+            "our team",
+            "we learned",
+            "retrospective",
+            "incident",
         ],
     ),
 ];
@@ -237,6 +274,34 @@ mod tests {
             t,
             MemoryType::Knowledge,
             "uppercase input should still match"
+        );
+    }
+
+    /// Objective: Verify skill-flavoured phrasing classifies as Skill.
+    /// Invariants: tutorial/guide/step-by-step yields Skill.
+    #[test]
+    fn classify_skill_keywords() {
+        let c = MemoryClassifier::new();
+        let t = c.classify(
+            "Here is a step-by-step guide to set up the build.",
+            "Follow the tutorial and use the template.",
+        );
+        assert_eq!(t, MemoryType::Skill, "guide/tutorial/template -> Skill");
+    }
+
+    /// Objective: Verify experience-flavoured phrasing classifies as Experience.
+    /// Invariants: "we learned"/"postmortem" yields Experience.
+    #[test]
+    fn classify_experience_keywords() {
+        let c = MemoryClassifier::new();
+        let t = c.classify(
+            "How did the migration go?",
+            "We learned a lot; postmortem next week.",
+        );
+        assert_eq!(
+            t,
+            MemoryType::Experience,
+            "we learned/postmortem -> Experience"
         );
     }
 }

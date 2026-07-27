@@ -46,7 +46,7 @@ impl ConversationCompiler {
         }
     }
 
-    pub fn compile(&self, messages: &[Message]) -> CompiledConversation {
+    pub fn compile(&self, tenant_id: &str, messages: &[Message]) -> CompiledConversation {
         let mut knowledge: Vec<Memory> = Vec::new();
         let mut decisions: Vec<Decision> = Vec::new();
         let mut session = SessionState::default();
@@ -186,7 +186,7 @@ impl ConversationCompiler {
             let importance = self.scorer.score(&raw.problem, &raw.solution, memory_type);
 
             if memory_type == MemoryType::Knowledge && importance >= 0.3 {
-                let mut mem = Memory::new("default", memory_type, &raw.solution, importance);
+                let mut mem = Memory::new(tenant_id, memory_type, &raw.solution, importance);
                 mem.summary = if raw.problem.is_empty() {
                     raw.solution.clone()
                 } else {
@@ -276,7 +276,7 @@ mod tests {
             Message::new("user", "为什么编译那么慢？"),
             Message::new("assistant", "因为lancedb太重"),
         ];
-        let r = compiler.compile(&msgs);
+        let r = compiler.compile("t1", &msgs);
         assert!(!r.knowledge.is_empty());
     }
 
@@ -284,7 +284,7 @@ mod tests {
     fn compile_tracks_files() {
         let compiler = ConversationCompiler::new();
         let msgs = vec![Message::new("user", "修改compiler.rs 和 prompt.rs")];
-        let r = compiler.compile(&msgs);
+        let r = compiler.compile("t1", &msgs);
         assert!(r.session.current_files.contains(&"compiler.rs".to_string()));
         assert!(r.session.current_files.contains(&"prompt.rs".to_string()));
     }
@@ -296,7 +296,7 @@ mod tests {
             Message::new("user", "帮我实现prompt模块"),
             Message::new("assistant", "好的"),
         ];
-        let r = compiler.compile(&msgs);
+        let r = compiler.compile("t1", &msgs);
         assert!(r.session.current_goal.contains("prompt"));
     }
 
@@ -308,7 +308,7 @@ mod tests {
             Message::new("assistant", "修好了"),
             Message::new("user", "性能太差"),
         ];
-        let r = compiler.compile(&msgs);
+        let r = compiler.compile("t1", &msgs);
         assert!(r.session.open_problems.iter().any(|p| p.contains("性能")));
     }
 
@@ -319,7 +319,7 @@ mod tests {
             Message::new("user", "把lancedb换成sqlite-vec行不行？"),
             Message::new("assistant", "Done，已经替换了"),
         ];
-        let r = compiler.compile(&msgs);
+        let r = compiler.compile("t1", &msgs);
         assert!(!r.decisions.is_empty());
         assert!(r.decisions[0].decision.contains("lancedb"));
     }
@@ -333,7 +333,7 @@ mod tests {
             Message::new("user", "为什么慢？"),
             Message::new("assistant", "因为lancedb太重"),
         ];
-        let r = compiler.compile(&msgs);
+        let r = compiler.compile("t1", &msgs);
         assert!(r.knowledge.len() <= 1);
     }
 }
@@ -350,7 +350,7 @@ mod bench_tests {
             Message::new("user", "hello"),
             Message::new("assistant", "hi"),
         ];
-        let result = compiler.compile(&msgs);
+        let result = compiler.compile("t1", &msgs);
         assert!(result.session.reasoning_chain.is_empty());
     }
 }

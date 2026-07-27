@@ -61,7 +61,7 @@ flowchart TB
 
     subgraph Distillation Pipeline
         EX[ExperienceExtractor<br/>direct + cross-turn]
-        CF[MemoryClassifier<br/>knowledge / skill /<br/>preference / experience]
+        CF[MemoryClassifier<br/>knowledge / skill / preference /<br/>experience / interaction / profile]
         SC[ImportanceScorer]
         NF[NoiseFilter + SecurityFilter]
         CP[compress_pair<br/>problem：action]
@@ -106,7 +106,7 @@ flowchart TB
 | **Compress** | `"问题：解决方案"` format, char-safe truncation at 60+120 |
 | **Embed** | Optional — `provider=none` = FTS5 keyword mode, zero API cost |
 | **Resolve** | Cosine similarity ≥ threshold → replace if new is more important |
-| **Capacity** | Per-tenant LRU eviction at configured cap (default 5000) |
+| **Capacity** | Per-tenant cap on `Knowledge` memories at configured limit (default 5000) |
 
 ## Quick Start
 
@@ -137,7 +137,7 @@ MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
 
 ```bash
 make check      # clippy + check
-make test       # 142 unit + 3 doctest
+make test       # 151 unit + 3 doctest
 make run        # stdio MCP server
 ```
 

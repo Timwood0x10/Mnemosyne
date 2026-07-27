@@ -102,7 +102,7 @@ flowchart TB
 | **压缩** | `"问题：解决方案"` 格式，字符安全截断（60+120） |
 | **嵌入** | 可选 — `provider=none` 走 FTS5 关键词模式，零 API 成本 |
 | **冲突解决** | 余弦相似度 ≥ 阈值 → 新记忆更重要则替换旧的，否则两者共存 |
-| **容量控制** | 每租户每种类型 LRU 淘汰（默认上限 5000） |
+| **容量控制** | 每租户 `Knowledge` 类型上限淘汰（默认 5000） |
 
 ## 快速开始
 
@@ -133,7 +133,7 @@ MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
 
 ```bash
 make check      # clippy + check
-make test       # 142 个单元测试 + 3 个文档测试
+make test       # 151 个单元测试 + 3 个文档测试
 make run        # stdio MCP 模式启动
 ```
 

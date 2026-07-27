@@ -5,7 +5,7 @@
 //! responses to stdout, one message per line.
 
 use async_trait::async_trait;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, Write};
 
 use crate::error::{Error, Result};
 use crate::mcp::types::JSONRPCMessage;
@@ -26,7 +26,6 @@ pub trait Transport: Send {
 
 /// stdio transport: reads line-delimited JSON from stdin, writes to stdout.
 pub struct StdioTransport {
-    stdin: BufReader<std::io::Stdin>,
     stdout: std::io::Stdout,
 }
 
@@ -35,7 +34,6 @@ impl StdioTransport {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            stdin: BufReader::new(std::io::stdin()),
             stdout: std::io::stdout(),
         }
     }
@@ -50,22 +48,18 @@ impl Default for StdioTransport {
 #[async_trait]
 impl Transport for StdioTransport {
     async fn recv(&mut self) -> Result<Option<JSONRPCMessage>> {
-        // Read one JSON-RPC line synchronously from stdin.
-        //
-        // NOTE: `read_line` is a blocking call executed directly on the
-        // tokio worker thread (no `spawn_blocking`). This is acceptable for
-        // an MCP stdio server because stdin is pipe-fed by the host process
-        // and never blocks for long, but it DOES stall the worker while
-        // waiting. If this transport is ever used in a multi-tenant server
-        // where stdin could be slow, wrap this in `tokio::task::spawn_blocking`.
-        let mut line = String::new();
-        let n = self
-            .stdin
-            .read_line(&mut line)
-            .map_err(|e| Error::Internal(format!("read_line: {e}")))?;
-        if n == 0 {
-            return Ok(None);
-        }
+        // Read one JSON-RPC line off the worker thread via `spawn_blocking`
+        // so a slow/blocked stdin never stalls the tokio runtime. The read is
+        // bounded to a single line and stdin is pipe-fed by the host, so this
+        // is cheap while keeping the async worker free.
+        let line = tokio::task::spawn_blocking(|| -> std::io::Result<String> {
+            let mut line = String::new();
+            let n = std::io::stdin().lock().read_line(&mut line)?;
+            if n == 0 { Ok(String::new()) } else { Ok(line) }
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("spawn_blocking: {e}")))?
+        .map_err(|e| Error::Internal(format!("read_line: {e}")))?;
         let trimmed = line.trim();
         if trimmed.is_empty() {
             return Ok(None);

@@ -5,7 +5,8 @@
 //!
 //! ## Architecture
 //!
-//! The server exposes 5 MCP tools (`distill`, `search`, `list`, `delete`, `stats`)
+//! The server exposes 6 MCP tools (`memory_distill`, `memory_compile`,
+//! `memory_search`, `memory_store`, `memory_feedback`, `memory_stats`)
 //! backed by an 8-stage distillation pipeline and a SQLite-vec vector store.
 //!
 //! ## Modules

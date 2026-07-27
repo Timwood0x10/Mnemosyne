@@ -38,6 +38,38 @@ pub const ERR_INTERNAL: i64 = -32603;
 
 type ToolEntry = (ToolDefinition, Arc<dyn ToolHandler>);
 
+/// Lightweight JSON-Schema argument validation.
+///
+/// Checks that every entry in the schema's `required` array is present in
+/// `arguments` (and not `null`). This is intentionally minimal — it does not
+/// validate types or enum constraints — but it catches the common case of a
+/// missing required parameter.
+fn validate_arguments(schema: &Value, args: &Value) -> Result<()> {
+    let required = schema
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if required.is_empty() {
+        return Ok(());
+    }
+    let obj = match args {
+        Value::Object(m) => m,
+        _ => return Err(Error::InvalidInput("arguments must be an object".into())),
+    };
+    for key in required {
+        match obj.get(key) {
+            Some(Value::Null) | None => {
+                return Err(Error::InvalidInput(format!(
+                    "missing required argument `{key}`"
+                )));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// Mutable tool registry protected by a mutex.
 pub struct ToolRegistry {
     tools: Mutex<HashMap<String, ToolEntry>>,
@@ -66,10 +98,10 @@ impl ToolRegistry {
         defs
     }
 
-    /// Look up a tool handler by name.
-    async fn get(&self, name: &str) -> Option<Arc<dyn ToolHandler>> {
+    /// Look up both the tool definition and handler by name.
+    async fn get_entry(&self, name: &str) -> Option<(ToolDefinition, Arc<dyn ToolHandler>)> {
         let guard = self.tools.lock().await;
-        guard.get(name).map(|(_, h)| h.clone())
+        guard.get(name).cloned()
     }
 }
 
@@ -224,8 +256,8 @@ impl MCPServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        let handler = match self.registry.get(tool_name).await {
-            Some(h) => h,
+        let (def, handler) = match self.registry.get_entry(tool_name).await {
+            Some(entry) => entry,
             None => {
                 return Ok(JSONRPCResponse {
                     jsonrpc: "2.0".to_string(),
@@ -239,6 +271,21 @@ impl MCPServer {
                 });
             }
         };
+        // Lightweight input-schema validation: every required argument must
+        // be present (and non-null). Catches the common missing-argument
+        // mistake before the handler runs.
+        if let Err(e) = validate_arguments(&def.input_schema, &arguments) {
+            return Ok(JSONRPCResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: None,
+                error: Some(JSONRPCError {
+                    code: ERR_INVALID_PARAMS,
+                    message: e.to_string(),
+                    data: None,
+                }),
+            });
+        }
         match handler.call(&arguments).await {
             Ok(tcr) => {
                 let result = serde_json::json!({
@@ -484,6 +531,48 @@ mod tests {
                 let err = resp.error.as_ref().expect("error");
                 assert_eq!(err.code, ERR_METHOD_NOT_FOUND);
                 assert!(err.message.contains("ghost"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    /// Objective: Verify tools/call rejects missing required arguments.
+    /// Invariants: error.code == -32602 (invalid params) and names the arg.
+    #[tokio::test]
+    async fn tools_call_validates_required_args() {
+        let mut builder = ServerBuilder::new(Implementation {
+            name: "test".into(),
+            version: "1.0.0".into(),
+        });
+        builder = builder
+            .tool(
+                ToolDefinition {
+                    name: "needs_foo".into(),
+                    description: "requires foo".into(),
+                    input_schema: serde_json::json!({"type": "object", "required": ["foo"]}),
+                },
+                Arc::new(NoopHandler),
+            )
+            .await;
+        let server = builder.build();
+        let mut t = VecTransport {
+            inbox: vec![JSONRPCMessage::Request(JSONRPCRequest {
+                jsonrpc: "2.0".into(),
+                id: Value::from(6),
+                method: "tools/call".into(),
+                params: Some(serde_json::json!({
+                    "name": "needs_foo",
+                    "arguments": {}
+                })),
+            })],
+            outbox: vec![],
+        };
+        server.serve(&mut t).await.expect("serve");
+        match &t.outbox[0] {
+            JSONRPCMessage::Response(resp) => {
+                let err = resp.error.as_ref().expect("error present");
+                assert_eq!(err.code, ERR_INVALID_PARAMS);
+                assert!(err.message.contains("foo"));
             }
             other => panic!("expected Response, got {other:?}"),
         }

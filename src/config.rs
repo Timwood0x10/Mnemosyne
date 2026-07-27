@@ -38,9 +38,6 @@ pub struct Config {
     /// Enable cross-turn experience extraction.
     pub enable_cross_turn: bool,
 
-    /// Optional SSE listen address. Empty means use stdio transport.
-    pub sse_addr: String,
-
     /// Embedding provider selection.
     ///
     /// - `none` (default): no embeddings; retrieval falls back to keyword
@@ -182,7 +179,6 @@ impl Default for Config {
             max_memories_per_distillation: 3,
             max_solutions_per_tenant: 5000,
             enable_cross_turn: true,
-            sse_addr: String::new(),
             embedding_provider: EmbeddingProvider::None,
             retrieval_mode: RetrievalMode::Keyword,
             openai_api_key: None,
@@ -193,8 +189,7 @@ impl Default for Config {
 impl Config {
     /// Load configuration from environment variables, applying defaults
     /// for any variable that is unset.
-    #[must_use]
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self> {
         let mut cfg = Self::default();
         if let Ok(v) = std::env::var("MEMORY_DB_PATH") {
             cfg.db_path = v;
@@ -240,9 +235,6 @@ impl Config {
         {
             cfg.enable_cross_turn = false;
         }
-        if let Ok(v) = std::env::var("MEMORY_SSE_ADDR") {
-            cfg.sse_addr = v;
-        }
         if let Ok(v) = std::env::var("MEMORY_EMBEDDING_PROVIDER")
             && let Ok(p) = v.parse::<EmbeddingProvider>()
         {
@@ -256,7 +248,8 @@ impl Config {
         if let Ok(v) = std::env::var("MEMORY_OPENAI_API_KEY") {
             cfg.openai_api_key = Some(v);
         }
-        cfg
+        cfg.validate()?;
+        Ok(cfg)
     }
 
     /// Validate the configuration values.
@@ -367,10 +360,6 @@ pub struct CliArgs {
     #[arg(long, env = "MEMORY_DISABLE_CROSS_TURN", default_value_t = false)]
     pub disable_cross_turn: bool,
 
-    /// Optional SSE listen address. Empty means stdio.
-    #[arg(long, env = "MEMORY_SSE_ADDR", default_value = "")]
-    pub sse_addr: String,
-
     /// Embedding provider: `none` (default), `openai`, or `ollama`.
     #[arg(long, env = "MEMORY_EMBEDDING_PROVIDER", default_value = "none")]
     pub embedding_provider: String,
@@ -418,7 +407,6 @@ impl CliArgs {
             max_memories_per_distillation: self.max_memories_per_distillation,
             max_solutions_per_tenant: self.max_solutions_per_tenant,
             enable_cross_turn: !self.disable_cross_turn,
-            sse_addr: self.sse_addr,
             embedding_provider,
             retrieval_mode,
             openai_api_key: self.openai_api_key,
@@ -491,7 +479,6 @@ mod tests {
             max_memories_per_distillation: 5,
             max_solutions_per_tenant: 1000,
             disable_cross_turn: true,
-            sse_addr: "127.0.0.1:8080".into(),
             embedding_provider: "none".into(),
             retrieval_mode: "keyword".into(),
             openai_api_key: None,
@@ -599,7 +586,6 @@ mod tests {
             "MEMORY_MAX_PER_DISTILL",
             "MEMORY_MAX_SOLUTIONS",
             "MEMORY_DISABLE_CROSS_TURN",
-            "MEMORY_SSE_ADDR",
         ];
         let saved: Vec<(String, Option<String>)> = keys
             .iter()
@@ -608,7 +594,7 @@ mod tests {
         for k in &keys {
             unsafe { std::env::remove_var(k) };
         }
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().expect("valid default config");
         for (k, v) in &saved {
             if let Some(val) = v {
                 unsafe { std::env::set_var(k, val) };

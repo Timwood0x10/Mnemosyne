@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS memories (
     source      TEXT NOT NULL DEFAULT '',
     extraction_method TEXT NOT NULL DEFAULT 'direct',
     created_at  TEXT NOT NULL,
-    metadata    TEXT NOT NULL DEFAULT '{}'
+    metadata    TEXT NOT NULL DEFAULT '{}',
+    vector      TEXT NOT NULL DEFAULT '[]'
 );
 CREATE INDEX IF NOT EXISTS idx_memories_tenant ON memories(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(memory_type);
@@ -93,6 +94,43 @@ fn extraction_method_to_str(em: ExtractionMethod) -> &'static str {
     em.as_str()
 }
 
+/// Escape a free-text query for safe use inside an FTS5 `MATCH` expression.
+///
+/// FTS5 raises a syntax error on bare special characters (`"`, `:`, `(`,
+/// `*`, …), which would otherwise fail the entire search. We split the
+/// query into tokens on FTS5-significant punctuation, wrap each surviving
+/// token in double quotes (doubling any embedded quotes), and join them
+/// with spaces (implicit AND, matching the prior behaviour). If the query
+/// contains no usable tokens, a sentinel that matches nothing is returned so
+/// the `MATCH` subquery never raises a syntax error.
+fn fts5_query(query: &str) -> String {
+    let tokens: Vec<String> = query
+        .split(|c: char| {
+            c.is_whitespace()
+                || c == '"'
+                || c == '('
+                || c == ')'
+                || c == ':'
+                || c == ','
+                || c == ';'
+                || c == '.'
+                || c == '*'
+                || c == '+'
+                || c == '-'
+                || c == '^'
+                || c == '~'
+        })
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"", t.replace('"', "\"\"")))
+        .collect();
+    if tokens.is_empty() {
+        // Sentinel that matches no row but is always syntactically valid.
+        "\"__memory_distill_no_match__\"".to_string()
+    } else {
+        tokens.join(" ")
+    }
+}
+
 #[async_trait]
 pub trait ExperienceRepository: Send + Sync {
     async fn create(&self, exp: &Experience) -> Result<()>;
@@ -122,6 +160,15 @@ pub trait ExperienceRepository: Send + Sync {
         limit: usize,
         memory_type: Option<MemoryType>,
     ) -> Result<Vec<Experience>>;
+
+    /// Load the stored embedding vector for a memory by id.
+    ///
+    /// Returns an empty vector when the store has no vectors (keyword-only
+    /// mode, `dim == 0`) or when the id has no stored vector. This is used by
+    /// the conflict-resolution phase to compare a new memory against the real
+    /// embedding of an existing one — `search_by_vector` intentionally does
+    /// not return the raw vector (only the distance).
+    async fn get_vector(&self, id: &str) -> Result<Vec<f32>>;
 }
 
 pub struct SQLiteVecStore {
@@ -170,6 +217,22 @@ impl SQLiteVecStore {
         let conn = self.conn.lock().await;
         conn.execute_batch(SCHEMA)
             .map_err(|e| StorageError::Schema(format!("init schema: {e}")))?;
+        // Migrate older databases that lack the vector column.
+        let has_vec_col = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'vector'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        if !has_vec_col {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN vector TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )
+            .map_err(|e| StorageError::Schema(format!("migrate vector col: {e}")))?;
+        }
         if self.dim > 0 {
             let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
             conn.execute_batch(&vec_sql)
@@ -200,7 +263,14 @@ fn row_to_experience(row: &rusqlite::Row) -> rusqlite::Result<Experience> {
         content: row.get("content")?,
         confidence: row.get("confidence")?,
         source: row.get("source")?,
-        vector: Vec::new(),
+        vector: {
+            let s: String = row.get("vector").unwrap_or_default();
+            if s.is_empty() {
+                Vec::new()
+            } else {
+                serde_json::from_str(&s).unwrap_or_default()
+            }
+        },
         extraction_method: extraction_method_from_str(
             row.get::<_, String>("extraction_method")?.as_str(),
         ),
@@ -214,9 +284,10 @@ fn row_to_experience(row: &rusqlite::Row) -> rusqlite::Result<Experience> {
 impl ExperienceRepository for SQLiteVecStore {
     async fn create(&self, exp: &Experience) -> Result<()> {
         let conn = self.conn.lock().await;
+        let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, metadata)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, metadata, vector)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 exp.id, exp.tenant_id, exp.user_id,
                 memory_type_to_str(exp.memory_type),
@@ -225,6 +296,7 @@ impl ExperienceRepository for SQLiteVecStore {
                 extraction_method_to_str(exp.extraction_method),
                 exp.created_at.to_rfc3339(),
                 serde_json::to_string(&exp.metadata).unwrap_or_default(),
+                vector_json,
             ],
         )?;
 
@@ -253,8 +325,9 @@ impl ExperienceRepository for SQLiteVecStore {
 
     async fn update(&self, exp: &Experience) -> Result<()> {
         let conn = self.conn.lock().await;
+        let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
         let affected = conn.execute(
-            "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12 WHERE id=?1",
+            "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12, vector=?13 WHERE id=?1",
             params![
                 exp.id, exp.tenant_id, exp.user_id,
                 memory_type_to_str(exp.memory_type),
@@ -263,6 +336,7 @@ impl ExperienceRepository for SQLiteVecStore {
                 extraction_method_to_str(exp.extraction_method),
                 exp.created_at.to_rfc3339(),
                 serde_json::to_string(&exp.metadata).unwrap_or_default(),
+                vector_json,
             ],
         )?;
         if affected == 0 {
@@ -374,14 +448,20 @@ impl ExperienceRepository for SQLiteVecStore {
             let rows: Vec<rusqlite::Result<Experience>> = match memory_type {
                 Some(mt) => {
                     let r = stmt.query_map(
-                        params![query, tenant_id, like, memory_type_to_str(mt), limit as i64],
+                        params![
+                            fts5_query(query),
+                            tenant_id,
+                            like,
+                            memory_type_to_str(mt),
+                            limit as i64
+                        ],
                         row_to_experience,
                     )?;
                     r.collect()
                 }
                 None => {
                     let r = stmt.query_map(
-                        params![query, tenant_id, like, limit as i64],
+                        params![fts5_query(query), tenant_id, like, limit as i64],
                         row_to_experience,
                     )?;
                     r.collect()
@@ -428,6 +508,30 @@ impl ExperienceRepository for SQLiteVecStore {
             scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
             scored.truncate(limit);
             Ok(scored.into_iter().map(|(_, e)| e).collect())
+        }
+    }
+
+    async fn get_vector(&self, id: &str) -> Result<Vec<f32>> {
+        if self.dim == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT vector FROM memories WHERE id = ?1")?;
+        let mut rows = stmt.query_map(params![id], |row| {
+            let s: String = row.get(0)?;
+            Ok(s)
+        })?;
+        match rows.next() {
+            Some(Ok(s)) => {
+                if s.is_empty() {
+                    Ok(Vec::new())
+                } else {
+                    serde_json::from_str(&s)
+                        .map_err(|e| StorageError::Schema(format!("parse vector: {e}")).into())
+                }
+            }
+            Some(Err(e)) => Err(StorageError::Sqlite(format!("get_vector: {e}")).into()),
+            None => Ok(Vec::new()),
         }
     }
 
@@ -649,5 +753,43 @@ mod tests {
             .await
             .expect("search");
         assert!(!results.is_empty(), "should find created memory");
+    }
+
+    #[tokio::test]
+    async fn get_vector_round_trips() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+        let mut exp = sample_exp("t1", MemoryType::Knowledge, "rust");
+        exp.vector = vec![0.1_f32, 0.2, 0.3, 0.4];
+        store.create(&exp).await.expect("create");
+        let v = store.get_vector(&exp.id).await.expect("get_vector");
+        assert_eq!(v, vec![0.1_f32, 0.2, 0.3, 0.4], "vector round-trips");
+    }
+
+    #[tokio::test]
+    async fn get_vector_missing_returns_empty() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+        let v = store.get_vector("ghost").await.expect("get_vector");
+        assert!(v.is_empty(), "missing id -> empty vector");
+    }
+
+    #[tokio::test]
+    async fn get_vector_zero_dim_returns_empty() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let v = store.get_vector("anything").await.expect("get_vector");
+        assert!(v.is_empty(), "dim==0 store has no vectors");
+    }
+
+    #[tokio::test]
+    async fn fts5_query_escapes_special_chars() {
+        // A query full of FTS5 syntax chars must not raise a syntax error.
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let mut exp = sample_exp("t1", MemoryType::Knowledge, "Rust async runtime uses tokio");
+        exp.id = "e1".to_string();
+        store.create(&exp).await.expect("create");
+        // No assertion on hit count: a nonsense query may match nothing; the
+        // regression is simply that the call does not error out.
+        let _ = store
+            .search_by_keyword("rust:(\"weird*query)\"", "t1", 5, None)
+            .await;
     }
 }

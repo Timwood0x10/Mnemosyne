@@ -1,9 +1,9 @@
 //! Main entry point for the Cognitive Memory MCP Server.
 //!
 //! Wires together the configuration, store, embedder, distiller, retrieval
-//! engine, and MCP server, then registers the five `memory_*` MCP tools
-//! (`memory_distill`, `memory_search`, `memory_store`, `memory_feedback`,
-//! `memory_stats`) and runs the protocol loop over stdio.
+//! engine, and MCP server, then registers the six `memory_*` MCP tools
+//! (`memory_distill`, `memory_compile`, `memory_search`, `memory_store`,
+//! `memory_feedback`, `memory_stats`) and runs the protocol loop over stdio.
 
 use std::sync::Arc;
 
@@ -255,8 +255,12 @@ impl ToolHandler for MemoryCompileTool {
             .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
         let messages = parse_messages(messages_raw)?;
 
+        let tenant_id = args
+            .get("tenant_id")
+            .and_then(Value::as_str)
+            .unwrap_or("default");
         let compiler = ConversationCompiler::new();
-        let compiled = compiler.compile(&messages);
+        let compiled = compiler.compile(tenant_id, &messages);
 
         // Build reconstruction prompt
         let builder = PromptBuilder;
@@ -276,10 +280,6 @@ impl ToolHandler for MemoryCompileTool {
                         .get("conversation_id")
                         .and_then(Value::as_str)
                         .unwrap_or("compile");
-                    let tenant_id = args
-                        .get("tenant_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("default");
                     let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
 
                     // Run distillation pipeline — persists knowledge memories

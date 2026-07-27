@@ -27,7 +27,7 @@ use tokio::sync::Mutex;
 
 use crate::classifier::MemoryClassifier;
 use crate::embed::EmbeddingService;
-use crate::error::{Result, distillation_error};
+use crate::error::Result;
 use crate::extractor::{ExperienceExtractor, ExtractorConfig, RawExperience};
 use crate::filter::{NoiseFilter, SecurityFilter};
 use crate::resolver::{ConflictResolver, Resolution};
@@ -389,8 +389,11 @@ impl PipelineDistiller {
             match self.embedder.embed(&mem.content).await {
                 Ok(v) => mem.vector = v,
                 Err(_) => {
+                    // Non-fatal: a single embedding failure must not abort the
+                    // whole distillation round. The memory keeps an empty
+                    // vector and gracefully falls back to keyword-based
+                    // conflict resolution downstream.
                     self.metrics.embed_errors.fetch_add(1, Ordering::Relaxed);
-                    return Err(distillation_error("embed", "embedding service call failed"));
                 }
             }
         }
@@ -425,10 +428,14 @@ impl PipelineDistiller {
                     if exp.memory_type != mem.memory_type {
                         continue;
                     }
-                    // Rehydrate the existing record into a Memory carrying
-                    // the candidate's vector for comparison. The resolver
-                    // reads `existing.vector`, so we must populate it from
-                    // `mem.vector` (the two are near-duplicates by design).
+                    // Rehydrate the existing record into a Memory, then load
+                    // its REAL stored embedding so the cosine comparison runs
+                    // against genuine data. The raw `search_by_vector` results
+                    // carry only the distance, not the vector, so we fetch the
+                    // actual vector from the vec0 table via `get_vector`.
+                    // (This is the fix for the bug where `existing_mem.vector`
+                    // was set to the candidate's vector, making every similar
+                    // neighbour compare as cosine == 1.0.)
                     let mut existing_mem = Memory::new(
                         &mem.tenant_id,
                         exp.memory_type,
@@ -436,7 +443,7 @@ impl PipelineDistiller {
                         exp.confidence,
                     );
                     existing_mem.id = exp.id.clone();
-                    existing_mem.vector = mem.vector.clone();
+                    existing_mem.vector = self.store.get_vector(&exp.id).await.unwrap_or_default();
                     let resolution = self.resolver.resolve(&mem, &existing_mem, exp.confidence);
                     match resolution {
                         Resolution::ReplaceOld { old_id, .. } => {
@@ -777,6 +784,94 @@ mod tests {
         fn timeout(&self) -> std::time::Duration {
             std::time::Duration::from_secs(1)
         }
+    }
+
+    /// Objective: Regression test for the conflict-resolution bug where the
+    /// existing memory's vector was never loaded (store returned empty
+    /// vectors), so cosine similarity was always `None` — meaning duplicate
+    /// memories were never de-duplicated. A second distillation of an
+    /// identical memory must REPLACE the first, not stack it.
+    #[tokio::test]
+    async fn distill_replaces_duplicate_by_vector() {
+        let store = SQLiteVecStore::open_in_memory(8).await.expect("open");
+        let store: Arc<dyn ExperienceRepository> = Arc::new(store);
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+        let distiller = PipelineDistiller::new(
+            DistillationConfig::default(),
+            embedder.clone(),
+            store.clone(),
+        );
+
+        let problem = "How do I fix the connection refused error in the Rust server?";
+        let solution = "Start the server before connecting, or bind to the correct port.";
+        let content = format!("Problem: {problem} → Solution: {solution}");
+
+        // Seed an existing memory with the same content + embedding.
+        let mut existing = Experience::new("t1", MemoryType::Knowledge, &content, 0.1);
+        existing.vector = embedder.embed(&content).await.expect("embed");
+        store.create(&existing).await.expect("seed");
+
+        let messages = vec![
+            Message::new("user", problem),
+            Message::new("assistant", solution),
+        ];
+        let out = distiller
+            .distill("c1", &messages, "t1", "")
+            .await
+            .expect("distill");
+
+        // The duplicate replaced the seed; total count stays 1, not 2.
+        let count = store.count_for_tenant("t1").await.expect("count");
+        assert_eq!(count, 1, "duplicate should replace, not stack");
+        assert_eq!(
+            distiller.metrics_ref().snapshot().memories_replaced,
+            1,
+            "exactly one replacement recorded"
+        );
+        assert!(!out.is_empty(), "distillation still produced output");
+    }
+
+    /// Objective: Verify embed failures do not abort the whole distillation.
+    #[tokio::test]
+    async fn distill_survives_embed_failure() {
+        struct FailingEmbedder;
+        #[async_trait]
+        impl EmbeddingService for FailingEmbedder {
+            async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Err(crate::error::Error::Embedding(
+                    crate::error::EmbeddingError::Transport("boom".into()),
+                ))
+            }
+            async fn embed_with_prefix(&self, _t: &str, _p: &str) -> Result<Vec<f32>> {
+                self.embed(_t).await
+            }
+            async fn health_check(&self) -> Result<()> {
+                Ok(())
+            }
+            fn model(&self) -> &str {
+                "fail"
+            }
+            fn timeout(&self) -> std::time::Duration {
+                std::time::Duration::from_secs(1)
+            }
+        }
+
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+        let store: Arc<dyn ExperienceRepository> = Arc::new(store);
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(FailingEmbedder);
+        let distiller =
+            PipelineDistiller::new(DistillationConfig::default(), embedder, store.clone());
+
+        let messages = vec![
+            Message::new("user", "How do I parse JSON in Rust?"),
+            Message::new("assistant", "Use serde_json::from_str."),
+        ];
+        // Must not error even though every embed call fails.
+        let out = distiller
+            .distill("c2", &messages, "t1", "")
+            .await
+            .expect("distill survives embed failure");
+        assert!(!out.is_empty(), "memory still produced without embeddings");
     }
 
     /// Objective: Verify compress_pair produces expected summaries.
