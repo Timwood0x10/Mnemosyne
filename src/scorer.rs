@@ -142,8 +142,8 @@ impl ImportanceScorer {
     /// # Examples
     ///
     /// ```
-    /// use memory_distill::scorer::ImportanceScorer;
-    /// use memory_distill::types::MemoryType;
+    /// use lore_scope::scorer::ImportanceScorer;
+    /// use lore_scope::types::MemoryType;
     ///
     /// let s = ImportanceScorer::new();
     /// let score = s.score(

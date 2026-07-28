@@ -1,0 +1,55 @@
+{
+  "relation_type_rules": [
+    {
+      "type": "夫妻",
+      "keywords": ["夫妻", "夫妇", "配为夫妇", "嫁与", "娶", "结亲"],
+      "faction_constraint": "any"
+    },
+    {
+      "type": "结义",
+      "keywords": ["结义", "结拜", "兄弟", "义兄", "义弟", "桃园结义"],
+      "faction_constraint": "any"
+    },
+    {
+      "type": "师徒",
+      "keywords": ["师父", "师傅", "师尊", "徒弟", "拜师", "授业"],
+      "faction_constraint": "same"
+    },
+    {
+      "type": "君臣",
+      "keywords": ["主公", "陛下", "大王", "王上", "天子", "丞相", "都督", "将军", "圣上"],
+      "faction_constraint": "same"
+    },
+    {
+      "type": "仇敌",
+      "keywords": ["仇敌", "仇人", "对头", "战败", "败阵", "讨伐"],
+      "faction_constraint": "different"
+    }
+  ],
+  "dialog_address_rules": [
+    {
+      "keywords": ["主公", "陛下", "大王", "王上", "皇上", "天子"],
+      "relation_type": "君臣"
+    },
+    {
+      "keywords": ["丞相", "军师", "都督", "将军"],
+      "relation_type": "君臣"
+    },
+    {
+      "keywords": ["哥哥", "大哥", "义兄", "贤弟", "兄弟", "义弟", "二哥", "三弟"],
+      "relation_type": "结义"
+    },
+    {
+      "keywords": ["师父", "师傅", "师尊", "恩师", "老师"],
+      "relation_type": "师徒"
+    },
+    {
+      "keywords": ["夫人", "娘子", "贤妻", "拙荆", "内人"],
+      "relation_type": "夫妻"
+    },
+    {
+      "keywords": ["父亲", "父王", "爹爹", "岳父"],
+      "relation_type": "父子"
+    }
+  ]
+}

@@ -72,8 +72,8 @@ const NOISE_DISQUALIFIERS: &[&str] = &[
 /// # Examples
 ///
 /// ```
-/// use memory_distill::types::Message;
-/// use memory_distill::detector::is_problem;
+/// use lore_scope::types::Message;
+/// use lore_scope::detector::is_problem;
 ///
 /// let q = Message::new("user", "How do I parse a JSON string in Rust?");
 /// assert!(is_problem(&q));

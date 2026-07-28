@@ -61,6 +61,9 @@ rayon = "1.10"
 # In-memory graph for relation_graph traversal (frozen decision: SQLite + petgraph)
 petgraph = "0.6"
 
+# Multi-pattern string matching for alias resolution
+aho-corasick = "1.1"
+
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
 tempfile = "3.20"

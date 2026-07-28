@@ -198,6 +198,7 @@ impl IngestionPipeline {
         }
 
         // Scan chapters
+        let t0 = std::time::Instant::now();
         for ch in &chapters {
             self.process_chapter(
                 ch,
@@ -207,12 +208,16 @@ impl IngestionPipeline {
                 &name_pairs,
             )?;
         }
+        let scan_ms = t0.elapsed().as_millis();
 
         // Insert into DB
+        let t1 = std::time::Instant::now();
         let mut stats = IngestionStats::default();
         stats += self
             .insert_characters(novel_name, tenant_id, now_ts, &char_info)
             .await?;
+        let insert_ms = t1.elapsed().as_millis();
+        eprintln!("[{novel_name}] scan={scan_ms}ms insert={insert_ms}ms");
         Ok(stats)
     }
 
@@ -229,19 +234,30 @@ impl IngestionPipeline {
     ) -> Result<()> {
         let text = &ch.text;
 
-        // Find all alias matches with positions
-        let mut alias_matches: Vec<AliasMatch> = Vec::new();
+        // Find all alias matches with positions — single pass via Aho-Corasick
+        // instead of scanning the full text once per alias (~150 scans per chapter).
+        // Preserves exact behavior: overlapping matches are resolved below.
+        let mut ac_patterns: Vec<&str> = Vec::new();
+        let mut ac_map: Vec<(String, String)> = Vec::new();
         for (&name, search_names) in char_search_names {
             for sn in search_names {
-                for (pos, _) in text.match_indices(sn.as_str()) {
-                    alias_matches.push(AliasMatch {
-                        start: pos,
-                        end: pos + sn.len(),
-                        alias: sn.clone(),
-                        character: name.to_string(),
-                    });
-                }
+                ac_patterns.push(sn.as_str());
+                ac_map.push((name.to_string(), sn.clone()));
             }
+        }
+        let ac = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::Standard)
+            .build(&ac_patterns)
+            .expect("Aho-Corasick automaton build should never fail");
+        let mut alias_matches: Vec<AliasMatch> = Vec::new();
+        for m in ac.find_overlapping_iter(text) {
+            let (name, alias) = &ac_map[m.pattern().as_usize()];
+            alias_matches.push(AliasMatch {
+                start: m.start(),
+                end: m.end(),
+                alias: alias.clone(),
+                character: name.clone(),
+            });
         }
 
         // Add safe single-char shortname matches (e.g. "飞曰"→张飞, "瑜怒"→周瑜).
@@ -348,6 +364,18 @@ impl IngestionPipeline {
             }
         }
 
+        // Build relation index once per chapter (not per pair) for O(N²)-free
+        // relation type detection. Pre-computes keyword and character positions
+        // from the alias-matching phase.
+        let relation_index = relation::ChapterRelationIndex::build(text);
+        let char_positions_simple: HashMap<String, Vec<usize>> = chars_positions
+            .iter()
+            .map(|(name, positions)| {
+                let starts: Vec<usize> = positions.iter().map(|(s, _, _)| *s).collect();
+                (name.clone(), starts)
+            })
+            .collect();
+
         // Co-occurrence tracking for relations
         let names: Vec<&str> = chars_in_chapter.iter().map(|s| s.as_str()).collect();
         for i in 0..names.len() {
@@ -390,11 +418,13 @@ impl IngestionPipeline {
                     .map(|info| info.relation_text.contains_key(&key))
                     .unwrap_or(false);
                 if current_is_generic {
-                    // Detect type from the full chapter text first — this
-                    // finds keywords wherever they appear in the chapter,
-                    // not just within the narrow co-occurrence window.
-                    let new_type = relation::detect_relation_type(text, a, b);
-                    let ctx = find_relation_context(text, a, b, char_search_names);
+                    let new_type = relation_index.detect_type(&char_positions_simple, a, b);
+                    let ctx = relation::find_relation_context_indexed(
+                        text,
+                        &char_positions_simple,
+                        a,
+                        b,
+                    );
                     // Store when: (1) no context yet, or (2) we found a
                     // specific type that should replace the generic one.
                     let should_store = !has_context || new_type != "关联";
@@ -441,8 +471,12 @@ impl IngestionPipeline {
                 .unwrap_or(false);
 
             if current_is_generic || !has_context {
-                let ctx =
-                    find_relation_context(text, &dr.speaker, &dr.addressee, char_search_names);
+                let ctx = relation::find_relation_context_indexed(
+                    text,
+                    &char_positions_simple,
+                    &dr.speaker,
+                    &dr.addressee,
+                );
                 let ctx_str = ctx.unwrap_or_default();
                 for name in [dr.speaker.as_str(), dr.addressee.as_str()] {
                     if let Some(info) = char_info.get_mut(name) {
@@ -620,12 +654,18 @@ impl IngestionPipeline {
                     * faction_bonus)
                     .min(1.0);
 
-                // Apply faction constraints for certain relation types
-                // "君臣" and "师徒" require same faction; cross-faction gets strong penalty
-                let final_importance = match rel_type.as_str() {
-                    "君臣" | "师徒" => {
+                // Apply faction constraint from JSON config (same/any/different)
+                let final_importance = match relation::get_faction_constraint(&rel_type) {
+                    "same" => {
                         if !faction::same_faction_or_unknown(novel_name, name, other) {
-                            rel_imp * 0.2 // Strong penalty for cross-faction
+                            rel_imp * 0.2
+                        } else {
+                            rel_imp
+                        }
+                    }
+                    "different" => {
+                        if faction::same_faction_or_unknown(novel_name, name, other) {
+                            rel_imp * 0.2
                         } else {
                             rel_imp
                         }
@@ -680,44 +720,6 @@ impl IngestionPipeline {
 
         Ok(stats)
     }
-}
-
-/// Find context text containing both character names.
-fn find_relation_context(
-    text: &str,
-    a: &str,
-    b: &str,
-    char_search_names: &HashMap<&str, Vec<String>>,
-) -> Option<String> {
-    let a_names = char_search_names.get(a)?;
-    let b_names = char_search_names.get(b)?;
-
-    for an in a_names {
-        if !text.contains(an.as_str()) {
-            continue;
-        }
-        for bn in b_names {
-            if !text.contains(bn.as_str()) {
-                continue;
-            }
-            for (a_start, _) in text.match_indices(an.as_str()) {
-                // Floor to char boundaries: subtracting 30 bytes may land
-                // inside a multi-byte Chinese character, which would panic
-                // when slicing.
-                let ctx_start = extract::floor_char_boundary(text, a_start.saturating_sub(30));
-                let ctx_end = extract::floor_char_boundary(
-                    text,
-                    std::cmp::min(text.len(), a_start + an.len() + 200),
-                );
-                let ctx = &text[ctx_start..ctx_end];
-                if ctx.contains(bn.as_str()) {
-                    let result: String = ctx.chars().take(300).collect();
-                    return Some(result);
-                }
-            }
-        }
-    }
-    None
 }
 
 #[cfg(test)]

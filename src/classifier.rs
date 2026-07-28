@@ -151,8 +151,8 @@ impl MemoryClassifier {
     /// # Examples
     ///
     /// ```
-    /// use memory_distill::classifier::MemoryClassifier;
-    /// use memory_distill::types::MemoryType;
+    /// use lore_scope::classifier::MemoryClassifier;
+    /// use lore_scope::types::MemoryType;
     ///
     /// let c = MemoryClassifier::new();
     /// let t = c.classify("How do I parse JSON in Rust?", "Use serde_json::from_str.");
