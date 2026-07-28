@@ -21,6 +21,8 @@ use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 use lore_scope::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
 use lore_scope::error::Error;
 use lore_scope::ingest::IngestionPipeline;
+use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
+use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
 use lore_scope::prompt::PromptBuilder;
@@ -888,6 +890,21 @@ async fn build_server(
         )
         .await;
 
+    // ── General knowledge model tools (dev_guide §5) ───────────
+    //
+    // The general knowledge store is opened against the same SQLite file as
+    // the character store: V1 stays as a legacy read view (dev_guide §6
+    // "不双写"), while the four new tools query the general tables produced
+    // by `lore-scope migrate`. Opening the store here is idempotent
+    // (CREATE TABLE IF NOT EXISTS), so `serve` works whether or not a
+    // migration has been run.
+    let kstore = Arc::new(
+        SQLiteKnowledgeStore::open(&cfg.db_path)
+            .await
+            .context("open knowledge store")?,
+    );
+    builder = register_knowledge_tools(builder, kstore).await;
+
     Ok((builder.build(), distiller, engine))
 }
 
@@ -920,6 +937,31 @@ async fn main() -> AnyhowResult<()> {
             println!(
                 "Ingestion complete: {} characters, {} events, {} relations",
                 stats.characters, stats.events, stats.relations
+            );
+        }
+        Some(Command::Migrate { corpus_dir }) => {
+            // Open both stores against the same SQLite file: V1 is read-only
+            // here, the general model is written. A prior `ingest` run is
+            // expected to have populated the V1 `character_*` tables.
+            let v1 = SQLiteCharacterStore::open(&cli.db_path)
+                .await
+                .context("open character store for migration")?;
+            let knowledge = SQLiteKnowledgeStore::open(&cli.db_path)
+                .await
+                .context("open knowledge store for migration")?;
+            let migrator = Migrator::new(&v1, &knowledge, std::path::Path::new(&corpus_dir));
+            let stats = migrator
+                .migrate()
+                .await
+                .context("run V1 → general migration")?;
+            println!(
+                "Migration complete: {} documents, {} chapters, {} objects, {} edges, {} evidence, {} mentions",
+                stats.documents,
+                stats.chapters,
+                stats.objects,
+                stats.edges,
+                stats.evidence,
+                stats.mentions
             );
         }
     }

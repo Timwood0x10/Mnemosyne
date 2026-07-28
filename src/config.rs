@@ -384,6 +384,15 @@ pub enum Command {
         #[arg(long, default_value = "corpus")]
         corpus_dir: String,
     },
+    /// Migrate V1 domain data (`character_*` tables + corpus text) into the
+    /// general knowledge model (`knowledge_objects` / `knowledge_edges` /
+    /// `evidence` / ...). One-time operation per dev_guide §6.
+    Migrate {
+        /// Path to corpus text files directory (used for documents, chapters,
+        /// and original-text evidence).
+        #[arg(long, default_value = "corpus")]
+        corpus_dir: String,
+    },
 }
 
 impl CliArgs {

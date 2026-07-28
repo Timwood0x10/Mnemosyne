@@ -159,6 +159,7 @@ fn is_poem_prefix(text: &str, pos: usize) -> bool {
 /// BEFORE 谓/对, not the name closest to the marker. This handles:
 ///   - 玄德谓孔明曰 → speaker=玄德 (孔明 is addressee)
 ///   - 吴用对宋江道 → speaker=吴用 (宋江 is addressee)
+///
 /// Falls back to the nearest name before the marker for plain `曰：`/`道：`.
 fn find_dialog_speaker(text: &str, pos: usize, name_pairs: &[(String, String)]) -> Option<String> {
     let before = &text[..pos];
@@ -238,7 +239,7 @@ fn find_dialog_directed(text: &str, pos: usize, name_pairs: &[(String, String)])
 }
 
 /// Find the longest matching alias in `text` and return its canonical name.
-fn longest_match<'a>(text: &str, name_pairs: &'a [(String, String)]) -> Option<String> {
+fn longest_match(text: &str, name_pairs: &[(String, String)]) -> Option<String> {
     let mut best: Option<&str> = None;
     let mut best_len: usize = 0;
 
@@ -258,7 +259,7 @@ fn extract_speech_span<'a>(text: &'a str, start: usize, all_markers: &[usize]) -
     let end = all_markers
         .iter()
         .find(|&&p| p >= start)
-        .map(|&p| p)
+        .copied()
         .unwrap_or((start + 300).min(text.len()));
     let end = floor_char_boundary(text, end);
     &text[start..end]

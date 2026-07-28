@@ -6,7 +6,7 @@
       "args": [
         "run",
         "--bin",
-        "memory-mcp",
+        "lore-scope",
         "--",
         "serve",
         "--embedding-provider",
@@ -17,7 +17,7 @@
         "${HOME}/.cognitive-memory/memory.db"
       ],
       "env": {
-        "RUST_LOG": "memory_distill=info"
+        "RUST_LOG": "lore_scope=info"
       }
     }
   },

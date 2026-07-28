@@ -1,4 +1,4 @@
-use memory_distill::ingest::relation::detect_relation_type;
+use lore_scope::ingest::relation::detect_relation_type;
 
 fn main() {
     let cases = vec![

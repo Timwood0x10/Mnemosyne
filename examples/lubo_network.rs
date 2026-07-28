@@ -1,8 +1,8 @@
 //! Example: ingest the real corpus and print 吕布's relationship network.
 use std::sync::Arc;
 
-use memory_distill::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use memory_distill::ingest::IngestionPipeline;
+use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
+use lore_scope::ingest::IngestionPipeline;
 
 const TENANT: &str = "novels";
 

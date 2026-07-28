@@ -1,7 +1,7 @@
-use memory_distill::character::CharacterStore;
-use memory_distill::character::SQLiteCharacterStore;
-use memory_distill::faction;
-use memory_distill::ingest::IngestionPipeline;
+use lore_scope::character::CharacterStore;
+use lore_scope::character::SQLiteCharacterStore;
+use lore_scope::faction;
+use lore_scope::ingest::IngestionPipeline;
 use std::sync::Arc;
 
 #[tokio::main]

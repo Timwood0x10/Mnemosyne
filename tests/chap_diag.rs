@@ -2,7 +2,7 @@
 // plus a sample of chapter numbers, to verify splitting is correct.
 //
 // Run: cargo test --test chap_diag -- --ignored --nocapture
-use memory_distill::ingest::corpus;
+use lore_scope::ingest::corpus;
 
 #[test]
 #[ignore]

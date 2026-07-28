@@ -9,8 +9,8 @@
 
 use std::sync::Arc;
 
-use memory_distill::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use memory_distill::ingest::IngestionPipeline;
+use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
+use lore_scope::ingest::IngestionPipeline;
 
 const TENANT: &str = "novels";
 
