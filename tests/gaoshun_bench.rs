@@ -1,6 +1,6 @@
-use std::sync::Arc;
 use lore_scope::character::SQLiteCharacterStore;
 use lore_scope::ingest::IngestionPipeline;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn bench_ingest() {
@@ -19,10 +19,17 @@ async fn bench_ingest() {
     let stats = pipeline.run().await.unwrap();
     let elapsed = start.elapsed();
 
-    eprintln!("三国: {} chars, {} events, {} relations", stats.characters, stats.events, stats.relations);
+    eprintln!(
+        "三国: {} chars, {} events, {} relations",
+        stats.characters, stats.events, stats.relations
+    );
     eprintln!("⏱  {:.1}s", elapsed.as_secs_f64());
 
     assert_eq!(stats.characters, 51);
     assert!(stats.events >= 900, "events >= 900, got {}", stats.events);
-    assert!(stats.relations >= 700, "relations >= 700, got {}", stats.relations);
+    assert!(
+        stats.relations >= 700,
+        "relations >= 700, got {}",
+        stats.relations
+    );
 }

@@ -304,7 +304,9 @@ impl IngestionPipeline {
                 .or_default()
                 .push((m.start, m.end, m.alias.clone()));
         }
-        if _profile { eprintln!("  ch{} t=aliases: {}ms", ch.num, _t0.elapsed().as_millis()); }
+        if _profile {
+            eprintln!("  ch{} t=aliases: {}ms", ch.num, _t0.elapsed().as_millis());
+        }
 
         // Process events per character (max 1 per chapter)
         for (name, positions) in &chars_positions {
@@ -366,7 +368,9 @@ impl IngestionPipeline {
                 }
             }
         }
-        if _profile { eprintln!("  ch{} t=events: {}ms", ch.num, _t0.elapsed().as_millis()); }
+        if _profile {
+            eprintln!("  ch{} t=events: {}ms", ch.num, _t0.elapsed().as_millis());
+        }
 
         // Build relation index once per chapter (not per pair) for O(N²)-free
         // relation type detection. Pre-computes keyword and character positions
@@ -423,12 +427,8 @@ impl IngestionPipeline {
                     .unwrap_or(false);
                 if current_is_generic {
                     let new_type = relation_index.detect_type(&char_positions_simple, a, b);
-                    let ctx = relation::find_relation_context_indexed(
-                        text,
-                        &char_positions_simple,
-                        a,
-                        b,
-                    );
+                    let ctx =
+                        relation::find_relation_context_indexed(text, &char_positions_simple, a, b);
                     // Store when: (1) no context yet, or (2) we found a
                     // specific type that should replace the generic one.
                     let should_store = !has_context || new_type != "关联";
@@ -448,7 +448,9 @@ impl IngestionPipeline {
                 }
             }
         }
-        if _profile { eprintln!("  ch{} t=pairs: {}ms", ch.num, _t0.elapsed().as_millis()); }
+        if _profile {
+            eprintln!("  ch{} t=pairs: {}ms", ch.num, _t0.elapsed().as_millis());
+        }
 
         // Dialog-chain-based directed relation extraction.
         //
@@ -467,7 +469,14 @@ impl IngestionPipeline {
         };
         if _profile {
             let n_dm = text.matches("曰：").count();
-            eprintln!("  ch{} t=dialog_extract: {:.0}ms {}rels ({}曰: {}name_pairs)", ch.num, _dialog_cost, dialog_relations.len(), n_dm, name_pairs.len());
+            eprintln!(
+                "  ch{} t=dialog_extract: {:.0}ms {}rels ({}曰: {}name_pairs)",
+                ch.num,
+                _dialog_cost,
+                dialog_relations.len(),
+                n_dm,
+                name_pairs.len()
+            );
         }
         for dr in &dialog_relations {
             let key = if dr.speaker < dr.addressee {
@@ -505,7 +514,9 @@ impl IngestionPipeline {
             }
         }
 
-        if _profile { eprintln!("  ch{} t=final: {}ms", ch.num, _t0.elapsed().as_millis()); }
+        if _profile {
+            eprintln!("  ch{} t=final: {}ms", ch.num, _t0.elapsed().as_millis());
+        }
         Ok(())
     }
 

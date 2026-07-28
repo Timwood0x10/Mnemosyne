@@ -20,6 +20,7 @@ pub struct EntityDictionary {
 }
 
 /// Entity registry that accepts multiple providers and produces a dictionary.
+#[derive(Default)]
 pub struct EntityRegistry {
     providers: Vec<Arc<dyn EntityProvider>>,
 }
@@ -29,12 +30,6 @@ impl std::fmt::Debug for EntityRegistry {
         f.debug_struct("EntityRegistry")
             .field("provider_count", &self.providers.len())
             .finish()
-    }
-}
-
-impl Default for EntityRegistry {
-    fn default() -> Self {
-        Self { providers: Vec::new() }
     }
 }
 

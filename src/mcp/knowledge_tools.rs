@@ -18,8 +18,8 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::error::Error;
-use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::SQLiteKnowledgeStore;
+use crate::knowledge::store::KnowledgeStore;
 use crate::mcp::server::ServerBuilder;
 use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler};
 
@@ -47,9 +47,8 @@ fn opt_usize(args: &Value, key: &str, default: usize) -> usize {
 
 /// Build a success [`ToolCallResult`] containing a single JSON text block.
 fn json_ok(value: &impl serde::Serialize) -> Result<ToolCallResult, Error> {
-    let text = serde_json::to_string_pretty(value).map_err(|e| {
-        Error::Internal(format!("serialize result: {e}"))
-    })?;
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| Error::Internal(format!("serialize result: {e}")))?;
     Ok(ToolCallResult {
         content: vec![ContentBlock {
             block_type: "text".into(),

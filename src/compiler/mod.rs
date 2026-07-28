@@ -73,7 +73,7 @@ pub struct Chunk {
 #[derive(Debug, Clone)]
 pub struct Sentence {
     pub chunk_index: usize,
-    pub index: usize,       // position within the chunk
+    pub index: usize, // position within the chunk
     pub text: String,
     pub start_offset: usize,
     pub end_offset: usize,
@@ -91,8 +91,8 @@ pub type SentenceId = usize;
 #[derive(Debug, Clone)]
 pub struct Mention {
     pub sentence_id: SentenceId,
-    pub surface: String,         // "子龙"
-    pub canonical_name: String,  // "赵云"
+    pub surface: String,        // "子龙"
+    pub canonical_name: String, // "赵云"
     pub offset: Range<usize>,
     pub confidence: f64,
 }
@@ -103,7 +103,7 @@ pub struct Mention {
 #[derive(Debug, Clone)]
 pub struct ResolvedMention {
     pub mention: Mention,
-    pub resolved_to: String,     // "他" → "赵云"
+    pub resolved_to: String, // "他" → "赵云"
     pub strategy: ResolveStrategy,
 }
 

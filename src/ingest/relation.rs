@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use super::characters::{get_novel_characters, NOVELS};
+use super::characters::{NOVELS, get_novel_characters};
 use super::extract::floor_char_boundary;
 use serde::Deserialize;
 
@@ -145,7 +145,10 @@ pub struct DialogRelation {
 
 const DIALOG_MARKERS: &[&str] = &["曰：", "道："];
 
-pub fn extract_dialog_relations(text: &str, name_pairs: &[(String, String)]) -> Vec<DialogRelation> {
+pub fn extract_dialog_relations(
+    text: &str,
+    name_pairs: &[(String, String)],
+) -> Vec<DialogRelation> {
     let ni = DialogNameIndex::new(name_pairs);
 
     let mut marker_positions: Vec<usize> = Vec::new();
@@ -255,8 +258,10 @@ impl DialogNameIndex {
             .match_kind(aho_corasick::MatchKind::Standard)
             .build(&patterns)
             .expect("Aho-Corasick automaton build should never fail");
-        let names: Vec<(String, String)> =
-            name_pairs.iter().map(|(a, c)| (a.clone(), c.clone())).collect();
+        let names: Vec<(String, String)> = name_pairs
+            .iter()
+            .map(|(a, c)| (a.clone(), c.clone()))
+            .collect();
         Self { ac, names }
     }
 
@@ -372,12 +377,14 @@ pub fn detect_relation_type(context: &str, a: &str, b: &str) -> String {
             for (kw_pos, _) in context.match_indices(kw.as_str()) {
                 let a_near = a_names.iter().any(|an| {
                     context.match_indices(an.as_str()).any(|(p, _)| {
-                        (p as i32 - kw_pos as i32).unsigned_abs() < RELATION_KEYWORD_PROXIMITY as u32
+                        (p as i32 - kw_pos as i32).unsigned_abs()
+                            < RELATION_KEYWORD_PROXIMITY as u32
                     })
                 });
                 let b_near = b_names.iter().any(|bn| {
                     context.match_indices(bn.as_str()).any(|(p, _)| {
-                        (p as i32 - kw_pos as i32).unsigned_abs() < RELATION_KEYWORD_PROXIMITY as u32
+                        (p as i32 - kw_pos as i32).unsigned_abs()
+                            < RELATION_KEYWORD_PROXIMITY as u32
                     })
                 });
 
@@ -489,7 +496,10 @@ pub fn find_relation_context_indexed(
     for &a_pos in a_positions {
         let ctx_start = floor_char_boundary(text, a_pos.saturating_sub(30));
         let ctx_end = floor_char_boundary(text, (a_pos + 200).min(text.len()));
-        if !b_positions.iter().any(|&bp| bp >= ctx_start && bp < ctx_end) {
+        if !b_positions
+            .iter()
+            .any(|&bp| bp >= ctx_start && bp < ctx_end)
+        {
             continue;
         }
         let ctx = &text[ctx_start..ctx_end];

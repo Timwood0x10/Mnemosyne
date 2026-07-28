@@ -17,18 +17,17 @@
 //! // ctx.result now contains the CompileResult
 //! ```
 
-use crate::compiler::document::Document;
-use crate::compiler::chunk;
 use crate::compiler::CompileContext;
+use crate::compiler::chunk;
+use crate::compiler::document::Document;
 use crate::error::Result;
 
 /// Compile a text file into a [`CompileContext`].
 ///
 /// Shortcut for: load file → create context → run all phases.
 pub async fn from_file(path: impl AsRef<std::path::Path>) -> Result<CompileContext> {
-    let doc = Document::from_file(path).map_err(|e| {
-        crate::error::distillation_error("document", format!("load file: {e}"))
-    })?;
+    let doc = Document::from_file(path)
+        .map_err(|e| crate::error::distillation_error("document", format!("load file: {e}")))?;
     from_document(doc).await
 }
 

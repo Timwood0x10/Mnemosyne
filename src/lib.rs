@@ -34,8 +34,8 @@
 pub mod character;
 pub mod classifier;
 pub mod compiler;
-pub mod conversation_compiler;
 pub mod config;
+pub mod conversation_compiler;
 pub mod detector;
 pub mod distiller;
 pub mod embed;

@@ -54,7 +54,11 @@ impl Document {
     /// Create a document from a raw string.
     ///
     /// The caller provides `title` and `doc_type` directly.
-    pub fn from_text(title: impl Into<String>, doc_type: impl Into<String>, text: impl Into<String>) -> Self {
+    pub fn from_text(
+        title: impl Into<String>,
+        doc_type: impl Into<String>,
+        text: impl Into<String>,
+    ) -> Self {
         Document {
             title: title.into(),
             author: None,
@@ -125,8 +129,8 @@ mod tests {
     /// Invariants: The document title equals the file name without extension.
     #[test]
     fn document_title_from_file_stem() {
-        let d = Document::from_file("corpus/三国演义.txt")
-            .expect("三国演义.txt should be readable");
+        let d =
+            Document::from_file("corpus/三国演义.txt").expect("三国演义.txt should be readable");
         assert_eq!(d.title, "三国演义", "title should be the file stem");
         assert_eq!(d.doc_type, "text", "txt file → doc_type=text");
         assert!(!d.text.is_empty(), "text should be non-empty");

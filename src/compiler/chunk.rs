@@ -115,7 +115,7 @@ pub fn plan(text: &str, config: Config) -> Vec<Chunk> {
             text: chunk_chars,
             start_offset,
             end_offset,
-            segment_num: 1,   // default; chapter-aware chunking will set this
+            segment_num: 1, // default; chapter-aware chunking will set this
             overlap_before,
             overlap_after,
         });
@@ -174,7 +174,11 @@ mod tests {
         };
         let chunks = plan(&text, cfg);
         // 5000 / (2000-200) = 5000/1800 ≈ 2.78 → 3 chunks
-        assert!(chunks.len() >= 2, "5000 chars should produce ≥2 chunks, got {}", chunks.len());
+        assert!(
+            chunks.len() >= 2,
+            "5000 chars should produce ≥2 chunks, got {}",
+            chunks.len()
+        );
         // Verify ordering: each chunk's index matches its position
         for (i, chunk) in chunks.iter().enumerate() {
             assert_eq!(chunk.index, i, "chunk index should match position");
@@ -194,8 +198,10 @@ mod tests {
         assert!(chunks.len() >= 2, "need at least 2 chunks for overlap test");
 
         // Chunk 0 end chars should overlap with Chunk 1 start chars
-        let overlap_text = &text[chunks[0].end_offset - chunks[0].overlap_after..chunks[0].end_offset];
-        let chunk1_start = &text[chunks[1].start_offset..chunks[1].start_offset + overlap_text.len()];
+        let overlap_text =
+            &text[chunks[0].end_offset - chunks[0].overlap_after..chunks[0].end_offset];
+        let chunk1_start =
+            &text[chunks[1].start_offset..chunks[1].start_offset + overlap_text.len()];
         // For all-Chinese text, overlap char count should match configured overlap
         assert!(
             overlap_text.chars().count() >= cfg.overlap / 2,
