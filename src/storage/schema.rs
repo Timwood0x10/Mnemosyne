@@ -1,26 +1,98 @@
-//! Schema definitions for the general knowledge model.
+//! Schema definitions for the LoreScope world model (V7).
 //!
-//! Holds the frozen DDL for the eight general-model tables defined in
-//! `docs/zh/dev_guide.md` (V2.0 冻结版 §3): `documents`, `chapters`,
-//! `knowledge_objects`, `knowledge_edges`, `knowledge_evidence`, `evidence`,
-//! `mentions`, and `compiler_runs`. The optional `sentences` table is
-//! intentionally omitted (dev_guide §3.1 marks it optional).
+//! ## Core tables (V7 Entity-centric model)
 //!
-//! Design notes:
-//! - All surrogate ids are `INTEGER PRIMARY KEY AUTOINCREMENT` (i64 in Rust).
-//! - `created_at` columns default to unix seconds via `strftime('%s','localtime')`.
-//! - `properties` / `statistics` are `JSON DEFAULT '{}'` — arbitrary attribute
-//!   bags so the model never grows new columns (dev_guide §3.4 "不再加字段").
-//! - `knowledge_edges.origin` is a `CHECK` column driven by [`Origin`].
-//! - `knowledge_evidence` has a `UNIQUE(source_type, source_id, evidence_id)`
-//!   constraint so one evidence row can back many facts without duplicating
-//!   the link (dev_guide §3.7).
+//! | Table | Purpose |
+//! |-------|---------|
+//! | `entities` | World entity nodes (person/place/org) |
+//! | `entity_profiles` | Entity attributes (字, 籍贯, 外貌, ...) |
+//! | `events` | World state changes |
+//! | `event_participants` | Who participated in each event |
+//! | `relations` | Long-term entity relationships |
+//! | `timeline` | Chronological event index |
+//!
+//! ## Legacy tables (V6 general model, retained for backward compatibility)
+//!
+//! `documents`, `chapters`, `sentences`, `knowledge_objects`,
+//! `knowledge_edges`, `knowledge_evidence`, `evidence`, `mentions`, `compiler_runs`
+//!
+//! ## Design notes
+//!
+//! - All surrogate ids are `INTEGER PRIMARY KEY AUTOINCREMENT`.
+//! - `created_at` / `updated_at` default to unix seconds.
+//! - `entity_id` foreign keys use deferred validation for batch inserts.
 
-/// DDL for the general knowledge model — executed idempotently by
-/// [`crate::knowledge::SQLiteKnowledgeStore::init`](super::super::knowledge::SQLiteKnowledgeStore).
-///
-/// `CREATE TABLE IF NOT EXISTS` makes re-running safe, which the migrator and
-/// tests rely on.
+/// DDL for the V7 entity-centric world model — executed idempotently by
+/// [`crate::knowledge::SQLiteKnowledgeStore::init`].
+pub const WORLD_SCHEMA: &str = "
+-- ── entities ────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS entities (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL,
+    entity_type TEXT NOT NULL DEFAULT 'person',      -- person / place / org / concept
+    status      TEXT NOT NULL DEFAULT 'active',       -- active / deceased / disbanded
+    importance  REAL DEFAULT 0.5,
+    created_at  INTEGER DEFAULT (strftime('%s','localtime')),
+    updated_at  INTEGER DEFAULT (strftime('%s','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
+CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+
+-- ── entity_profiles ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS entity_profiles (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    key         TEXT NOT NULL,                   -- courtesy_name / birthplace / appearance / occupation
+    value       TEXT NOT NULL,
+    confidence  REAL DEFAULT 1.0,
+    evidence_id INTEGER REFERENCES evidence(id),
+    UNIQUE(entity_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_profiles_entity ON entity_profiles(entity_id);
+
+-- ── events ──────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS events (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    title       TEXT NOT NULL,                   -- 赤壁之战 / 桃园三结义
+    event_type  TEXT NOT NULL DEFAULT 'event',   -- battle / dialogue / death / marriage
+    timestamp   INTEGER,                         -- chapter number or year
+    location    TEXT,
+    description TEXT,
+    importance  REAL DEFAULT 0.5,
+    created_at  INTEGER DEFAULT (strftime('%s','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
+
+-- ── event_participants ──────────────────────────────────────
+CREATE TABLE IF NOT EXISTS event_participants (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id    INTEGER NOT NULL REFERENCES events(id),
+    entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    role        TEXT DEFAULT 'participant',      -- protagonist / antagonist / witness
+    side        TEXT,                            -- faction / alignment
+    UNIQUE(event_id, entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_participants_event ON event_participants(event_id);
+CREATE INDEX IF NOT EXISTS idx_participants_entity ON event_participants(entity_id);
+
+-- ── relations ───────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS relations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id       INTEGER NOT NULL REFERENCES entities(id),
+    target_id       INTEGER NOT NULL REFERENCES entities(id),
+    relation_type   TEXT NOT NULL,               -- brother / enemy / teacher / spouse
+    valid_from      INTEGER,                     -- event id where relation started
+    valid_to        INTEGER,                     -- event id where relation ended (NULL=ongoing)
+    confidence      REAL DEFAULT 1.0,
+    created_at      INTEGER DEFAULT (strftime('%s','localtime')),
+    UNIQUE(source_id, target_id, relation_type)
+);
+CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
+CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
+";
+
+/// Legacy V6 DDL (retained for backward compatibility).
+/// Used by the existing `SQLiteKnowledgeStore` for querying migrated data.
 pub const KNOWLEDGE_SCHEMA: &str = "
 -- ── documents ───────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS documents (

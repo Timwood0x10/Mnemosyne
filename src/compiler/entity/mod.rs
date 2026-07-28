@@ -108,6 +108,7 @@ impl EntityEngine {
             if let Some((canonical, _obj_type, conf)) = self.alias_map.get(matched) {
                 mentions.push(Mention {
                     sentence_id: 0, // filled in later
+                    entity_id: None,
                     surface: matched.to_owned(),
                     canonical_name: canonical.clone(),
                     offset: (span.start)..(span.end),
@@ -148,6 +149,7 @@ impl EntityEngine {
                 if !already_has {
                     mentions.push(Mention {
                         sentence_id: 0,
+                        entity_id: None,
                         surface: spec.short.clone(),
                         canonical_name: spec.name.clone(),
                         offset: pos..(pos + short_len),

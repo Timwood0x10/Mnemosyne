@@ -113,22 +113,9 @@ impl JsonEntityProvider {
         &self.verb_groups
     }
 
-    /// Build an [`observation::Config`](crate::compiler::observation::Config) from the profile's verb groups.
-    pub fn observation_config(&self) -> crate::compiler::observation::Config {
-        let mut cfg = crate::compiler::observation::Config::default();
-        if self.verb_groups.len() > 0 {
-            cfg.strong_verbs = self.verb_groups[0].clone();
-        }
-        if self.verb_groups.len() > 1 {
-            cfg.dialog_markers = self.verb_groups[1]
-                .iter()
-                .map(|v| format!("{}：", v))
-                .collect();
-        }
-        if self.verb_groups.len() > 2 {
-            cfg.action_verbs = self.verb_groups[2].clone();
-        }
-        cfg
+    /// Build an observation config from the profile's verb groups.
+    pub fn observation_config(&self) -> Vec<Vec<String>> {
+        self.verb_groups.clone()
     }
 
     /// Load all JSON files from a directory.

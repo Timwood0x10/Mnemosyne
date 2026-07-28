@@ -1,61 +1,38 @@
-//! # LoreScope Compiler Pipeline
+//! # LoreScope World Model Compiler V7
 //!
-//! Converts unstructured text into a structured, evidence-backed knowledge
-//! graph of objects, relations, and evidence slices.
+//! Converts narrative text into an Entity-centric world model.
 //!
-//! ## Pipeline stages
+//! ## Pipeline
 //!
 //! ```text
-//! Text → Document → Sentence → Entity → Resolver → Observation
-//!   → ObjectBuilder + EdgeBuilder → Rule → Writer
+//! Input (introductions + body text)
+//!   │
+//!   ├── Pass 1: World Builder (profiles → Entity nodes)
+//!   └── Pass 2: Story Compiler (body text → Events → Relations)
+//!   │
+//!   └── Timeline Builder → Writer → Store
 //! ```
-//!
-//! Each stage reads from (and writes to) the shared [`CompileContext`].
-//! Nothing is persisted until [`writer`] writes the final [`CompileResult`]
-//! into a [`KnowledgeWriter`](crate::knowledge::store::KnowledgeWriter).
 
 pub mod alias;
-pub mod builder;
 pub mod chunk;
 pub mod document;
+pub mod extract;
 pub mod inference;
-pub mod merge;
-pub mod observation;
 pub mod pipeline;
+pub mod profile;
 pub mod pronoun;
+pub mod relation;
 pub mod sentence;
+pub mod timeline;
 pub mod writer;
 
 pub mod entity;
 
 use std::ops::Range;
 
-use serde::{Deserialize, Serialize};
+// ── Chunk / Sentence (Phase 1-2, shared IR) ──────────────────────────────────
 
-use crate::knowledge::Origin;
-
-// ── CompileContext ───────────────────────────────────────────────────────────
-
-/// Shared context carried through the compiler pipeline.
-///
-/// Each stage fills in its corresponding field. At the end, [`Self::result`]
-/// holds the final [`CompileResult`] ready for the writer.
-#[derive(Debug, Default)]
-pub struct CompileContext {
-    pub document: Option<document::Document>,
-    pub chunks: Vec<Chunk>,
-    pub sentences: Vec<Sentence>,
-    pub mentions: Vec<Mention>,
-    pub observations: Vec<Observation>,
-    pub result: Option<CompileResult>,
-}
-
-// ── Chunk (Phase 1) ──────────────────────────────────────────────────────────
-
-/// A chunk of the input document produced by [`ChunkPlanner`](crate::compiler::chunk).
-///
-/// Chunks are the unit of parallel compilation. Each chunk carries overlap
-/// metadata so that downstream resolvers can resolve cross-chunk references.
+/// A chunk of text (parallel compilation unit).
 #[derive(Debug, Clone)]
 pub struct Chunk {
     pub index: usize,
@@ -67,148 +44,126 @@ pub struct Chunk {
     pub overlap_after: usize,
 }
 
-// ── Sentence (Phase 2) ──────────────────────────────────────────────────────
-
-/// A single sentence split from a [`Chunk`].
+/// A single sentence.
 #[derive(Debug, Clone)]
 pub struct Sentence {
     pub chunk_index: usize,
-    pub index: usize, // position within the chunk
+    pub index: usize,
     pub text: String,
     pub start_offset: usize,
     pub end_offset: usize,
 }
 
-/// Opaque id type for referencing sentences within a compile run.
+/// Opaque id type for referencing sentences.
 pub type SentenceId = usize;
 
-// ── Mention (Phase 3) ───────────────────────────────────────────────────────
+// ── Entity (Pass 1) ─────────────────────────────────────────────────────────
 
-/// A mention of an entity in the text (IR, not persisted).
-///
-/// `entity_id` is NOT stored here — it is assigned by
-/// [`crate::knowledge::store::KnowledgeWriter`] during UPSERT.
+/// A world entity (person, place, organization).
+#[derive(Debug, Clone)]
+pub struct Entity {
+    pub id: Option<i64>,
+    pub name: String,
+    pub entity_type: String,     // person / place / org / concept
+    pub status: String,          // active / deceased / disbanded
+    pub importance: f64,
+}
+
+/// A profile attribute attached to an entity.
+#[derive(Debug, Clone)]
+pub struct EntityProfile {
+    pub entity_id: Option<i64>,
+    pub key: String,             // courtesy_name, birthplace, appearance, etc.
+    pub value: String,
+    pub confidence: f64,
+}
+
+/// A mention of an entity in the text (Pass 2 builds these from Pass 1's index).
 #[derive(Debug, Clone)]
 pub struct Mention {
-    pub sentence_id: SentenceId,
-    pub surface: String,        // "子龙"
-    pub canonical_name: String, // "赵云"
+    pub sentence_id: usize,
+    pub entity_id: Option<i64>,  // None = candidate, resolved in Pass 2
+    pub surface: String,         // "子龙"
+    pub canonical_name: String,  // "赵云"
     pub offset: Range<usize>,
     pub confidence: f64,
 }
 
-// ── ResolvedMention (Phase 4) ───────────────────────────────────────────────
+// ── Event (Pass 2) ──────────────────────────────────────────────────────────
 
-/// A [`Mention`] after coreference resolution.
+/// An event in the world timeline.
 #[derive(Debug, Clone)]
-pub struct ResolvedMention {
-    pub mention: Mention,
-    pub resolved_to: String, // "他" → "赵云"
-    pub strategy: ResolveStrategy,
+pub struct Event {
+    pub id: Option<i64>,
+    pub title: String,
+    pub event_type: String,      // battle / dialogue / death / marriage / ...
+    pub timestamp: Option<i32>,  // chapter number or year
+    pub location: Option<String>,
+    pub description: String,
+    pub participants: Vec<EventParticipant>,
+    pub importance: f64,
 }
 
-/// How a mention was resolved.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResolveStrategy {
-    /// Identity — the surface form is already the canonical name.
-    Identity,
-    /// Resolved by a pronoun ("他" / "她" / "其").
-    Pronoun,
-    /// Resolved by a title or role ("主公" / "先生" / "将军").
-    Title,
-    /// Resolved by context (nearest preceding subject).
-    Context,
-}
-
-// ── Observation (Phase 5) ───────────────────────────────────────────────────
-
-/// A subject–predicate–object observation extracted from a single sentence.
-///
-/// This is the central IR of the compiler. Everything downstream derives from
-/// these triples. Observations are NOT persisted — they are intermediate
-/// representations.
+/// A participant in an event.
 #[derive(Debug, Clone)]
-pub struct Observation {
-    pub sentence_id: SentenceId,
-    pub predicate: String,
-    pub arguments: Vec<Argument>,
-    pub confidence: f64,
+pub struct EventParticipant {
+    pub entity_name: String,
+    pub role: String,            // protagonist / antagonist / witness
 }
 
-/// A typed argument in an [`Observation`].
+/// A long-term relation between two entities.
 #[derive(Debug, Clone)]
-pub struct Argument {
-    pub role: SemanticRole,
-    pub value: String,
-}
-
-/// Semantic roles for observation arguments.
-///
-/// V1 only covers the most common roles. `Other` allows extension without
-/// changing the struct.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SemanticRole {
-    Subject,
-    Object,
-    Recipient,
-    Instrument,
-    Location,
-    Time,
-    Modifier,
-    Other(String),
-}
-
-// ── CompileResult (Phase 6) ─────────────────────────────────────────────────
-
-/// Final output of the compiler pipeline, ready for the [`writer`].
-///
-/// NOT persisted directly — the writer converts these into
-/// [`KnowledgeObject`], [`KnowledgeEdge`], and [`Evidence`] before storing.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct CompileResult {
-    pub objects: Vec<CompiledObject>,
-    pub edges: Vec<CompiledEdge>,
-    pub stats: CompileStats,
-}
-
-/// A compiled object (IR form, before storage conversion).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompiledObject {
-    pub name: String,
-    pub object_type: String,
-    pub properties: std::collections::HashMap<String, String>,
-    pub evidence: EvidenceSlice,
-}
-
-/// A compiled edge (IR form, before storage conversion).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompiledEdge {
+pub struct Relation {
     pub source: String,
-    pub predicate: String,
     pub target: String,
-    pub origin: Origin,
+    pub relation_type: String,   // brother / enemy / teacher / spouse
+    pub valid_from: Option<i32>, // event timestamp
+    pub valid_to: Option<i32>,
     pub confidence: f64,
-    pub evidence: EvidenceSlice,
 }
+
+// ── Evidence ─────────────────────────────────────────────────────────────────
 
 /// A slice of the original text that supports a fact.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct EvidenceSlice {
     pub text: String,
-    pub sentence_id: SentenceId,
+    pub sentence_id: usize,
     pub segment_num: i32,
     pub offset_start: usize,
     pub offset_end: usize,
 }
 
+// ── CompileContext ───────────────────────────────────────────────────────────
+
+/// Shared context — flows through the entire pipeline.
+#[derive(Debug, Default)]
+pub struct CompileContext {
+    // Input
+    pub document_title: String,
+
+    // Pass 1: World Builder outputs
+    pub entities: Vec<Entity>,
+    pub profiles: Vec<EntityProfile>,
+
+    // Pass 1: Alias index
+    pub mentions: Vec<Mention>,
+
+    // Pass 2: Story Compiler outputs
+    pub events: Vec<Event>,
+    pub relations: Vec<Relation>,
+
+    // Timing
+    pub current_timestamp: Option<i32>,
+}
+
 /// Compilation statistics.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default)]
 pub struct CompileStats {
-    pub sentences: usize,
+    pub entities: usize,
+    pub profiles: usize,
     pub mentions: usize,
-    pub observations: usize,
-    pub objects: usize,
-    pub edges: usize,
+    pub events: usize,
+    pub relations: usize,
     pub evidence_slices: usize,
-    pub derived_edges: usize,
 }
