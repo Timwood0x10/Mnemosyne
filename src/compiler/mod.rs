@@ -17,6 +17,7 @@ pub mod alias;
 pub mod chunk;
 pub mod document;
 pub mod extract;
+pub mod faction;
 pub mod inference;
 pub mod pipeline;
 pub mod profile;
