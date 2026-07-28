@@ -38,40 +38,12 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
     }
 
     let mut sentences = Vec::new();
-    let mut start = 0usize;
     let mut sent_index = 0usize;
-
-    let chars: Vec<char> = chunk.text.chars().collect();
-    let total_chars = chars.len();
-    let mut char_pos = 0usize;
-
-    for (byte_pos, _) in chunk.text.char_indices() {
-        // Find which char index this byte corresponds to
-        // (Only advance char_pos for every valid char)
-        if byte_pos > 0 {
-            // count chars up to this byte
-            let mut count = 0usize;
-            for (i, c) in chunk.text.char_indices() {
-                if i >= byte_pos {
-                    break;
-                }
-                count += c.len_utf8();
-            }
-            // Actually this is getting complicated. Let me use a simpler approach.
-        }
-        break; // start over
-    }
-
-    // Simpler approach: iterate by chars
-    let mut local_byte = 0usize;
-    let text_bytes = chunk.text.as_bytes();
-
-    // We'll track positions using char_indices
     let mut iter_start = 0usize;
 
-    for (i, (byte_idx, c)) in chunk.text.char_indices().enumerate() {
+    for (byte_idx, c) in chunk.text.char_indices() {
         if SEPARATORS.contains(&c) {
-            // End of sentence: include the separator
+            // End of sentence: include the separator character
             let end_byte = byte_idx + c.len_utf8();
             let sentence_text = &chunk.text[iter_start..end_byte];
             let trimmed = sentence_text.trim();
@@ -89,17 +61,15 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
 
             iter_start = end_byte;
 
-            // Skip any trailing whitespace/newlines after the separator
-            let mut skip = iter_start;
-            while skip < chunk.text.len()
-                && (chunk.text.as_bytes()[skip] == b' '
-                    || chunk.text.as_bytes()[skip] == b'\n'
-                    || chunk.text.as_bytes()[skip] == b'\t'
-                    || chunk.text.as_bytes()[skip] == b'\r')
+            // Skip trailing whitespace/newlines after the separator
+            while iter_start < chunk.text.len()
+                && matches!(
+                    chunk.text.as_bytes()[iter_start],
+                    b' ' | b'\n' | b'\t' | b'\r'
+                )
             {
-                skip += 1;
+                iter_start += 1;
             }
-            iter_start = skip;
         }
     }
 
@@ -107,13 +77,12 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
     if iter_start < chunk.text.len() {
         let remaining = chunk.text[iter_start..].trim();
         if !remaining.is_empty() {
-            let end_byte = chunk.text.len();
             sentences.push(Sentence {
                 chunk_index: chunk.index,
                 index: sent_index,
                 text: remaining.to_owned(),
                 start_offset: chunk.start_offset + iter_start,
-                end_offset: chunk.start_offset + end_byte,
+                end_offset: chunk.start_offset + chunk.text.len(),
             });
         }
     }
@@ -123,7 +92,7 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
 
 /// Split multiple chunks into a flat list of sentences.
 ///
-/// Each sentence's `index` restarts at 0 per chunk, but `SentenceId` in the
+/// Each sentence's `index` restarts at 0 per chunk, but [`SentenceId`] in the
 /// flat list is its position in the returned vec.
 pub fn split_all(chunks: &[Chunk]) -> Vec<Sentence> {
     let mut all = Vec::new();
@@ -133,7 +102,7 @@ pub fn split_all(chunks: &[Chunk]) -> Vec<Sentence> {
     all
 }
 
-/// Convenience: build a mapping from `(chunk_index, local_index)` → `SentenceId`.
+/// Convenience: build a mapping from `(chunk_index, local_index)` → [`SentenceId`].
 pub fn build_index(
     sentences: &[Sentence],
 ) -> std::collections::HashMap<(usize, usize), SentenceId> {
@@ -190,20 +159,13 @@ mod tests {
         let chunk = make_chunk(0, "关羽斩华雄。张飞喝断当阳桥。", 50);
         let sents = split_chunk(&chunk);
         assert_eq!(sents.len(), 2, "two sentences expected");
-        assert!(
-            sents[0].text.contains("关羽"),
-            "first sentence mentions 关羽"
-        );
-        assert!(
-            sents[1].text.contains("张飞"),
-            "second sentence mentions 张飞"
-        );
-        // Offsets should be non-overlapping
+        assert!(sents[0].text.contains("关羽"), "first mentions 关羽");
+        assert!(sents[1].text.contains("张飞"), "second mentions 张飞");
         assert!(sents[0].end_offset <= sents[1].start_offset);
     }
 
     /// Objective: Verify that mixed Chinese/English punctuation works.
-    /// Invariants: Both 。 and ! are recognized as sentence separators.
+    /// Invariants: Both 。 and ! are recognized as separators.
     #[test]
     fn mixed_punctuation() {
         let chunk = make_chunk(0, "小心！有埋伏。撤!", 0);
@@ -234,7 +196,7 @@ mod tests {
         assert_eq!(sents[0].text, "赵云救阿斗");
     }
 
-    /// Objective: Verify that split_all produces a flat list from multiple chunks.
+    /// Objective: Verify that split_all aggregates multiple chunks.
     /// Invariants: Total sentences = sum of per-chunk sentences.
     #[test]
     fn split_all_aggregates_multiple_chunks() {
@@ -255,11 +217,10 @@ mod tests {
         let chunk = make_chunk(0, "A。B。C。", 0);
         let sents = split_chunk(&chunk);
         let idx = build_index(&sents);
-        assert_eq!(idx.len(), 3, "three sentences → three index entries");
-        // Each sentence maps to its position
+        assert_eq!(idx.len(), 3, "three sentences → three entries");
         for (sid, s) in sents.iter().enumerate() {
             let key = (s.chunk_index, s.index);
-            assert_eq!(idx[&key], sid, "index should map to position");
+            assert_eq!(idx[&key], sid, "index maps to position");
         }
     }
 }
