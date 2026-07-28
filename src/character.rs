@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS character_relations (
     bidirections      INTEGER NOT NULL DEFAULT 0,
     importance        REAL NOT NULL DEFAULT 0.0,
     created_at        TEXT NOT NULL,
+    relation_source   TEXT NOT NULL DEFAULT 'co_occurrence',
+    confidence        REAL NOT NULL DEFAULT 0.5,
     metadata          TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_char_rel_src ON character_relations(source_character);
@@ -95,6 +97,44 @@ pub struct CharacterEvent {
     pub metadata: Metadata,
 }
 
+/// Relation source type for character relationships.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RelationSource {
+    /// Relationship detected via co-occurrence (generic)
+    CoOccurrence,
+    /// Relationship extracted from dialog chain
+    DialogChain,
+    /// Relationship explicitly mentioned in events/text
+    EventExplicit,
+    /// Relationship from keyword pattern match
+    KeywordMatch,
+}
+
+impl RelationSource {
+    pub fn as_str(&self) -> &str {
+        match self {
+            RelationSource::CoOccurrence => "co_occurrence",
+            RelationSource::DialogChain => "dialog_chain",
+            RelationSource::EventExplicit => "event_explicit",
+            RelationSource::KeywordMatch => "keyword_match",
+        }
+    }
+}
+
+impl std::str::FromStr for RelationSource {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.trim().to_lowercase().as_str() {
+            "co_occurrence" => Ok(RelationSource::CoOccurrence),
+            "dialog_chain" => Ok(RelationSource::DialogChain),
+            "event_explicit" => Ok(RelationSource::EventExplicit),
+            "keyword_match" => Ok(RelationSource::KeywordMatch),
+            _ => Err(format!("unknown relation source: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CharacterRelation {
     pub id: String,
@@ -106,6 +146,8 @@ pub struct CharacterRelation {
     pub chapter: i32,
     pub novel: String,
     pub bidirections: bool,
+    pub source_type: RelationSource,
+    pub confidence: f64,
     pub importance: f64,
     pub created_at: DateTime<Utc>,
     pub metadata: Metadata,
@@ -189,6 +231,12 @@ fn row_to_relation(row: &rusqlite::Row) -> rusqlite::Result<CharacterRelation> {
         chapter: row.get("chapter")?,
         novel: row.get("novel")?,
         bidirections: row.get("bidirections")?,
+        source_type: {
+            let s: String = row.get("relation_source")?;
+            s.parse::<RelationSource>()
+                .expect("invalid relation source value from database")
+        },
+        confidence: row.get("confidence")?,
         importance: row.get("importance")?,
         created_at,
         metadata: serde_json::from_str(&meta_str).unwrap_or_default(),
@@ -754,6 +802,8 @@ mod tests {
             chapter: 0,
             novel: "水浒传".to_string(),
             bidirections: false,
+            source_type: RelationSource::CoOccurrence,
+            confidence: 0.5,
             importance: 0.5,
             created_at: Utc::now(),
             metadata: Metadata::default(),

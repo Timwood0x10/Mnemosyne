@@ -143,7 +143,14 @@ pub fn extract_dialog_relations(
 fn is_poem_prefix(text: &str, pos: usize) -> bool {
     let search_start = floor_char_boundary(text, pos.saturating_sub(20));
     let prefix = &text[search_start..pos];
-    prefix.contains("诗") || prefix.contains("词")
+
+    // Common poetic markers that indicate non-dialogue text
+    prefix.contains("诗曰")
+        || prefix.contains("诗道")
+        || prefix.contains("有诗")
+        || prefix.contains("正是")
+        || prefix.contains("诗云")
+        || prefix.contains("词曰")
 }
 
 /// Find the speaker (canonical name) for a dialog marker at `pos`.
@@ -186,7 +193,7 @@ fn find_dialog_speaker(text: &str, pos: usize, name_pairs: &[(String, String)]) 
 
 /// Find the character name whose occurrence ends closest to `ref_pos` (within 50 bytes).
 fn find_name_near(text: &str, ref_pos: usize, name_pairs: &[(String, String)]) -> Option<String> {
-    let search_start = floor_char_boundary(text, ref_pos.saturating_sub(50));
+    let search_start = floor_char_boundary(text, ref_pos.saturating_sub(20)); // Reduced from 50 to 20 for tighter matching
     let search_area = &text[search_start..ref_pos];
 
     let mut best: Option<&str> = None;

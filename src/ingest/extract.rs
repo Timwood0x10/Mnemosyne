@@ -35,6 +35,94 @@ pub(crate) fn floor_char_boundary(text: &str, pos: usize) -> usize {
     p
 }
 
+/// Dialog verbs that signal a speaker attribution: `X[verb]` means "X said".
+///
+/// Single-character shortnames (e.g. 飞 for 张飞) are only recognized as a
+/// character mention when immediately followed by one of these verbs, which
+/// disambiguates the shortname from homographs inside multi-character names
+/// or common nouns.
+pub const DIALOG_VERBS: &[&str] = &[
+    "曰", "道", "言", "答", "问", "笑", "怒", "喝", "唤", "叫", "叹", "惊", "喜", "怒",
+];
+
+/// Action verbs that signal a character acting as a subject: `X[verb]` means
+/// "X (performed action)". Used together with [`DIALOG_VERBS`] to broaden
+/// single-char recognition beyond pure dialog.
+pub const ACTION_VERBS: &[&str] = &[
+    "大怒", "大喜", "领兵", "引军", "挺枪", "纵马", "大呼", "拍马", "拔剑", "挺刀", "引兵", "出马",
+    "上前", "奋然", "勃然", "大惊", "大败", "引军",
+];
+
+/// Find safe single-character shortname matches in `text`.
+///
+/// Classical Chinese novels frequently abbreviate a 2-character name to its
+/// final character in dialog contexts: "飞曰" (张飞 said), "瑜怒" (周瑜 got angry),
+/// "云大喜" (赵云 was overjoyed). Naively matching "云" everywhere would cause
+/// catastrophic false positives — "云" appears 443 times inside "云长" (关羽's
+/// courtesy name) and many more times as the noun "cloud".
+///
+/// This function only yields a match when ALL of the following hold:
+///   1. The single char is **preceded by** punctuation, whitespace, or string
+///      start — never by another Chinese character. This excludes "云长"
+///      (preceded by nothing, but followed by 长) and "玄德云" (云 is the verb
+///      "to say" here, not 赵云).
+///   2. The single char is **followed by** a dialog verb (曰/道/言/...) or an
+///      action verb (大怒/领兵/...). This excludes bare "云" as a noun.
+///
+/// Returns `(start, end, char_name)` byte ranges for each safe match.
+pub fn find_single_char_matches(
+    text: &str,
+    cdefs: &[crate::ingest::characters::CharacterDef],
+) -> Vec<(usize, usize, String)> {
+    let mut out: Vec<(usize, usize, String)> = Vec::new();
+
+    for cdef in cdefs {
+        let Some(short) = cdef.single_char else {
+            continue;
+        };
+        let short_len = short.len();
+
+        // Find every occurrence of the short char.
+        for (pos, _) in text.match_indices(short) {
+            // (1) Preceded by punctuation, whitespace, or string start.
+            // Equivalent to "not preceded by a Chinese char".
+            let prev_ok = if pos == 0 {
+                true
+            } else {
+                let prev = &text[..pos];
+                // Floor to the previous char boundary (multi-byte safe).
+                let boundary = floor_char_boundary(prev, prev.len());
+                let last_char = prev[boundary..].chars().next();
+                match last_char {
+                    None => true,
+                    Some(c) => {
+                        // Treat any CJK Unified Ideograph (U+4E00..=U+9FFF)
+                        // as a "Chinese char" that must NOT precede the short.
+                        // Punctuation, ASCII whitespace, and fullwidth Latin
+                        // all pass through.
+                        !('\u{4E00}'..='\u{9FFF}').contains(&c)
+                    }
+                }
+            };
+            if !prev_ok {
+                continue;
+            }
+
+            // (2) Followed by a dialog or action verb.
+            let after = &text[pos + short_len..];
+            let followed = DIALOG_VERBS.iter().any(|v| after.starts_with(v))
+                || ACTION_VERBS.iter().any(|v| after.starts_with(v));
+            if !followed {
+                continue;
+            }
+
+            out.push((pos, pos + short_len, cdef.name.to_string()));
+        }
+    }
+
+    out
+}
+
 /// Find the sentence boundary before position `pos` in `text`.
 ///
 /// Returns the byte position where the sentence containing `pos` begins —

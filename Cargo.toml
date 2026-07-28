@@ -1,5 +1,5 @@
 [package]
-name = "memory_distill"
+name = "LoreScope"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -13,11 +13,11 @@ keywords = ["mcp", "memory", "llm", "agent", "sqlite-vec"]
 categories = ["asynchronous", "database-implementations"]
 
 [lib]
-name = "memory_distill"
+name = "lore_scope"
 path = "src/lib.rs"
 
 [[bin]]
-name = "memory-mcp"
+name = "lore-scope"
 path = "src/main.rs"
 
 [dependencies]

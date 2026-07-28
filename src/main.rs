@@ -2,7 +2,7 @@
 //!
 //! Wires together the configuration, store, embedder, distiller, retrieval
 //! engine, and MCP server, then registers the `memory_*` and `character_*`
-//! MCP tools (`memory_distill`, `memory_compile`, `memory_search`,
+//! MCP tools (`lore_scope`, `memory_compile`, `memory_search`,
 //! `memory_store`, `memory_feedback`, `memory_stats`, `character_search`,
 //! `character_network`, `character_ingest`, `character_graph`) and runs the
 //! protocol loop over stdio.
@@ -14,21 +14,21 @@ use clap::Parser;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
-use memory_distill::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use memory_distill::compiler::ConversationCompiler;
-use memory_distill::config::{CliArgs, Command, EmbeddingProvider};
-use memory_distill::distiller::{DistillationConfig, Distiller, PipelineDistiller};
-use memory_distill::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
-use memory_distill::error::Error;
-use memory_distill::ingest::IngestionPipeline;
-use memory_distill::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
-use memory_distill::mcp::{MCPServer, ServerBuilder, StdioTransport};
-use memory_distill::prompt::PromptBuilder;
-use memory_distill::retrieval::RetrievalEngine;
-use memory_distill::store::{ExperienceRepository, SQLiteVecStore};
-use memory_distill::types::{Experience, MemoryType, Message};
+use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
+use lore_scope::compiler::ConversationCompiler;
+use lore_scope::config::{CliArgs, Command, EmbeddingProvider};
+use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
+use lore_scope::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
+use lore_scope::error::Error;
+use lore_scope::ingest::IngestionPipeline;
+use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
+use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
+use lore_scope::prompt::PromptBuilder;
+use lore_scope::retrieval::RetrievalEngine;
+use lore_scope::store::{ExperienceRepository, SQLiteVecStore};
+use lore_scope::types::{Experience, MemoryType, Message};
 
-/// Tool: distill memories from a conversation (`memory_distill`).
+/// Tool: distill memories from a conversation (`lore_scope`).
 struct MemoryDistillTool {
     distiller: Arc<PipelineDistiller>,
 }
@@ -181,7 +181,7 @@ impl ToolHandler for MemoryStatsTool {
     }
 }
 
-/// Parse the `messages` array from a `memory_distill` tool call.
+/// Parse the `messages` array from a `lore_scope` tool call.
 fn parse_messages(arr: &[Value]) -> Result<Vec<Message>, Error> {
     let mut out = Vec::with_capacity(arr.len());
     for raw in arr {
@@ -209,7 +209,7 @@ fn parse_messages(arr: &[Value]) -> Result<Vec<Message>, Error> {
 }
 
 /// Build the embedder based on the configured `embedding_provider`.
-fn build_embedder(cfg: &memory_distill::config::Config) -> AnyhowResult<Arc<dyn EmbeddingService>> {
+fn build_embedder(cfg: &lore_scope::config::Config) -> AnyhowResult<Arc<dyn EmbeddingService>> {
     match cfg.embedding_provider {
         EmbeddingProvider::None => Ok(Arc::new(NullEmbedder::new())),
         EmbeddingProvider::Openai | EmbeddingProvider::Ollama => {
@@ -226,7 +226,7 @@ fn build_embedder(cfg: &memory_distill::config::Config) -> AnyhowResult<Arc<dyn 
 
 /// Build the storage backend.
 async fn build_store(
-    cfg: &memory_distill::config::Config,
+    cfg: &lore_scope::config::Config,
 ) -> AnyhowResult<Arc<dyn ExperienceRepository>> {
     let store = SQLiteVecStore::open(&cfg.db_path, cfg.vector_dim)
         .await
@@ -236,7 +236,7 @@ async fn build_store(
 
 /// Build the retrieval engine based on the configured `retrieval_mode`.
 fn build_retrieval_engine(
-    cfg: &memory_distill::config::Config,
+    cfg: &lore_scope::config::Config,
     embedder: Arc<dyn EmbeddingService>,
     store: Arc<dyn ExperienceRepository>,
 ) -> Arc<RetrievalEngine> {
@@ -294,8 +294,8 @@ impl ToolHandler for MemoryCompileTool {
                     // the distiller (Phase 2) and is deduplicated against
                     // existing knowledge memories by content hash, so that
                     // re-stated decisions don't stack up unbounded.
-                    let noise_filter = memory_distill::filter::NoiseFilter::new();
-                    let security_filter = memory_distill::filter::SecurityFilter::new();
+                    let noise_filter = lore_scope::filter::NoiseFilter::new();
+                    let security_filter = lore_scope::filter::SecurityFilter::new();
                     let existing = d
                         .store()
                         .get_by_memory_type(tenant_id, MemoryType::Knowledge)
@@ -606,7 +606,7 @@ impl ToolHandler for CharacterGraphTool {
 
 /// Build the MCP server with all `memory_*` and `character_*` tools registered.
 async fn build_server(
-    cfg: &memory_distill::config::Config,
+    cfg: &lore_scope::config::Config,
 ) -> AnyhowResult<(MCPServer, Arc<PipelineDistiller>, Arc<RetrievalEngine>)> {
     let store = build_store(cfg).await?;
     let embedder = build_embedder(cfg)?;
@@ -630,11 +630,11 @@ async fn build_server(
         version: env!("CARGO_PKG_VERSION").to_string(),
     });
 
-    // memory_distill
+    // lore_scope
     builder = builder
         .tool(
             ToolDefinition {
-                name: "memory_distill".into(),
+                name: "lore_scope".into(),
                 description: "Distill memories from a conversation's messages".into(),
                 input_schema: serde_json::json!({
                     "type": "object",

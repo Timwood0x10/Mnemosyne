@@ -18,7 +18,8 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::character::{
-    CharacterAttribute, CharacterEvent, CharacterRelation, CharacterStore, SQLiteCharacterStore,
+    CharacterAttribute, CharacterEvent, CharacterRelation, CharacterStore, RelationSource,
+    SQLiteCharacterStore,
 };
 use crate::error::Result;
 use crate::faction;
@@ -198,7 +199,13 @@ impl IngestionPipeline {
 
         // Scan chapters
         for ch in &chapters {
-            self.process_chapter(ch, &char_search_names, &mut char_info, &name_pairs)?;
+            self.process_chapter(
+                ch,
+                novel_name,
+                &char_search_names,
+                &mut char_info,
+                &name_pairs,
+            )?;
         }
 
         // Insert into DB
@@ -215,6 +222,7 @@ impl IngestionPipeline {
     fn process_chapter(
         &self,
         ch: &corpus::Chapter,
+        novel_name: &str,
         char_search_names: &HashMap<&str, Vec<String>>,
         char_info: &mut HashMap<&str, CharInfo>,
         name_pairs: &[(String, String)],
@@ -234,6 +242,24 @@ impl IngestionPipeline {
                     });
                 }
             }
+        }
+
+        // Add safe single-char shortname matches (e.g. "飞曰"→张飞, "瑜怒"→周瑜).
+        //
+        // Single chars are recognized only when (1) preceded by punctuation /
+        // whitespace / string-start and (2) followed by a dialog or action
+        // verb. This avoids false positives on multi-char names that contain
+        // the same character (e.g. "云长" for 关羽, vs. "云" for 赵云). See
+        // [`extract::find_single_char_matches`] for the full safety contract.
+        let cdefs = characters::get_novel_characters(novel_name);
+        let single_char_matches = extract::find_single_char_matches(text, cdefs);
+        for (start, end, name) in single_char_matches {
+            alias_matches.push(AliasMatch {
+                start,
+                end,
+                alias: name.clone(),
+                character: name,
+            });
         }
 
         // Resolve overlaps: longest match wins
@@ -594,6 +620,19 @@ impl IngestionPipeline {
                     * faction_bonus)
                     .min(1.0);
 
+                // Apply faction constraints for certain relation types
+                // "君臣" and "师徒" require same faction; cross-faction gets strong penalty
+                let final_importance = match rel_type.as_str() {
+                    "君臣" | "师徒" => {
+                        if !faction::same_faction_or_unknown(novel_name, name, other) {
+                            rel_imp * 0.2 // Strong penalty for cross-faction
+                        } else {
+                            rel_imp
+                        }
+                    }
+                    _ => rel_imp,
+                };
+
                 // Persist the dimensional breakdown so downstream consumers
                 // (MCP tools, network traversal) can explain *why* a relation
                 // scored the way it did, not just the combined number.
@@ -624,11 +663,13 @@ impl IngestionPipeline {
                     source_character: name.to_string(),
                     target_character: other.clone(),
                     relation_type: rel_type,
-                    description: format!("共现{count}章"),
+                    description: format!("共现{}章", count),
                     chapter: rel_chapter,
                     novel: novel_name.to_string(),
                     bidirections: true,
-                    importance: rel_imp,
+                    source_type: RelationSource::CoOccurrence,
+                    confidence: final_importance,
+                    importance: final_importance,
                     created_at: now_ts,
                     metadata,
                 };

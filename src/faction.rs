@@ -20,9 +20,11 @@ pub fn get_faction(novel: &str, character: &str) -> Option<&'static str> {
             "三国演义",
             "孙权" | "周瑜" | "鲁肃" | "吕蒙" | "陆逊" | "黄盖" | "甘宁" | "太史慈" | "张昭",
         ) => Some("吴"),
-        ("三国演义", "董卓" | "吕布" | "袁绍" | "袁术" | "刘表" | "刘璋" | "马腾" | "公孙瓒") => {
-            Some("群雄")
-        }
+        (
+            "三国演义",
+            "董卓" | "吕布" | "袁绍" | "袁术" | "刘表" | "刘璋" | "马腾" | "公孙瓒" | "高顺"
+            | "陈宫" | "颜良" | "文丑" | "华雄",
+        ) => Some("群雄"),
 
         // === 水浒传 ===
         (
@@ -66,6 +68,15 @@ pub fn faction_bonus(novel: &str, a: &str, b: &str) -> Option<f64> {
             }
         }
         _ => None,
+    }
+}
+
+/// Check if two characters are in the same faction or at least one is unknown.
+/// Returns true if they can be considered "compatible" for certain relation types.
+pub fn same_faction_or_unknown(novel: &str, a: &str, b: &str) -> bool {
+    match (get_faction(novel, a), get_faction(novel, b)) {
+        (Some(fa), Some(fb)) => fa == fb,
+        _ => true, // At least one unknown → treat as neutral/compatible
     }
 }
 
