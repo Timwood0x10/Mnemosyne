@@ -1,0 +1,40 @@
+{
+  "title": "西游记",
+  "doc_type": "novel",
+  "segment_marker": {"kind": "chapter", "start": "第", "end": "回"},
+  "entity_hints": [
+    {"name": "孙悟空", "aliases": ["悟空", "行者", "孙行者", "齐天大圣", "大圣", "美猴王", "猴王", "孙大圣", "石猴"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "唐僧", "aliases": ["玄奘", "三藏", "唐长老", "御弟", "陈玄奘", "金蝉子"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "猪八戒", "aliases": ["八戒", "呆子", "猪悟能", "悟能"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "沙僧", "aliases": ["沙和尚", "沙悟净", "悟净"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "如来佛祖", "aliases": ["如来", "佛祖", "释迦"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "观音菩萨", "aliases": ["观音", "菩萨", "观世音"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "玉皇大帝", "aliases": ["玉帝", "玉皇"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "太上老君", "aliases": ["老君"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "菩提祖师", "aliases": ["菩提"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "二郎神", "aliases": ["杨戬"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "哪吒", "aliases": ["三太子"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "铁扇公主", "aliases": ["铁扇", "罗刹女"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "牛魔王", "aliases": ["牛王"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "红孩儿", "aliases": ["圣婴大王", "善财童子"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "白骨精", "aliases": ["白骨夫人"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "金角大王", "aliases": ["金角"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "银角大王", "aliases": ["银角"], "single_char": null, "object_type": "person", "properties": {}},
+    {"name": "大鹏金翅雕", "aliases": ["大鹏"], "single_char": null, "object_type": "person", "properties": {}}
+  ],
+  "relation_rules": null,
+  "strong_verbs": null,
+  "dialog_verbs": null,
+  "action_verbs": null,
+  "clothing_kw": null,
+  "personality_kw": null,
+  "death_kw": null,
+  "dialog_markers": ["曰：", "道："],
+  "min_co_occurrence": 3,
+  "factions": {
+    "取经": ["唐僧", "孙悟空", "猪八戒", "沙僧", "白龙马"],
+    "佛派": ["如来", "观音", "文殊", "普贤"],
+    "天庭": ["玉帝", "太上老君", "王母"]
+  },
+  "version": "0.1.0"
+}

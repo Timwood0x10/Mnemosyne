@@ -15,7 +15,7 @@ use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
 use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use lore_scope::compiler::ConversationCompiler;
+use lore_scope::conversation_compiler::ConversationCompiler;
 use lore_scope::config::{CliArgs, Command, EmbeddingProvider};
 use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 use lore_scope::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
