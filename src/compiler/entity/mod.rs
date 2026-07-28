@@ -6,6 +6,7 @@
 //! with safe single-character shortname matches ("飞曰"→张飞).
 
 mod conversation;
+mod json_provider;
 mod novel;
 mod provider;
 mod regex;
@@ -18,6 +19,7 @@ use crate::compiler::{Mention, Sentence};
 use crate::ingest::extract::{ACTION_VERBS, DIALOG_VERBS, floor_char_boundary};
 
 pub use conversation::ConversationProvider;
+pub use json_provider::JsonEntityProvider;
 pub use novel::NovelProvider;
 pub use provider::{EntityEntry, EntityProvider};
 pub use regex::RegexProvider;
@@ -32,7 +34,7 @@ struct ShortSpec {
 
 /// The entity engine — caches the merged dictionary and matching automata.
 pub struct EntityEngine {
-    registry: EntityRegistry,
+    _registry: EntityRegistry,
     /// Merged alias → (canonical_name, object_type, confidence)
     alias_map: HashMap<String, (String, String, f64)>,
     /// Aho-Corasick automaton built from all known aliases + names.
@@ -86,7 +88,7 @@ impl EntityEngine {
             .expect("Aho-Corasick automaton must be buildable with non-empty patterns");
 
         EntityEngine {
-            registry,
+            _registry: registry,
             alias_map,
             ac,
             short_specs,
@@ -96,7 +98,7 @@ impl EntityEngine {
     /// Scan a chunk of text for entity mentions.
     ///
     /// Returns mentions sorted by byte offset.
-    pub fn scan(&self, text: &str, chunk_index: usize) -> Vec<Mention> {
+    pub fn scan(&self, text: &str, _chunk_index: usize) -> Vec<Mention> {
         let mut mentions = Vec::new();
 
         // 1. Aho-Corasick multi-pattern match (names + aliases)

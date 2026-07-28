@@ -45,7 +45,13 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
         if SEPARATORS.contains(&c) {
             // End of sentence: include the separator character
             let end_byte = byte_idx + c.len_utf8();
-            let sentence_text = &chunk.text[iter_start..end_byte];
+            // Guard: iter_start may have been advanced past this position
+            // by whitespace-skipping after the previous separator.
+            let slice_start = if iter_start > byte_idx { byte_idx } else { iter_start };
+            if slice_start >= chunk.text.len() {
+                break;
+            }
+            let sentence_text = &chunk.text[slice_start..end_byte];
             let trimmed = sentence_text.trim();
 
             if !trimmed.is_empty() {
@@ -69,6 +75,10 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
                 )
             {
                 iter_start += 1;
+            }
+            // Guard: whitespace skip may have consumed the rest of the text
+            if iter_start >= chunk.text.len() {
+                break;
             }
         }
     }

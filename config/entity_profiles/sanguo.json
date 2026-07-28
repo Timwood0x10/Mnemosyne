@@ -1,0 +1,39 @@
+{
+  "profile_name": "三国演义",
+  "doc_type_hint": "novel",
+  "verbs": [
+    ["杀","斩","擒","救","打","战","斗","败","胜","攻","破","逃","死","亡","绑","缚","骂","哭","笑","怒","拜","封","赐","降","追","围","烧"],
+    ["曰","道","言","答","问","喝","唤","叹","惊"],
+    ["大怒","大喜","领兵","引军","挺枪","纵马","大呼","拍马","拔剑","挺刀","引兵","出马","上前","大惊","大败"]
+  ],
+  "entities": [
+    {"canonical_name":"刘备","aliases":["玄德","刘玄德","刘皇叔","先主","昭烈帝"],"object_type":"person"},
+    {"canonical_name":"关羽","aliases":["云长","关云长","关公","关将军","美髯公","武圣"],"single_char":"羽","object_type":"person"},
+    {"canonical_name":"张飞","aliases":["翼德","张翼德","张将军","三将军"],"single_char":"飞","object_type":"person"},
+    {"canonical_name":"诸葛亮","aliases":["孔明","诸葛孔明","卧龙","军师","武侯","丞相"],"object_type":"person"},
+    {"canonical_name":"赵云","aliases":["子龙","赵子龙","赵将军"],"single_char":"云","object_type":"person"},
+    {"canonical_name":"曹操","aliases":["孟德","曹孟德","曹公","曹丞相","魏王","阿瞒"],"single_char":"操","object_type":"person"},
+    {"canonical_name":"孙权","aliases":["仲谋","孙仲谋","吴王","碧眼儿"],"object_type":"person"},
+    {"canonical_name":"周瑜","aliases":["公瑾","周郎"],"single_char":"瑜","object_type":"person"},
+    {"canonical_name":"吕布","aliases":["奉先","吕奉先","温侯"],"single_char":"布","object_type":"person"},
+    {"canonical_name":"司马懿","aliases":["仲达","司马仲达"],"object_type":"person"},
+    {"canonical_name":"黄忠","aliases":["汉升","黄汉升"],"object_type":"person"},
+    {"canonical_name":"马超","aliases":["孟起","马孟起"],"single_char":"超","object_type":"person"},
+    {"canonical_name":"魏延","aliases":["文长"],"object_type":"person"},
+    {"canonical_name":"姜维","aliases":["伯约","姜伯约"],"object_type":"person"},
+    {"canonical_name":"庞统","aliases":["士元","凤雏","庞士元"],"object_type":"person"},
+    {"canonical_name":"张辽","aliases":["文远","张文远"],"object_type":"person"},
+    {"canonical_name":"许褚","aliases":["仲康","虎痴"],"object_type":"person"},
+    {"canonical_name":"夏侯惇","aliases":["元让","夏侯元让"],"object_type":"person"},
+    {"canonical_name":"典韦","aliases":[],"object_type":"person"},
+    {"canonical_name":"郭嘉","aliases":["奉孝"],"object_type":"person"},
+    {"canonical_name":"荀彧","aliases":["文若","荀文若"],"object_type":"person"},
+    {"canonical_name":"鲁肃","aliases":["子敬","鲁子敬"],"object_type":"person"},
+    {"canonical_name":"陆逊","aliases":["伯言","陆伯言"],"object_type":"person"},
+    {"canonical_name":"吕蒙","aliases":["子明","吕子明"],"object_type":"person"},
+    {"canonical_name":"华佗","aliases":["元化"],"object_type":"person"},
+    {"canonical_name":"貂蝉","aliases":[],"object_type":"person"},
+    {"canonical_name":"袁绍","aliases":["本初","袁本初"],"object_type":"person"},
+    {"canonical_name":"董卓","aliases":["仲颖","董仲颖"],"object_type":"person"}
+  ]
+}

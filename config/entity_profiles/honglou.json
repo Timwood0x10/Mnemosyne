@@ -1,0 +1,35 @@
+{
+  "profile_name": "红楼梦",
+  "doc_type_hint": "novel",
+  "verbs": [
+    ["哭","笑","怒","骂","死","病","嫁","娶","封","赏","赐","打","闹","逃","悲","叹","怨"],
+    ["曰","道","言","答","问","笑","叹","说"],
+    ["大怒","大喜","大惊","伤心","落泪","病倒"]
+  ],
+  "entities": [
+    {"canonical_name":"贾宝玉","aliases":["宝玉","宝二爷","怡红公子","绛洞花主","富贵闲人","混世魔王"],"object_type":"person"},
+    {"canonical_name":"林黛玉","aliases":["黛玉","颦儿","潇湘妃子","林妹妹"],"object_type":"person"},
+    {"canonical_name":"薛宝钗","aliases":["宝钗","宝姐姐","蘅芜君"],"object_type":"person"},
+    {"canonical_name":"王熙凤","aliases":["凤姐","凤辣子","琏二奶奶"],"object_type":"person"},
+    {"canonical_name":"贾母","aliases":["老太太","史太君"],"object_type":"person"},
+    {"canonical_name":"贾政","aliases":["存周","贾存周"],"object_type":"person"},
+    {"canonical_name":"王夫人","aliases":["王氏"],"object_type":"person"},
+    {"canonical_name":"贾琏","aliases":["琏二爷"],"object_type":"person"},
+    {"canonical_name":"元春","aliases":["贾元春","元妃","大小姐"],"object_type":"person"},
+    {"canonical_name":"探春","aliases":["贾探春","三姑娘"],"object_type":"person"},
+    {"canonical_name":"迎春","aliases":["贾迎春","二姑娘"],"object_type":"person"},
+    {"canonical_name":"惜春","aliases":["贾惜春","四姑娘"],"object_type":"person"},
+    {"canonical_name":"史湘云","aliases":["湘云","云妹妹"],"object_type":"person"},
+    {"canonical_name":"妙玉","aliases":["槛外人"],"object_type":"person"},
+    {"canonical_name":"李纨","aliases":["宫裁","稻香老农"],"object_type":"person"},
+    {"canonical_name":"秦可卿","aliases":["可卿","蓉大奶奶"],"object_type":"person"},
+    {"canonical_name":"贾雨村","aliases":["雨村","贾化"],"object_type":"person"},
+    {"canonical_name":"甄士隐","aliases":["士隐","甄费"],"object_type":"person"},
+    {"canonical_name":"薛蟠","aliases":["薛大傻子","呆霸王"],"object_type":"person"},
+    {"canonical_name":"刘姥姥","aliases":["刘氏"],"object_type":"person"},
+    {"canonical_name":"紫鹃","aliases":["鹦哥"],"object_type":"person"},
+    {"canonical_name":"袭人","aliases":["花袭人","花珍珠"],"object_type":"person"},
+    {"canonical_name":"晴雯","aliases":[],"object_type":"person"},
+    {"canonical_name":"平儿","aliases":[],"object_type":"person"}
+  ]
+}
