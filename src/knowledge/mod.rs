@@ -253,12 +253,39 @@ pub struct CompilerRun {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InspectEntityResult {
     pub object: KnowledgeObject,
+    /// Profile attributes (key-value pairs like courtesy_name, birthplace).
+    pub profile: Vec<EntityProfileEntry>,
     /// Event-type objects the entity participates in (via `participated_in` edges).
     pub events: Vec<KnowledgeObject>,
     /// Person↔person (and other non-event) edges touching the entity.
     pub relations: Vec<KnowledgeEdge>,
     pub evidences: Vec<Evidence>,
     pub mentions: Vec<Mention>,
+    /// Lifecycle: birth chapter → peak chapters → death chapter.
+    pub lifecycle: EntityLifecycle,
+    /// Character arc over time (if available).
+    pub character_arc: Option<String>,
+}
+
+/// A single profile key-value entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityProfileEntry {
+    pub key: String,
+    pub value: String,
+    pub confidence: f64,
+}
+
+/// Entity lifecycle summary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityLifecycle {
+    /// First appearance chapter.
+    pub first_seen: Option<i32>,
+    /// Last appearance chapter.
+    pub last_seen: Option<i32>,
+    /// Death chapter (if entity status is deceased).
+    pub death_chapter: Option<i32>,
+    /// Number of events this entity participated in.
+    pub event_count: usize,
 }
 
 /// One row of the `timeline` tool (dev_guide §5).

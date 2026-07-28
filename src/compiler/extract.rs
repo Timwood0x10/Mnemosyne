@@ -75,6 +75,7 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
                         });
                     }
                     ctx.events.push(Event {
+        effects: vec![],
                         id: None,
                         title: format!("{}曰", s.canonical_name),
                         event_type: "dialogue".into(),
@@ -122,6 +123,7 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
                     }
 
                     ctx.events.push(Event {
+        effects: vec![],
                         id: None,
                         title,
                         event_type: "action".into(),

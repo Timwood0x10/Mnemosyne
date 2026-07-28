@@ -102,6 +102,7 @@ pub struct Event {
     pub location: Option<String>,
     pub description: String,
     pub participants: Vec<EventParticipant>,
+    pub effects: Vec<EventEffect>,
     pub importance: f64,
 }
 
@@ -110,6 +111,16 @@ pub struct Event {
 pub struct EventParticipant {
     pub entity_name: String,
     pub role: String,            // protagonist / antagonist / witness
+}
+
+/// A structured change that an event causes to an entity.
+#[derive(Debug, Clone)]
+pub struct EventEffect {
+    pub target: String,          // entity name affected
+    pub attribute: String,       // "status" / "reputation" / "relation" / "faction"
+    pub old_value: Option<String>,
+    pub new_value: String,       // "deceased" / "+" / "-" / faction name
+    pub confidence: f64,
 }
 
 /// A long-term relation between two entities.

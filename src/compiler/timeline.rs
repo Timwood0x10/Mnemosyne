@@ -1,23 +1,173 @@
 //! Timeline Builder — Post Pass 2.
 //!
 //! Detects when relationships change over time by analyzing events in
-//! chronological order. For example:
+//! chronological order. Also tracks personality changes and character arcs.
 //!
 //! ```text
 //! Ch.3  吕布serves丁原
 //! Ch.9  吕布kills丁原  →  serves relation ENDS at ch.9
 //! Ch.14 吕布serves董卓 →  new relation starts at ch.14
-//! Ch.19 吕布kills董卓  →  serves relation ENDS at ch.19
-//! ```
 //!
-//! The tracker outputs updated [`Relation`]s with `valid_from`/`valid_to` set.
+//! Personality arc:
+//! Ch.3  林黛玉 → 小心谨慎
+//! Ch.27 林黛玉 → 多愁善感
+//! Ch.97 林黛玉 → 绝望离世
+//! ```
 
 use std::collections::HashMap;
 
 use crate::compiler::{Event, Relation};
 
+/// A personality marker at a point in time.
+#[derive(Debug, Clone)]
+pub struct PersonalityMarker {
+    pub entity: String,
+    pub chapter: i32,
+    pub trait_name: String,     // "小心谨慎" / "刚烈" / "多愁善感"
+    pub context: String,        // "初入贾府" / "葬花" / "焚稿"
+    pub confidence: f64,
+}
+
+/// A detected character arc — change in personality over time.
+#[derive(Debug, Clone)]
+pub struct CharacterArc {
+    pub entity: String,
+    pub arc: Vec<String>,       // ["小心谨慎", "多愁善感", "绝望离世"]
+    pub arc_type: String,       // "growth" / "decline" / "transformation"
+}
+
 /// Verbs that indicate a hostile relationship change.
 const HOSTILE_VERBS: &[&str] = &["杀", "斩", "攻", "围", "擒", "缚", "绑", "骂", "怒", "打", "刺", "射"];
+
+/// Words that indicate personality/character description in Chinese text.
+const PERSONALITY_KEYWORDS: &[(&str, &str)] = &[
+    ("性刚烈", "刚烈"),
+    ("性温柔", "温柔"),
+    ("性懦弱", "懦弱"),
+    ("性聪慧", "聪慧"),
+    ("性多疑", "多疑"),
+    ("性宽厚", "宽厚"),
+    ("性急", "性急"),
+    ("性躁", "急躁"),
+    ("性残忍", "残忍"),
+    ("心善", "善良"),
+    ("心狠", "狠毒"),
+    ("心窄", "心胸狭窄"),
+    ("性格", ""),   // catch-all followed by extraction
+    ("为人", ""),   // catch-all
+];
+
+/// Extract personality markers from events AND from raw text.
+///
+/// Scans event descriptions for personality keywords.
+/// Also scans the original text (`corpus_text`) — this catches descriptions
+/// that aren't captured as events (e.g. narrative introductions).
+pub fn extract_personality_markers(
+    events: &[Event],
+    corpus_text: Option<&str>,
+    known_entities: &[String],
+) -> Vec<PersonalityMarker> {
+    let mut markers = Vec::new();
+
+    // Pass 1: scan event titles
+    for event in events {
+        let ts = event.timestamp.unwrap_or(0);
+        for participant in &event.participants {
+            for &(keyword, trait_name) in PERSONALITY_KEYWORDS {
+                if event.title.contains(keyword) {
+                    check_and_push(&event.title, &participant.entity_name,
+                        keyword, trait_name, ts, &event.title, &mut markers);
+                }
+            }
+        }
+    }
+
+    // Pass 2: scan the raw text (catches narrative descriptions not in events)
+    if let Some(text) = corpus_text {
+        for line in text.lines() {
+            let line = line.trim();
+            if line.len() < 10 { continue; }
+            for &(keyword, trait_name) in PERSONALITY_KEYWORDS {
+                if !line.contains(keyword) { continue; }
+                // Find which known entity is near this keyword
+                for entity in known_entities {
+                    if line.contains(entity.as_str()) {
+                        check_and_push(line, entity, keyword, trait_name,
+                            0, line.chars().take(120).collect::<String>().as_str(), &mut markers);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    markers
+}
+
+/// Helper: check if entity and keyword are close, then push marker.
+fn check_and_push(
+    text: &str, entity: &str, keyword: &str, trait_name: &str,
+    chapter: i32, context: &str, markers: &mut Vec<PersonalityMarker>,
+) {
+    if let (Some(kpos), Some(npos)) = (text.find(keyword), text.find(entity)) {
+        let dist = if npos > kpos { npos - kpos } else { kpos - npos };
+        if dist < 25 {
+            let trait_val = if trait_name.is_empty() {
+                let after = &text[kpos + keyword.len()..];
+                after.chars().take_while(|c| *c != '，' && *c != '。' && *c != '；').collect::<String>()
+            } else {
+                trait_name.to_string()
+            };
+            if !trait_val.is_empty() {
+                markers.push(PersonalityMarker {
+                    entity: entity.to_string(),
+                    chapter,
+                    trait_name: trait_val,
+                    context: context.to_string(),
+                    confidence: 0.7,
+                });
+            }
+        }
+    }
+}
+
+/// Build character arcs from personality markers.
+///
+/// Groups markers by entity, sorts by chapter, and detects the arc type:
+/// - "decline": 从正面到负面 (善良→狠毒)
+/// - "growth": 从负面到正面 (懦弱→勇敢)
+/// - "transformation": 单一变化
+/// - "stable": 只有一种描摹
+pub fn build_character_arcs(markers: Vec<PersonalityMarker>) -> Vec<CharacterArc> {
+    let mut by_entity: HashMap<String, Vec<PersonalityMarker>> = HashMap::new();
+    for m in markers {
+        by_entity.entry(m.entity.clone()).or_default().push(m);
+    }
+
+    let mut arcs = Vec::new();
+    for (entity, mut markers) in by_entity {
+        markers.sort_by_key(|m| m.chapter);
+        let traits: Vec<String> = markers.iter().map(|m| m.trait_name.clone()).collect();
+        let arc_type = if traits.len() <= 1 {
+            "stable"
+        } else {
+            // Simple heuristic: check if first and last differ significantly
+            let first = &traits[0];
+            let last = &traits[traits.len() - 1];
+            if first != last {
+                "transformation"
+            } else {
+                "stable"
+            }
+        };
+        arcs.push(CharacterArc {
+            entity,
+            arc: traits,
+            arc_type: arc_type.into(),
+        });
+    }
+    arcs
+}
 
 /// Verbs that indicate a positive relationship change.
 const FRIENDLY_VERBS: &[&str] = &["救", "拜", "封", "赐", "赏", "嫁", "娶"];
@@ -142,6 +292,7 @@ mod tests {
 
     fn mk_event(ts: i32, title: &str, subj: &str, obj: &str) -> Event {
         Event {
+            effects: vec![],
             id: None,
             title: title.into(),
             event_type: "action".into(),

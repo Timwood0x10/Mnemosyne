@@ -38,6 +38,18 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 
+-- ── entity_aliases (V7 新增) ──────────────────────────────
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    alias       TEXT NOT NULL,                       -- courtesy_name / title / nickname
+    alias_type  TEXT NOT NULL DEFAULT 'known_as',    -- courtesy / title / name / nickname
+    confidence  REAL DEFAULT 1.0,
+    UNIQUE(entity_id, alias)
+);
+CREATE INDEX IF NOT EXISTS idx_aliases_entity ON entity_aliases(entity_id);
+CREATE INDEX IF NOT EXISTS idx_aliases_alias ON entity_aliases(alias);
+
 -- ── entity_profiles ─────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS entity_profiles (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,

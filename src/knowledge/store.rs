@@ -590,13 +590,22 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         }
 
         let mentions = self.get_mentions_for_object(object.id).await?;
+        let event_count = events.len();
 
         Ok(Some(InspectEntityResult {
             object,
+            profile: Vec::new(),
             events,
             relations,
             evidences,
             mentions,
+            lifecycle: crate::knowledge::EntityLifecycle {
+                first_seen: None,
+                last_seen: None,
+                death_chapter: None,
+                event_count,
+            },
+            character_arc: None,
         }))
     }
 

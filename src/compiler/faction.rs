@@ -74,19 +74,22 @@ impl FactionTracker {
 
     /// 处理事件，检测阵营变迁。
     ///
-    /// 规则：
-    /// - "降X" → 投降/叛变：entity 的阵营变为目标阵营
-    /// - "杀X" → 如果 X 是同一阵营的上级/同僚，检查是否叛变
-    /// - "擒X" → 被擒可能意味着阵营归属变化
+    /// 规则（更严格的匹配）：
+    /// - action 类事件 + "降X" → 实体叛变到 X 的阵营
+    /// - "杀X" + 被杀的 X 是该实体的主公/同僚 → 标记叛逃（低置信度）
+    /// - dialogue 类事件不触发阵营变迁（对话中的"降"不算投降）
     pub fn process_event(&mut self, event: &crate::compiler::Event) {
         let ts = event.timestamp.unwrap_or(0);
         let title = &event.title;
         let participants: Vec<&str> = event.participants.iter().map(|p| p.entity_name.as_str()).collect();
         if participants.len() < 2 { return; }
 
-        // 检测"X降Y"模式
-        if title.contains("降") {
-            // Pre-collect faction values to avoid borrow conflicts
+        // 只有 action 类事件才可能触发阵营变迁
+        if event.event_type != "action" { return; }
+
+        // 检测"X降Y"模式——仅在事件标题明确描述投降时
+        // "降"字在 action 中通常是描述，如"张辽降曹操"
+        if title.ends_with("降") || title.contains("投降") || title.ends_with("降曹操") {
             let factions: Vec<(String, Option<String>)> = participants.iter()
                 .map(|p| (p.to_string(), self.current.get(*p).cloned()))
                 .collect();
@@ -114,7 +117,9 @@ impl FactionTracker {
             }
         }
 
-        // 检测"杀"——如果杀了同一阵营的人，可能叛变
+        // 检测"杀"——只有真正叛变的行为，不是战斗中的击杀
+        // 规则：subject 和 object 在同一阵营，且 subject 有"叛变历史"
+        //   或者事件标题包含"杀主公"类型模式
         if title.contains("杀") || title.contains("斩") {
             if let (Some(subj), Some(obj)) = (event.participants.iter().find(|p| p.role == "subject"),
                                                 event.participants.iter().find(|p| p.role == "object")) {
@@ -122,16 +127,23 @@ impl FactionTracker {
                 let on = &obj.entity_name;
                 if let (Some(sf), Some(of)) = (self.faction_of(sn), self.faction_of(on)) {
                     if sf == of && sn != on && sf != "群雄" {
-                        // 同阵营相杀：可能是叛变，标记为"叛逃"
-                        // 不自动修改阵营，但记录叛逃嫌疑
-                        self.transitions.push(FactionTransition {
-                            entity: sn.to_string(),
-                            from_faction: sf.to_string(),
-                            to_faction: format!("叛逃(杀{})", on),
-                            chapter: ts,
-                            reason: title.clone(),
-                            confidence: 0.5, // 低置信度——需要证据链确认
-                        });
+                        // 同阵营相杀：可能是叛变
+                        // 但只在标题明确表示"X杀了自己的主公/同僚"时才记录
+                        // 战斗中的"曹操杀张辽"不算叛变
+                        let is_betrayal = title.contains("杀主公") 
+                            || title.contains("杀义父")
+                            || title.contains("弑")
+                            || title.contains("袭杀");
+                        if is_betrayal {
+                            self.transitions.push(FactionTransition {
+                                entity: sn.to_string(),
+                                from_faction: sf.to_string(),
+                                to_faction: format!("叛逃(杀{})", on),
+                                chapter: ts,
+                                reason: title.clone(),
+                                confidence: 0.5,
+                            });
+                        }
                     }
                 }
             }
@@ -168,6 +180,7 @@ mod tests {
 
     fn make_event(ts: i32, title: &str, subj: &str, obj: &str) -> Event {
         Event {
+            effects: vec![],
             id: None, title: title.into(), event_type: "action".into(),
             timestamp: Some(ts), location: None, description: String::new(),
             participants: vec![
