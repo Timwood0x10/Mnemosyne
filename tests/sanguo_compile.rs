@@ -1,12 +1,13 @@
-//! End-to-end test: compile 三国演义 chapter 1 through Pass 1 + Pass 2.
+//! End-to-end test: compile full 三国演义 (120 chapters), output character relationship network.
 //!
-//! Run: cargo test --test sanguo_compile e2e_sanguo -- --nocapture
+//! Run: cargo test --test sanguo_compile e2e_sanguo -- --nocapture 2>&1 | head -200
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use lore_scope::compiler::chunk;
 use lore_scope::compiler::entity::{
-    EntityEngine, EntityRegistry, JsonEntityProvider,
+    EntityRegistry, JsonEntityProvider,
 };
 use lore_scope::compiler::sentence;
 use lore_scope::compiler::{extract, profile};
@@ -15,109 +16,121 @@ use lore_scope::compiler::CompileContext;
 
 #[tokio::test]
 async fn e2e_sanguo() {
-    eprintln!("\n========== 三国演义 编译测试 ==========\n");
+    eprintln!("\n========== 三国演义 人物关系网络 ==========\n");
 
-    // ── Load text ──────────────────────────────────────────────────────
+    // ── Load full text ──────────────────────────────────────────────────
     let doc = Document::from_file("corpus/三国演义.txt")
         .expect("load 三国演义.txt");
-    // Take first ~12KB (first chapter+)
-    let text: String = doc.text.chars().take(12000).collect();
-    eprintln!("Text length: {} chars", text.len());
+    let chapter_count = doc.text.matches("第").filter(|_| true).count();
+    eprintln!("全文: {} 字符, ~{} 回\n", doc.text.len(), chapter_count);
 
-    // ── Pass 1: Profile Extractor ──────────────────────────────────────
+    // ── Build Entity Registry ───────────────────────────────────────────
     let mut ctx = CompileContext::default();
     ctx.document_title = "三国演义".into();
-
-    // Extract profiles from character introduction sections
-    // The first chapter contains many introductions
-    profile::extract_profiles(&text, &mut ctx);
-    eprintln!("\n[Pass 1] Profiles extracted:");
-    for p in &ctx.profiles {
-        eprintln!("  {} → {}: {}", 
-            ctx.entities.iter().find(|e| e.id == p.entity_id).map(|e| e.name.as_str()).unwrap_or("?"),
-            p.key, p.value);
-    }
-    eprintln!("  Total entities: {}", ctx.entities.len());
-    eprintln!("  Total profiles: {}", ctx.profiles.len());
-
-    // ── Build Entity Registry for Pass 2 ───────────────────────────────
     let mut registry = EntityRegistry::new();
     let provider = Arc::new(
         JsonEntityProvider::from_file("config/entity_profiles/sanguo.json")
             .expect("load sanguo profile"),
     );
     let obs_config = provider.observation_config();
-    registry.register(provider);
-
-    // Assign entity IDs from profile extraction
+    registry.register(provider.clone());
     let dict = registry.build_dictionary();
-    let name_to_id: std::collections::HashMap<String, i64> = ctx.entities.iter()
-        .filter_map(|e| e.id.map(|id| (e.name.clone(), id)))
-        .collect();
-    // (In production, IDs come from the DB. For the test we use sequential ids.)
-    let synthetic_ids: std::collections::HashMap<String, i64> = ctx.entities.iter()
-        .enumerate()
-        .map(|(i, e)| (e.name.clone(), (i + 1) as i64))
-        .collect();
 
-    // ── Pass 2: Story Compiler ─────────────────────────────────────────
-    let chunks = chunk::plan(&text, chunk::Config::default());
+    // ── Pass 1: Profile Extractor ────────────────────────────────────────
+    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict));
+
+    // ── Pass 2: Story Compiler ──────────────────────────────────────────
+    let chunks = chunk::plan(&doc.text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);
     let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
-
-    eprintln!("\n[Pass 2] Processing {} sentences...", sent_texts.len());
 
     let config = extract::Config {
         strong_verbs: obs_config.get(0).cloned().unwrap_or_default(),
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-
     extract::compile(&mut ctx, &sent_texts, &dict, &config);
-    eprintln!("  Events: {}", ctx.events.len());
-    eprintln!("  Relations: {}", ctx.relations.len());
 
-    // ── Results ────────────────────────────────────────────────────────
-    eprintln!("\n========== 结果汇总 ==========");
-    eprintln!("实体: {}", ctx.entities.len());
-    eprintln!("画像属性: {}", ctx.profiles.len());
-    eprintln!("事件: {}", ctx.events.len());
-    eprintln!("关系: {}", ctx.relations.len());
-
-    // Print entities
-    eprintln!("\n--- 人物节点 ---");
+    // ── 人物节点 ────────────────────────────────────────────────────────
+    eprintln!("━━━ 人物节点 ({} 人) ━━━━━━━━━━━━━━━━━━━━━━━━━\n", ctx.entities.len());
     for e in &ctx.entities {
-        let profs: Vec<&str> = ctx.profiles.iter()
+        let profs: Vec<String> = ctx.profiles.iter()
             .filter(|p| p.entity_id == e.id)
-            .map(|p| p.value.as_str())
+            .map(|p| format!("{}:{}", p.key, p.value))
             .collect();
-        eprintln!("  {} [{}]", e.name, profs.join(", "));
+        let ev_count = ctx.events.iter().filter(|ev|
+            ev.participants.iter().any(|p| p.entity_name == e.name)
+        ).count();
+        let rel_count = ctx.relations.iter().filter(|r|
+            r.source == e.name || r.target == e.name
+        ).count();
+        if !profs.is_empty() || ev_count > 0 {
+            eprintln!("  {}  (事件: {}, 关系: {})", e.name, ev_count, rel_count);
+            for p in &profs {
+                eprintln!("    ├ {}: {}", p.split(':').next().unwrap_or(""), p.split(':').skip(1).collect::<Vec<_>>().join(":"));
+            }
+        }
     }
 
-    // Print events
-    eprintln!("\n--- 事件 ---");
-    for ev in &ctx.events {
-        let parts: Vec<&str> = ev.participants.iter()
-            .map(|p| p.entity_name.as_str())
-            .collect();
-        eprintln!("  [{}] {} (参与者: {})", ev.event_type, ev.title, parts.join(", "));
-    }
+    // ── 关系网络 ────────────────────────────────────────────────────────
+    eprintln!("\n━━━ 关系网络 ({} 条) ━━━━━━━━━━━━━━━━━━━━━━━━━\n", ctx.relations.len());
 
-    // Print relations
-    eprintln!("\n--- 关系 ---");
+    // Build adjacency: for each entity, list connected entities
+    let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
     for r in &ctx.relations {
-        eprintln!("  {} --[{}]--> {}", r.source, r.relation_type, r.target);
+        adjacency.entry(r.source.clone()).or_default().push(r.target.clone());
+        adjacency.entry(r.target.clone()).or_default().push(r.source.clone());
+    }
+    // Deduplicate each entity's connection list
+    for v in adjacency.values_mut() {
+        v.sort();
+        v.dedup();
     }
 
-    // ── Assertions ─────────────────────────────────────────────────────
-    // We should have found at least some events from strong verb matching
-    assert!(!ctx.events.is_empty() || sent_texts.len() < 5,
-        "should extract at least some events from the text");
-
-    // If profiles were found, we should have entities
-    if !ctx.profiles.is_empty() {
-        assert!(!ctx.entities.is_empty(), "profiles imply entities exist");
+    let mut names: Vec<&str> = ctx.entities.iter().map(|e| e.name.as_str()).collect();
+    names.sort();
+    for name in &names {
+        if let Some(conns) = adjacency.get(*name) {
+            if conns.len() > 0 {
+                eprintln!("  {} ─── {}", name, conns.join("、"));
+            }
+        }
     }
 
+    // ── 事件统计 ────────────────────────────────────────────────────────
+    eprintln!("\n━━━ 事件统计 (共 {} 件) ━━━━━━━━━━━━━━━━━━━━━━━\n", ctx.events.len());
+
+    let mut event_entity_counts: HashMap<String, usize> = HashMap::new();
+    for ev in &ctx.events {
+        for p in &ev.participants {
+            *event_entity_counts.entry(p.entity_name.clone()).or_default() += 1;
+        }
+    }
+    let mut ranked: Vec<(&String, &usize)> = event_entity_counts.iter().collect();
+    ranked.sort_by(|a, b| b.1.cmp(a.1));
+
+    for (name, count) in ranked.iter().take(10) {
+        eprintln!("  {:>4} 件  {}", count, name);
+    }
+
+    // ── 关键事件摘录 ──────────────────────────────────────────────────
+    eprintln!("\n━━━ 关键事件摘录 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+    let key_events = ["杀董卓", "斩华雄", "斩颜良", "诛文丑", "过五关", "赤壁",
+                       "借东风", "空城计", "七擒孟获", "六出祁山", "失街亭",
+                       "斩马谡", "五丈原"];
+    for kw in &key_events {
+        let hits: Vec<&str> = ctx.events.iter()
+            .filter(|ev| ev.title.contains(kw) || ev.description.contains(kw))
+            .map(|ev| ev.title.as_str())
+            .take(3)
+            .collect();
+        if !hits.is_empty() {
+            eprintln!("  {:8} → {}", kw, hits.join(", "));
+        }
+    }
+
+    // ── 断言 ────────────────────────────────────────────────────────────
+    assert!(ctx.events.len() > 100, "should extract at least 100 events from full text");
     eprintln!("\n========== 测试完成 ==========\n");
 }
