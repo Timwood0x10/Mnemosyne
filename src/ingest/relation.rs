@@ -146,6 +146,8 @@ pub struct DialogRelation {
 const DIALOG_MARKERS: &[&str] = &["曰：", "道："];
 
 pub fn extract_dialog_relations(text: &str, name_pairs: &[(String, String)]) -> Vec<DialogRelation> {
+    let ni = DialogNameIndex::new(name_pairs);
+
     let mut marker_positions: Vec<usize> = Vec::new();
     for m in DIALOG_MARKERS {
         for (pos, _) in text.match_indices(m) {
@@ -168,12 +170,12 @@ pub fn extract_dialog_relations(text: &str, name_pairs: &[(String, String)]) -> 
             continue;
         }
 
-        let speaker = find_dialog_speaker(text, pos, name_pairs);
+        let speaker = ni.find_speaker_near(text, pos);
 
         let check_start = floor_char_boundary(text, pos.saturating_sub(6));
         let reply = pos >= 6 && text[check_start..pos].contains("对");
 
-        let dir = find_dialog_directed(text, pos, name_pairs);
+        let dir = ni.find_directed(text, pos);
 
         let speech_start = (pos + 4..)
             .find(|&i| text.is_char_boundary(i))
@@ -237,86 +239,89 @@ fn is_poem_prefix(text: &str, pos: usize) -> bool {
     prefix.contains("诗") || prefix.contains("词")
 }
 
-fn find_dialog_speaker(text: &str, pos: usize, name_pairs: &[(String, String)]) -> Option<String> {
-    let before = &text[..pos];
-
-    if let Some(wei) = before.rfind("谓") {
-        let between = &text[wei + 3..pos];
-        let name_between = name_pairs
-            .iter()
-            .any(|(alias, _)| between.contains(alias.as_str()));
-        if name_between {
-            return find_name_near(text, wei, name_pairs);
-        }
-    }
-
-    if let Some(dui) = before.rfind("对") {
-        let between = &text[dui + 3..pos];
-        let name_between = name_pairs
-            .iter()
-            .any(|(alias, _)| between.contains(alias.as_str()));
-        if name_between {
-            return find_name_near(text, dui, name_pairs);
-        }
-        return find_name_near(text, dui, name_pairs);
-    }
-
-    find_name_near(text, pos, name_pairs)
+/// Aho-Corasick-based name index for dialog functions.
+///
+/// Built once per chapter, replaces O(N²) name_pairs scanning with a single
+/// automaton pass for each text region.
+struct DialogNameIndex {
+    ac: aho_corasick::AhoCorasick,
+    names: Vec<(String, String)>,
 }
 
-fn find_name_near(text: &str, ref_pos: usize, name_pairs: &[(String, String)]) -> Option<String> {
-    let search_start = floor_char_boundary(text, ref_pos.saturating_sub(50));
-    let search_area = &text[search_start..ref_pos];
+impl DialogNameIndex {
+    fn new(name_pairs: &[(String, String)]) -> Self {
+        let patterns: Vec<&str> = name_pairs.iter().map(|(a, _)| a.as_str()).collect();
+        let ac = aho_corasick::AhoCorasick::builder()
+            .match_kind(aho_corasick::MatchKind::Standard)
+            .build(&patterns)
+            .expect("Aho-Corasick automaton build should never fail");
+        let names: Vec<(String, String)> =
+            name_pairs.iter().map(|(a, c)| (a.clone(), c.clone())).collect();
+        Self { ac, names }
+    }
 
-    let mut best: Option<&str> = None;
-    let mut best_end: usize = 0;
-
-    for (alias, canonical) in name_pairs {
-        for (np, _) in search_area.match_indices(alias.as_str()) {
-            let end = search_start + np + alias.len();
+    /// Find the speaker name near a reference position (e.g., "谓" or marker position).
+    fn best_name_near(&self, text: &str, ref_pos: usize) -> Option<String> {
+        let search_start = floor_char_boundary(text, ref_pos.saturating_sub(50));
+        let search_area = &text[search_start..ref_pos];
+        let mut best_end: usize = 0;
+        let mut best_idx: Option<usize> = None;
+        for m in self.ac.find_overlapping_iter(search_area) {
+            let end = search_start + m.end();
             let gap = ref_pos - end;
             if gap <= 6 && end > best_end {
                 best_end = end;
-                best = Some(canonical);
+                best_idx = Some(m.pattern().as_usize());
             }
         }
+        best_idx.map(|i| self.names[i].1.clone())
     }
 
-    best.map(|s| s.to_string())
-}
-
-fn find_dialog_directed(text: &str, pos: usize, name_pairs: &[(String, String)]) -> Option<String> {
-    let before = &text[..pos];
-
-    if let Some(wei_pos) = before.rfind("谓") {
-        let between = &text[wei_pos + 3..pos];
-        if let Some(name) = longest_match(between, name_pairs) {
-            return Some(name);
+    /// Find the name in `find_dialog_speaker` context.
+    fn find_speaker_near(&self, text: &str, pos: usize) -> Option<String> {
+        let before = &text[..pos];
+        if let Some(wei) = before.rfind("谓") {
+            if let Some(name) = self.best_name_near(text, wei) {
+                return Some(name);
+            }
         }
-    }
-
-    if let Some(dui_pos) = before.rfind("对") {
-        let between = &text[dui_pos + 3..pos];
-        if let Some(name) = longest_match(between, name_pairs) {
-            return Some(name);
+        if let Some(dui) = before.rfind("对") {
+            if let Some(name) = self.best_name_near(text, dui) {
+                return Some(name);
+            }
+            return self.best_name_near(text, dui);
         }
+        self.best_name_near(text, pos)
     }
 
-    None
-}
+    /// Find the addressee name in `find_dialog_directed` context.
+    fn find_directed(&self, text: &str, pos: usize) -> Option<String> {
+        let before = &text[..pos];
 
-fn longest_match<'a>(text: &str, name_pairs: &'a [(String, String)]) -> Option<String> {
-    let mut best: Option<&str> = None;
-    let mut best_len: usize = 0;
-
-    for (alias, canonical) in name_pairs {
-        if text.contains(alias.as_str()) && alias.len() > best_len {
-            best_len = alias.len();
-            best = Some(canonical);
+        if let Some(wei_pos) = before.rfind("谓") {
+            let between = &text[wei_pos + 3..pos];
+            if let Some(name) = self.longest_match(between) {
+                return Some(name);
+            }
         }
+
+        if let Some(dui_pos) = before.rfind("对") {
+            let between = &text[dui_pos + 3..pos];
+            if let Some(name) = self.longest_match(between) {
+                return Some(name);
+            }
+        }
+
+        None
     }
 
-    best.map(|s| s.to_string())
+    /// Find the longest matching name in `text`.
+    fn longest_match(&self, text: &str) -> Option<String> {
+        self.ac
+            .find_overlapping_iter(text)
+            .max_by_key(|m| m.len())
+            .map(|m| self.names[m.pattern().as_usize()].1.clone())
+    }
 }
 
 fn extract_speech_span<'a>(text: &'a str, start: usize, all_markers: &[usize]) -> &'a str {

@@ -233,6 +233,8 @@ impl IngestionPipeline {
         name_pairs: &[(String, String)],
     ) -> Result<()> {
         let text = &ch.text;
+        let _t0 = std::time::Instant::now();
+        let _profile = ch.num <= 3;
 
         // Find all alias matches with positions — single pass via Aho-Corasick
         // instead of scanning the full text once per alias (~150 scans per chapter).
@@ -302,6 +304,7 @@ impl IngestionPipeline {
                 .or_default()
                 .push((m.start, m.end, m.alias.clone()));
         }
+        if _profile { eprintln!("  ch{} t=aliases: {}ms", ch.num, _t0.elapsed().as_millis()); }
 
         // Process events per character (max 1 per chapter)
         for (name, positions) in &chars_positions {
@@ -363,6 +366,7 @@ impl IngestionPipeline {
                 }
             }
         }
+        if _profile { eprintln!("  ch{} t=events: {}ms", ch.num, _t0.elapsed().as_millis()); }
 
         // Build relation index once per chapter (not per pair) for O(N²)-free
         // relation type detection. Pre-computes keyword and character positions
@@ -444,6 +448,7 @@ impl IngestionPipeline {
                 }
             }
         }
+        if _profile { eprintln!("  ch{} t=pairs: {}ms", ch.num, _t0.elapsed().as_millis()); }
 
         // Dialog-chain-based directed relation extraction.
         //
@@ -452,7 +457,18 @@ impl IngestionPipeline {
         // dialog context (`对曰` = reply to previous speaker, `谓X曰` = explicit).
         // Overrides relation types from generic/ambiguous proximity to precise
         // directed relations.
-        let dialog_relations = relation::extract_dialog_relations(text, name_pairs);
+        let (dialog_relations, _dialog_cost) = if _profile {
+            let t0 = std::time::Instant::now();
+            let r = relation::extract_dialog_relations(text, name_pairs);
+            let ms = t0.elapsed().as_micros() as f64 / 1000.0;
+            (r, ms)
+        } else {
+            (relation::extract_dialog_relations(text, name_pairs), 0.0)
+        };
+        if _profile {
+            let n_dm = text.matches("曰：").count();
+            eprintln!("  ch{} t=dialog_extract: {:.0}ms {}rels ({}曰: {}name_pairs)", ch.num, _dialog_cost, dialog_relations.len(), n_dm, name_pairs.len());
+        }
         for dr in &dialog_relations {
             let key = if dr.speaker < dr.addressee {
                 (dr.speaker.clone(), dr.addressee.clone())
@@ -489,6 +505,7 @@ impl IngestionPipeline {
             }
         }
 
+        if _profile { eprintln!("  ch{} t=final: {}ms", ch.num, _t0.elapsed().as_millis()); }
         Ok(())
     }
 
