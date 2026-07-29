@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::error::Error;
 use crate::knowledge::store::KnowledgeStore;
-use crate::knowledge::{EvidenceSourceType, KnowledgeEdge, KnowledgeObject, ObjectType, Origin, SQLiteKnowledgeStore};
+use crate::knowledge::{KnowledgeEdge, SQLiteKnowledgeStore};
 use crate::mcp::server::ServerBuilder;
 use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler};
 
@@ -136,7 +136,9 @@ impl ToolHandler for EvidenceHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
         let query = req_str(args, "query")?;
         let doc = opt_str(args, "doc");
-        let limit = opt_usize(args, "limit", 20);
+        // Clamp to a sane upper bound so a malicious/huge `limit` can't exhaust
+        // memory by loading the whole evidence table into one response.
+        let limit = opt_usize(args, "limit", 20).min(200);
         let hits = self.store.search_evidence(&query, doc, limit).await?;
         json_ok(&hits)
     }
@@ -160,39 +162,60 @@ impl ToolHandler for CorrectRelationHandler {
         let new_target = req_str(args, "new_target")?;
         let doc = opt_str(args, "doc");
 
-        // Resolve source entity
+        // Resolve all three entities up front so the edge filter can match on
+        // the full triple (source, predicate, old_target) rather than just the
+        // predicate. The previous implementation resolved `old_target` but
+        // never used it to filter, so ALL edges with the matching predicate
+        // were reported as "changed" — even ones pointing at other entities.
         let src = match self.store.find_object_by_name(&source, None).await? {
             Some(s) => s,
             None => return Ok(err_result(format!("source `{source}` not found"))),
         };
+        let target_entity = match self.store.find_object_by_name(&old_target, None).await? {
+            Some(t) => t,
+            None => return Ok(err_result(format!("old_target `{old_target}` not found"))),
+        };
+        let new_entity = match self.store.find_object_by_name(&new_target, None).await? {
+            Some(n) => n,
+            None => return Ok(err_result(format!("new_target `{new_target}` not found"))),
+        };
 
-        // Find edges matching (source_id, predicate)
+        // Match OUTGOING edges from `source` to `old_target` with the given
+        // predicate. `get_edges_touching` also returns incoming edges, so we
+        // explicitly require `source_id == src.id` to avoid re-targeting edges
+        // where `source` is the object of someone else's relation.
         let edges = self.store.get_edges_touching(src.id).await?;
-        let matched: Vec<&KnowledgeEdge> = edges.iter()
-            .filter(|e| e.predicate == predicate).collect();
+        let matched: Vec<&KnowledgeEdge> = edges
+            .iter()
+            .filter(|e| {
+                e.predicate == predicate && e.source_id == src.id && e.target_id == target_entity.id
+            })
+            .collect();
 
         if matched.is_empty() {
-            return Ok(err_result(format!("no edges found for `{source}` with predicate `{predicate}`")));
+            return Ok(err_result(format!(
+                "no `{predicate}` edge from `{source}` to `{old_target}` found"
+            )));
         }
 
-        // Find the specific edge whose target matches old_target
-        let target_entity = self.store.find_object_by_name(&old_target, None).await?
-            .ok_or_else(|| Error::NotFound(format!("old_target `{old_target}` not found")))?;
+        // Persist the correction: re-target each matching edge in place. This
+        // closes the loop that previously left the database unchanged while
+        // reporting success to the client.
+        let mut changed = 0usize;
+        for e in &matched {
+            self.store.update_edge_target(e.id, new_entity.id).await?;
+            changed += 1;
+        }
 
-        let new_entity = self.store.find_object_by_name(&new_target, None).await?
-            .ok_or_else(|| Error::NotFound(format!("new_target `{new_target}` not found")))?;
-
-        // We need direct SQL access to update edges. Use the store's connection.
-        // Since SQLiteKnowledgeStore doesn't expose update_edge, we'll use
-        // the approach of logging what needs to change.
         let details = serde_json::json!({
             "source": source,
             "predicate": predicate,
-            "changed": matched.len(),
+            "changed": changed,
             "from_target": old_target,
             "from_id": target_entity.id,
             "to_target": new_target,
             "to_id": new_entity.id,
+            "doc": doc,
         });
 
         json_ok(&details)

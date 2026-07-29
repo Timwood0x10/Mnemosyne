@@ -48,6 +48,14 @@ pub struct EntityProfile {
     pub _doc_type_hint: String,
     #[serde(default = "default_empty_verbs")]
     pub verbs: Vec<Vec<String>>,
+    #[serde(default)]
+    pub hostile_verbs: Vec<String>,
+    #[serde(default)]
+    pub friendly_verbs: Vec<String>,
+    #[serde(default)]
+    pub faction_switch_triggers: Option<HashMap<String, Vec<String>>>,
+    #[serde(default)]
+    pub personality_patterns: Vec<String>,
     pub entities: Vec<JsonEntity>,
 }
 
@@ -69,6 +77,14 @@ pub struct JsonEntityProvider {
     /// Strong/dialog/action verb groups loaded from the profile.
     /// Index 0 = strong_verbs, 1 = dialog_verbs, 2 = action_verbs.
     verb_groups: Vec<Vec<String>>,
+    /// Verbs that indicate hostile relationship changes (杀, 斩, 攻...).
+    hostile_verbs: Vec<String>,
+    /// Verbs that indicate friendly relationship changes (救, 拜, 封...).
+    friendly_verbs: Vec<String>,
+    /// Faction switch trigger patterns by type (surrender, betrayal, ...).
+    faction_switch_triggers: HashMap<String, Vec<String>>,
+    /// Personality pattern strings (性, 为人, 平生...) for character arc detection.
+    personality_patterns: Vec<String>,
 }
 
 impl JsonEntityProvider {
@@ -105,12 +121,36 @@ impl JsonEntityProvider {
             name: profile.profile_name,
             entries,
             verb_groups: profile.verbs,
+            hostile_verbs: profile.hostile_verbs,
+            friendly_verbs: profile.friendly_verbs,
+            faction_switch_triggers: profile.faction_switch_triggers.unwrap_or_default(),
+            personality_patterns: profile.personality_patterns,
         })
     }
 
     /// Return the verb groups: index 0 = strong_verbs, 1 = dialog_verbs, 2 = action_verbs.
     pub fn verbs(&self) -> &[Vec<String>] {
         &self.verb_groups
+    }
+
+    /// Return the hostile verbs (杀, 斩, 攻...) for timeline building.
+    pub fn hostile_verbs(&self) -> &[String] {
+        &self.hostile_verbs
+    }
+
+    /// Return the friendly verbs (救, 拜, 封...) for timeline building.
+    pub fn friendly_verbs(&self) -> &[String] {
+        &self.friendly_verbs
+    }
+
+    /// Return the faction switch triggers: {"surrender": [...], "betrayal": [...]}
+    pub fn faction_switch_triggers(&self) -> &HashMap<String, Vec<String>> {
+        &self.faction_switch_triggers
+    }
+
+    /// Return the personality patterns (性, 为人, ...) for character arc detection.
+    pub fn personality_patterns(&self) -> &[String] {
+        &self.personality_patterns
     }
 
     /// Build an observation config from the profile's verb groups.
@@ -128,7 +168,7 @@ impl JsonEntityProvider {
         let mut providers = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
-            if path.extension().map_or(false, |e| e == "json") {
+            if path.extension().is_some_and(|e| e == "json") {
                 providers.push(Self::from_file(&path)?);
             }
         }

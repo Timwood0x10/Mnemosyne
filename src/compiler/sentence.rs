@@ -47,7 +47,11 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
             let end_byte = byte_idx + c.len_utf8();
             // Guard: iter_start may have been advanced past this position
             // by whitespace-skipping after the previous separator.
-            let slice_start = if iter_start > byte_idx { byte_idx } else { iter_start };
+            let slice_start = if iter_start > byte_idx {
+                byte_idx
+            } else {
+                iter_start
+            };
             if slice_start >= chunk.text.len() {
                 break;
             }
@@ -55,12 +59,19 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
             let trimmed = sentence_text.trim();
 
             if !trimmed.is_empty() {
+                // Adjust offsets to match the trimmed text: the original
+                // iter_start/end_byte include leading/trailing whitespace,
+                // but `text` is trimmed. Without this adjustment,
+                // `document[start_offset..end_offset] != text`, breaking
+                // document-level offset math for evidence tracing (NEW-H26).
+                let leading = sentence_text.len() - sentence_text.trim_start().len();
+                let trailing = sentence_text.len() - sentence_text.trim_end().len();
                 sentences.push(Sentence {
                     chunk_index: chunk.index,
                     index: sent_index,
                     text: trimmed.to_owned(),
-                    start_offset: chunk.start_offset + iter_start,
-                    end_offset: chunk.start_offset + end_byte,
+                    start_offset: chunk.start_offset + slice_start + leading,
+                    end_offset: chunk.start_offset + end_byte - trailing,
                 });
                 sent_index += 1;
             }
@@ -104,10 +115,26 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
 ///
 /// Each sentence's `index` restarts at 0 per chunk, but [`SentenceId`] in the
 /// flat list is its position in the returned vec.
+///
+/// **Deduplication:** When chunks overlap (the default `chunk::Config` has
+/// `overlap = 200`), sentences in the overlap region appear in BOTH chunks.
+/// Without dedup, `extract::compile` would process them twice, creating
+/// duplicate events and relations. We dedup by `(start_offset, end_offset)` —
+/// two sentences with identical document-level byte ranges are the same
+/// sentence (NEW-C21).
 pub fn split_all(chunks: &[Chunk]) -> Vec<Sentence> {
     let mut all = Vec::new();
+    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
     for chunk in chunks {
-        all.extend(split_chunk(chunk));
+        for mut sent in split_chunk(chunk) {
+            let key = (sent.start_offset, sent.end_offset);
+            if seen.insert(key) {
+                // Re-index: the per-chunk `index` is now meaningless in the
+                // flat list, so we assign a sequential id.
+                sent.index = all.len();
+                all.push(sent);
+            }
+        }
     }
     all
 }

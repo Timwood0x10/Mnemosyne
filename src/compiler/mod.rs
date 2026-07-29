@@ -23,6 +23,7 @@ pub mod pipeline;
 pub mod profile;
 pub mod pronoun;
 pub mod relation;
+pub mod resolver;
 pub mod sentence;
 pub mod timeline;
 pub mod writer;
@@ -65,8 +66,8 @@ pub type SentenceId = usize;
 pub struct Entity {
     pub id: Option<i64>,
     pub name: String,
-    pub entity_type: String,     // person / place / org / concept
-    pub status: String,          // active / deceased / disbanded
+    pub entity_type: String, // person / place / org / concept
+    pub status: String,      // active / deceased / disbanded
     pub importance: f64,
 }
 
@@ -74,7 +75,7 @@ pub struct Entity {
 #[derive(Debug, Clone)]
 pub struct EntityProfile {
     pub entity_id: Option<i64>,
-    pub key: String,             // courtesy_name, birthplace, appearance, etc.
+    pub key: String, // courtesy_name, birthplace, appearance, etc.
     pub value: String,
     pub confidence: f64,
 }
@@ -83,9 +84,9 @@ pub struct EntityProfile {
 #[derive(Debug, Clone)]
 pub struct Mention {
     pub sentence_id: usize,
-    pub entity_id: Option<i64>,  // None = candidate, resolved in Pass 2
-    pub surface: String,         // "子龙"
-    pub canonical_name: String,  // "赵云"
+    pub entity_id: Option<i64>, // None = candidate, resolved in Pass 2
+    pub surface: String,        // "子龙"
+    pub canonical_name: String, // "赵云"
     pub offset: Range<usize>,
     pub confidence: f64,
 }
@@ -97,8 +98,8 @@ pub struct Mention {
 pub struct Event {
     pub id: Option<i64>,
     pub title: String,
-    pub event_type: String,      // battle / dialogue / death / marriage / ...
-    pub timestamp: Option<i32>,  // chapter number or year
+    pub event_type: String,     // battle / dialogue / death / marriage / ...
+    pub timestamp: Option<i32>, // chapter number or year
     pub location: Option<String>,
     pub description: String,
     pub participants: Vec<EventParticipant>,
@@ -110,16 +111,16 @@ pub struct Event {
 #[derive(Debug, Clone)]
 pub struct EventParticipant {
     pub entity_name: String,
-    pub role: String,            // protagonist / antagonist / witness
+    pub role: String, // protagonist / antagonist / witness
 }
 
 /// A structured change that an event causes to an entity.
 #[derive(Debug, Clone)]
 pub struct EventEffect {
-    pub target: String,          // entity name affected
-    pub attribute: String,       // "status" / "reputation" / "relation" / "faction"
+    pub target: String,    // entity name affected
+    pub attribute: String, // "status" / "reputation" / "relation" / "faction"
     pub old_value: Option<String>,
-    pub new_value: String,       // "deceased" / "+" / "-" / faction name
+    pub new_value: String, // "deceased" / "+" / "-" / faction name
     pub confidence: f64,
 }
 

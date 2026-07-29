@@ -6,31 +6,5 @@
     ["曰","道","言","答","问","叫","喝","唤","呼"],
     ["大怒","大喜","领兵","挺枪","纵马","大呼","拍马","拔剑","上前","大惊"]
   ],
-  "entities": [
-    {"canonical_name":"孙悟空","aliases":["悟空","行者","孙行者","齐天大圣","大圣","美猴王","猴王","孙大圣","石猴"],"object_type":"person"},
-    {"canonical_name":"唐僧","aliases":["玄奘","三藏","唐长老","御弟","陈玄奘","金蝉子"],"object_type":"person"},
-    {"canonical_name":"猪八戒","aliases":["八戒","呆子","猪悟能","悟能"],"object_type":"person"},
-    {"canonical_name":"沙僧","aliases":["沙和尚","沙悟净","悟净"],"object_type":"person"},
-    {"canonical_name":"白龙马","aliases":["龙马","玉龙"],"object_type":"person"},
-    {"canonical_name":"如来","aliases":["佛祖","如来佛","世尊"],"object_type":"person"},
-    {"canonical_name":"观音","aliases":["观世音","观音菩萨","菩萨","慈航"],"object_type":"person"},
-    {"canonical_name":"文殊","aliases":["文殊菩萨"],"object_type":"person"},
-    {"canonical_name":"普贤","aliases":["普贤菩萨"],"object_type":"person"},
-    {"canonical_name":"玉帝","aliases":["玉皇大帝","玉皇"],"object_type":"person"},
-    {"canonical_name":"太上老君","aliases":["老君","道德天尊"],"object_type":"person"},
-    {"canonical_name":"王母","aliases":["王母娘娘"],"object_type":"person"},
-    {"canonical_name":"菩提祖师","aliases":["菩提"],"object_type":"person"},
-    {"canonical_name":"二郎神","aliases":["杨戬"],"object_type":"person"},
-    {"canonical_name":"哪吒","aliases":["三太子"],"object_type":"person"},
-    {"canonical_name":"铁扇公主","aliases":["铁扇","罗刹女"],"object_type":"person"},
-    {"canonical_name":"牛魔王","aliases":["牛王"],"object_type":"person"},
-    {"canonical_name":"红孩儿","aliases":["圣婴大王","善财童子"],"object_type":"person"},
-    {"canonical_name":"白骨精","aliases":["白骨夫人"],"object_type":"person"},
-    {"canonical_name":"金角大王","aliases":["金角"],"object_type":"person"},
-    {"canonical_name":"银角大王","aliases":["银角"],"object_type":"person"},
-    {"canonical_name":"大鹏金翅雕","aliases":["大鹏"],"object_type":"person"},
-    {"canonical_name":"辟寒大王","aliases":["辟寒儿","辟寒"],"object_type":"person"},
-    {"canonical_name":"辟暑大王","aliases":["辟暑儿","辟暑"],"object_type":"person"},
-    {"canonical_name":"辟尘大王","aliases":["辟尘儿","辟尘"],"object_type":"person"}
-  ]
+"entities": []
 }

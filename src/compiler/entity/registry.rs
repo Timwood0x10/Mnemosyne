@@ -25,6 +25,21 @@ pub struct EntityDictionary {
     pub name_to_id: HashMap<String, i64>,
 }
 
+impl EntityDictionary {
+    /// Register a discovered entity at runtime (from Pass 1 auto-discovery).
+    ///
+    /// This adds the canonical name and all aliases to the dictionary so that
+    /// Pass 2 (Story Compiler) can resolve mentions.
+    pub fn register_discovered(&mut self, name: &str, aliases: &[&str]) {
+        self.alias_to_canonical
+            .insert(name.to_string(), name.to_string());
+        for alias in aliases {
+            self.alias_to_canonical
+                .insert(alias.to_string(), name.to_string());
+        }
+    }
+}
+
 /// Entity registry that accepts multiple providers and builds an index.
 #[derive(Default)]
 pub struct EntityRegistry {

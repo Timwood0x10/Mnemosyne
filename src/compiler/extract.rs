@@ -25,13 +25,19 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             strong_verbs: vec![
-                "杀","斩","擒","救","打","战","斗","败","胜","攻","破",
-                "逃","死","绑","缚","骂","哭","笑","怒","拜","封","赐","赏",
-            ].into_iter().map(String::from).collect(),
+                "杀", "斩", "擒", "救", "打", "战", "斗", "败", "胜", "攻", "破", "逃", "死", "绑",
+                "缚", "骂", "哭", "笑", "怒", "拜", "封", "赐", "赏",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             action_verbs: vec![
-                "大怒","大喜","领兵","引军","挺枪","纵马","大呼","拔剑",
-                "出马","上前","大惊",
-            ].into_iter().map(String::from).collect(),
+                "大怒", "大喜", "领兵", "引军", "挺枪", "纵马", "大呼", "拔剑", "出马", "上前",
+                "大惊",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect(),
             dialog_markers: vec!["曰：".into(), "道：".into(), "言：".into()],
             proximity_chars: 50,
         }
@@ -39,12 +45,28 @@ impl Default for Config {
 }
 
 /// Scan sentences for entity mentions, extract events, and populate the context.
-pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictionary, config: &Config) {
+pub fn compile(
+    ctx: &mut CompileContext,
+    sentences: &[&str],
+    dict: &EntityDictionary,
+    config: &Config,
+) {
     let mut current_chapter = ctx.current_timestamp.unwrap_or(1);
 
-    for (_sent_idx, text) in sentences.iter().enumerate() {
+    for text in sentences.iter() {
         if text.len() < 2 {
             continue;
+        }
+
+        // Chapter tracking: parse the actual chapter number from "第X回" /
+        // "第X章" headings at the START of each iteration, so that events
+        // found in the heading sentence and in the body text that follows
+        // are both tagged with the correct chapter number. Doing this before
+        // the mention scan also ensures heading-only sentences (which may
+        // contain no entity mentions) still advance the chapter counter.
+        if let Some(ch_num) = parse_chapter_number(text) {
+            current_chapter = ch_num;
+            ctx.current_timestamp = Some(current_chapter);
         }
 
         let local_mentions = scan_mentions(text, dict);
@@ -55,19 +77,16 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
         // Dialog pattern: X曰/Y道 → Event(dialogue)
         for marker in &config.dialog_markers {
             if let Some(pos) = text.find(marker.as_str()) {
-                let speaker = local_mentions.iter()
-                    .filter(|m| m.offset.end <= pos)
-                    .last();
-                let addressee = local_mentions.iter()
+                let speaker = local_mentions.iter().rfind(|m| m.offset.end <= pos);
+                let addressee = local_mentions
+                    .iter()
                     .find(|m| m.offset.start >= pos + marker.len());
 
                 if let Some(s) = speaker {
-                    let mut participants = vec![
-                        EventParticipant {
-                            entity_name: s.canonical_name.clone(),
-                            role: "speaker".into(),
-                        }
-                    ];
+                    let mut participants = vec![EventParticipant {
+                        entity_name: s.canonical_name.clone(),
+                        role: "speaker".into(),
+                    }];
                     if let Some(a) = addressee {
                         participants.push(EventParticipant {
                             entity_name: a.canonical_name.clone(),
@@ -75,7 +94,7 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
                         });
                     }
                     ctx.events.push(Event {
-        effects: vec![],
+                        effects: vec![],
                         id: None,
                         title: format!("{}曰", s.canonical_name),
                         event_type: "dialogue".into(),
@@ -90,30 +109,30 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
         }
 
         // Strong verb / action verb patterns → Event(action)
-        let all_verbs: Vec<&str> = config.strong_verbs.iter()
+        let all_verbs: Vec<&str> = config
+            .strong_verbs
+            .iter()
             .chain(config.action_verbs.iter())
             .map(|s| s.as_str())
             .collect();
 
         for verb in &all_verbs {
             for (pos, _) in text.match_indices(verb) {
-                let subject = local_mentions.iter()
-                    .filter(|m| m.offset.end <= pos
-                        && (pos - m.offset.end) < config.proximity_chars)
-                    .last();
+                let subject = local_mentions.iter().rfind(|m| {
+                    m.offset.end <= pos && (pos - m.offset.end) < config.proximity_chars
+                });
 
-                let object = local_mentions.iter()
-                    .find(|m| m.offset.start >= pos + verb.len()
-                        && (m.offset.start - (pos + verb.len())) < config.proximity_chars);
+                let object = local_mentions.iter().find(|m| {
+                    m.offset.start >= pos + verb.len()
+                        && (m.offset.start - (pos + verb.len())) < config.proximity_chars
+                });
 
                 if let Some(s) = subject {
                     let mut title = format!("{}{}", s.canonical_name, verb);
-                    let mut participants = vec![
-                        EventParticipant {
-                            entity_name: s.canonical_name.clone(),
-                            role: "subject".into(),
-                        }
-                    ];
+                    let mut participants = vec![EventParticipant {
+                        entity_name: s.canonical_name.clone(),
+                        role: "subject".into(),
+                    }];
                     if let Some(o) = object {
                         title = format!("{}{}{}", s.canonical_name, verb, o.canonical_name);
                         participants.push(EventParticipant {
@@ -123,7 +142,7 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
                     }
 
                     ctx.events.push(Event {
-        effects: vec![],
+                        effects: vec![],
                         id: None,
                         title,
                         event_type: "action".into(),
@@ -136,16 +155,77 @@ pub fn compile(ctx: &mut CompileContext, sentences: &[&str], dict: &EntityDictio
                 }
             }
         }
-
-        // Chapter tracking: approximate chapter from "第X回" pattern
-        if text.contains("第") && (text.contains("回") || text.contains("章")) {
-            current_chapter += 1;
-            ctx.current_timestamp = Some(current_chapter);
-        }
     }
 
     // Build relations from co-occurring event participants
     build_relations(ctx);
+}
+
+/// Parse a chapter number from a heading like "第三回" or "第120章".
+///
+/// Supports both Arabic numerals ("第1回") and Chinese numerals
+/// ("第一百二十回"). Returns `None` if no chapter heading is found.
+fn parse_chapter_number(text: &str) -> Option<i32> {
+    // Only treat the sentence as a chapter heading when "第" appears at the
+    // START (after trimming leading whitespace). This prevents false-positive
+    // chapter resets on narrative text that merely contains "第X回" somewhere
+    // in the middle, e.g. a character saying "第三回 合该如此".
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with("第") {
+        return None;
+    }
+    let after = &trimmed["第".len()..];
+    // Find the end marker (回 or 章)
+    let end = after.find("回").or_else(|| after.find("章"))?;
+    let num_str = &after[..end];
+
+    // Try Arabic numeral first
+    if let Ok(n) = num_str.parse::<i32>() {
+        return Some(n);
+    }
+
+    // Try Chinese numeral
+    chinese_to_int(num_str)
+}
+
+/// Convert a Chinese numeral string (e.g. "一百二十") to an integer.
+fn chinese_to_int(s: &str) -> Option<i32> {
+    const DIGITS: &[(&str, i32)] = &[
+        ("零", 0),
+        ("〇", 0),
+        ("一", 1),
+        ("二", 2),
+        ("两", 2),
+        ("三", 3),
+        ("四", 4),
+        ("五", 5),
+        ("六", 6),
+        ("七", 7),
+        ("八", 8),
+        ("九", 9),
+    ];
+    const UNITS: &[(&str, i32)] = &[("十", 10), ("百", 100), ("千", 1000)];
+
+    let mut total: i32 = 0;
+    let mut current: i32 = 0;
+
+    for ch in s.chars() {
+        let cs = ch.to_string();
+        // Check if it's a digit
+        if let Some((_, val)) = DIGITS.iter().find(|(k, _)| *k == cs) {
+            current = *val;
+        } else if let Some((_, unit)) = UNITS.iter().find(|(k, _)| *k == cs) {
+            if current == 0 {
+                current = 1; // "十" alone means 10
+            }
+            total += current * unit;
+            current = 0;
+        } else {
+            return None; // unknown character
+        }
+    }
+    total += current;
+    if total > 0 { Some(total) } else { None }
 }
 
 /// Scan a single sentence for entity mentions using the dictionary.
@@ -153,15 +233,20 @@ fn scan_mentions(text: &str, dict: &EntityDictionary) -> Vec<Mention> {
     let mut mentions = Vec::new();
 
     // Simple longest-first scan: check if any known alias appears in the text
-    let mut aliases: Vec<(&str, &str)> = dict.alias_to_canonical.iter()
+    let mut aliases: Vec<(&str, &str)> = dict
+        .alias_to_canonical
+        .iter()
         .map(|(k, v)| (k.as_str(), v.as_str()))
         .collect();
-    aliases.sort_by(|a, b| b.0.len().cmp(&a.0.len())); // longest first
+    aliases.sort_by_key(|b| std::cmp::Reverse(b.0.len())); // longest first
 
     for (alias, canonical) in &aliases {
         for (pos, _) in text.match_indices(alias) {
             // Avoid overlapping matches (skip if within an existing mention)
-            if mentions.iter().any(|m: &Mention| pos >= m.offset.start && pos < m.offset.end) {
+            if mentions
+                .iter()
+                .any(|m: &Mention| pos >= m.offset.start && pos < m.offset.end)
+            {
                 continue;
             }
             let (_, entity_id) = dict.resolve(alias).unwrap_or((canonical.to_string(), None));
@@ -176,7 +261,7 @@ fn scan_mentions(text: &str, dict: &EntityDictionary) -> Vec<Mention> {
         }
     }
 
-    mentions.sort_by(|a, b| a.offset.start.cmp(&b.offset.start));
+    mentions.sort_by_key(|a| a.offset.start);
     mentions
 }
 
@@ -266,12 +351,11 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        let sentences = vec!["刘备救关羽。", "刘备救张飞。"];
-        let refs: Vec<&str> = sentences.iter().map(|s| *s).collect();
+        let sentences = ["刘备救关羽。", "刘备救张飞。"];
+        let refs: Vec<&str> = sentences.to_vec();
         compile(&mut ctx, &refs, &dict, &config);
         let has_rel = ctx.relations.iter().any(|r| {
-            (r.source == "刘备" && r.target == "关羽")
-                || (r.source == "关羽" && r.target == "刘备")
+            (r.source == "刘备" && r.target == "关羽") || (r.source == "关羽" && r.target == "刘备")
         });
         assert!(has_rel, "co-occurrence should create a relation");
     }

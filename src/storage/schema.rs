@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS entities (
 CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 
--- ── entity_aliases (V7 新增) ──────────────────────────────
+-- ── entity_aliases (V7 new) ──────────────────────────────
 CREATE TABLE IF NOT EXISTS entity_aliases (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id   INTEGER NOT NULL REFERENCES entities(id),

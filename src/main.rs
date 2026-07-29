@@ -444,11 +444,14 @@ impl ToolHandler for CharacterNetworkTool {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("novels");
         let novel = args.get("novel").and_then(serde_json::Value::as_str);
+        // Clamp depth to the documented 1-5 range. The previous `.min(5)`
+        // allowed depth=0, which violates the tool contract and returns an
+        // empty graph (BFS with depth 0 visits only the root).
         let depth = args
             .get("depth")
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(2)
-            .min(5) as usize;
+            .clamp(1, 5) as usize;
 
         let node =
             traverse_character_network(self.store.as_ref(), name, tenant_id, novel, depth).await?;

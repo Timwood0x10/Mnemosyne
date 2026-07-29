@@ -42,7 +42,7 @@ pub(crate) fn floor_char_boundary(text: &str, pos: usize) -> usize {
 /// disambiguates the shortname from homographs inside multi-character names
 /// or common nouns.
 pub const DIALOG_VERBS: &[&str] = &[
-    "曰", "道", "言", "答", "问", "笑", "怒", "喝", "唤", "叫", "叹", "惊", "喜", "怒",
+    "曰", "道", "言", "答", "问", "笑", "怒", "喝", "唤", "叫", "叹", "惊", "喜",
 ];
 
 /// Action verbs that signal a character acting as a subject: `X[verb]` means

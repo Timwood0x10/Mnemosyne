@@ -82,7 +82,26 @@ impl<'a> Migrator<'a> {
     /// Novels whose corpus file is absent or empty are skipped (the V1
     /// pipeline does the same). A novel with a corpus but no V1 rows still
     /// produces documents + chapters (zero objects/edges).
+    ///
+    /// Idempotency: each `migrate_novel` call wipes that novel's prior
+    /// knowledge rows (chapters/objects/edges/evidence/mentions) before
+    /// re-inserting, so a re-run is a clean per-novel rebuild rather than an
+    /// accumulating append. The V1 character store is never touched.
     pub async fn migrate(&self) -> Result<MigrationStats> {
+        // Disable FK enforcement for the duration of the migration: the
+        // migrator inserts in parent→child order so enforcement is unnecessary,
+        // and cross-novel edges can transiently reference not-yet-migrated
+        // objects. Re-enable unconditionally afterwards so production queries
+        // keep FK integrity checking.
+        self.knowledge.set_foreign_keys_enabled(false).await?;
+        let result = self.migrate_inner().await;
+        // Best-effort re-enable; if it fails we still want the original result
+        // (or error) to surface.
+        let _ = self.knowledge.set_foreign_keys_enabled(true).await;
+        result
+    }
+
+    async fn migrate_inner(&self) -> Result<MigrationStats> {
         let mut stats = MigrationStats::default();
         for novel in NOVELS {
             let s = self.migrate_novel(novel).await?;
@@ -110,8 +129,13 @@ impl<'a> Migrator<'a> {
         }
 
         // 1. Document (idempotent: reuse if this novel was migrated before).
+        //    When reusing an existing document, wipe its prior knowledge rows
+        //    first so re-migrating doesn't duplicate chapters/objects/edges.
         let doc_id = match self.knowledge.find_document_by_title(novel).await? {
-            Some(d) => d.id,
+            Some(d) => {
+                self.knowledge.clear_for_document(d.id).await?;
+                d.id
+            }
             None => {
                 self.knowledge
                     .create_document(&Document {
@@ -403,8 +427,13 @@ impl<'a> Migrator<'a> {
                             id: 0,
                             doc_id,
                             chapter_id,
-                            start_offset: Some(start as i64),
-                            end_offset: Some(end as i64),
+                            // Offsets must describe the stored `content` (the
+                            // `lo..hi` snippet window), not the narrower alias
+                            // match range `[start, end]` — otherwise a consumer
+                            // slicing the chapter at these offsets gets just the
+                            // alias (e.g. "赵云") instead of the evidence text.
+                            start_offset: Some(lo as i64),
+                            end_offset: Some(hi as i64),
                             content: snippet,
                             created_at: now_ts(),
                         })

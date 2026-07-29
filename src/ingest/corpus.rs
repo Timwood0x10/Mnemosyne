@@ -1,5 +1,4 @@
 /// Corpus loading, chapter splitting, and Chinese numeral parsing.
-use std::collections::HashMap;
 use std::path::Path;
 
 /// A single chapter from a novel.
@@ -182,16 +181,6 @@ pub fn load_novel(novel: &str, corpus_dir: &Path) -> std::io::Result<Vec<Chapter
     let path = corpus_dir.join(fname);
     let text = std::fs::read_to_string(&path)?;
     Ok(split_into_chapters(&text))
-}
-
-/// Return the mapping from novel name to its file path
-pub fn novel_file_map() -> HashMap<&'static str, &'static str> {
-    let mut m = HashMap::new();
-    m.insert("水浒传", "水浒传.txt");
-    m.insert("三国演义", "三国演义.txt");
-    m.insert("红楼梦", "红楼梦.txt");
-    m.insert("西游记", "西游记.txt");
-    m
 }
 
 #[cfg(test)]

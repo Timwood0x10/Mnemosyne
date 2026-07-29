@@ -1,0 +1,21 @@
+# cargo-nextest configuration
+# Docs: https://nexte.st/docs/configuration/
+
+# Tests that share /tmp/lorescope_sanguo.db must run serially to avoid
+# SQLite "database disk image is malformed" from concurrent rebuilds.
+# Each of these tests calls `ensure_sanguo_db()`, which lazily builds the
+# shared DB; if two run in parallel they corrupt the file.
+[test-groups]
+serial-db = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(=setup_and_query)'
+test-group = 'serial-db'
+
+[[profile.default.overrides]]
+filter = 'test(=write_faction_to_db)'
+test-group = 'serial-db'
+
+[[profile.default.overrides]]
+filter = 'test(=fix_caoren_relation)'
+test-group = 'serial-db'

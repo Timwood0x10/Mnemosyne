@@ -233,8 +233,10 @@ fn row_to_relation(row: &rusqlite::Row) -> rusqlite::Result<CharacterRelation> {
         bidirections: row.get("bidirections")?,
         source_type: {
             let s: String = row.get("relation_source")?;
+            // Fall back to CoOccurrence on unknown DB values instead of
+            // panicking — defensive against legacy or foreign rows.
             s.parse::<RelationSource>()
-                .expect("invalid relation source value from database")
+                .unwrap_or(RelationSource::CoOccurrence)
         },
         confidence: row.get("confidence")?,
         importance: row.get("importance")?,
@@ -313,6 +315,18 @@ impl SQLiteCharacterStore {
 
     async fn init(&self) -> Result<()> {
         let conn = self.conn.lock().await;
+        // busy_timeout makes concurrent connections wait (up to 5s) for a lock
+        // instead of failing immediately. foreign_keys enforces declared FK
+        // constraints. WAL is intentionally NOT enabled: the knowledge store
+        // uses the same rollback-journal mode, and mixing WAL on one connection
+        // with rollback journal on another connection to the SAME file leaves
+        // `-wal`/`-shm` sidecars that the next process reads as "file is not a
+        // database". Both stores must agree on the journal mode for the shared
+        // DB used by integration tests (`/tmp/lorescope_sanguo.db`).
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
+        )?;
         conn.execute_batch(CHAR_SCHEMA)
             .map_err(|e| StorageError::Schema(format!("init character schema: {e}")))?;
         Ok(())

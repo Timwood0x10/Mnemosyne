@@ -5,28 +5,27 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use lore_scope::compiler::CompileContext;
 use lore_scope::compiler::chunk;
-use lore_scope::compiler::entity::{
-    EntityRegistry, JsonEntityProvider,
-};
+use lore_scope::compiler::document::Document;
+use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::sentence;
 use lore_scope::compiler::{extract, profile};
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::CompileContext;
 
 #[tokio::test]
 async fn e2e_sanguo() {
     eprintln!("\n========== 三国演义 人物关系网络 ==========\n");
 
     // ── Load full text ──────────────────────────────────────────────────
-    let doc = Document::from_file("corpus/三国演义.txt")
-        .expect("load 三国演义.txt");
+    let doc = Document::from_file("corpus/三国演义.txt").expect("load 三国演义.txt");
     let chapter_count = doc.text.matches("第").filter(|_| true).count();
     eprintln!("全文: {} 字符, ~{} 回\n", doc.text.len(), chapter_count);
 
     // ── Build Entity Registry ───────────────────────────────────────────
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "三国演义".into();
+    let mut ctx = CompileContext {
+        document_title: "三国演义".into(),
+        ..Default::default()
+    };
     let mut registry = EntityRegistry::new();
     let provider = Arc::new(
         JsonEntityProvider::from_file("config/entity_profiles/sanguo.json")
@@ -34,10 +33,13 @@ async fn e2e_sanguo() {
     );
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
-    let dict = registry.build_dictionary();
+    let mut dict = registry.build_dictionary();
 
     // ── Pass 1: Profile Extractor ────────────────────────────────────────
     profile::extract_profiles(&doc.text, &mut ctx, Some(&dict));
+
+    // Wire Pass 1 → Pass 2: register discovered entities + aliases
+    profile::register_discovered_entities(&mut dict, &ctx);
 
     // ── Pass 2: Story Compiler ──────────────────────────────────────────
     let chunks = chunk::plan(&doc.text, chunk::Config::default());
@@ -45,41 +47,63 @@ async fn e2e_sanguo() {
     let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
 
     let config = extract::Config {
-        strong_verbs: obs_config.get(0).cloned().unwrap_or_default(),
+        strong_verbs: obs_config.first().cloned().unwrap_or_default(),
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
     extract::compile(&mut ctx, &sent_texts, &dict, &config);
 
     // ── 人物节点 ────────────────────────────────────────────────────────
-    eprintln!("━━━ 人物节点 ({} 人) ━━━━━━━━━━━━━━━━━━━━━━━━━\n", ctx.entities.len());
+    eprintln!(
+        "━━━ 人物节点 ({} 人) ━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+        ctx.entities.len()
+    );
     for e in &ctx.entities {
-        let profs: Vec<String> = ctx.profiles.iter()
+        let profs: Vec<String> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == e.id)
             .map(|p| format!("{}:{}", p.key, p.value))
             .collect();
-        let ev_count = ctx.events.iter().filter(|ev|
-            ev.participants.iter().any(|p| p.entity_name == e.name)
-        ).count();
-        let rel_count = ctx.relations.iter().filter(|r|
-            r.source == e.name || r.target == e.name
-        ).count();
+        let ev_count = ctx
+            .events
+            .iter()
+            .filter(|ev| ev.participants.iter().any(|p| p.entity_name == e.name))
+            .count();
+        let rel_count = ctx
+            .relations
+            .iter()
+            .filter(|r| r.source == e.name || r.target == e.name)
+            .count();
         if !profs.is_empty() || ev_count > 0 {
             eprintln!("  {}  (事件: {}, 关系: {})", e.name, ev_count, rel_count);
             for p in &profs {
-                eprintln!("    ├ {}: {}", p.split(':').next().unwrap_or(""), p.split(':').skip(1).collect::<Vec<_>>().join(":"));
+                eprintln!(
+                    "    ├ {}: {}",
+                    p.split(':').next().unwrap_or(""),
+                    p.split(':').skip(1).collect::<Vec<_>>().join(":")
+                );
             }
         }
     }
 
     // ── 关系网络 ────────────────────────────────────────────────────────
-    eprintln!("\n━━━ 关系网络 ({} 条) ━━━━━━━━━━━━━━━━━━━━━━━━━\n", ctx.relations.len());
+    eprintln!(
+        "\n━━━ 关系网络 ({} 条) ━━━━━━━━━━━━━━━━━━━━━━━━━\n",
+        ctx.relations.len()
+    );
 
     // Build adjacency: for each entity, list connected entities
     let mut adjacency: HashMap<String, Vec<String>> = HashMap::new();
     for r in &ctx.relations {
-        adjacency.entry(r.source.clone()).or_default().push(r.target.clone());
-        adjacency.entry(r.target.clone()).or_default().push(r.source.clone());
+        adjacency
+            .entry(r.source.clone())
+            .or_default()
+            .push(r.target.clone());
+        adjacency
+            .entry(r.target.clone())
+            .or_default()
+            .push(r.source.clone());
     }
     // Deduplicate each entity's connection list
     for v in adjacency.values_mut() {
@@ -91,19 +115,24 @@ async fn e2e_sanguo() {
     names.sort();
     for name in &names {
         if let Some(conns) = adjacency.get(*name) {
-            if conns.len() > 0 {
+            if !conns.is_empty() {
                 eprintln!("  {} ─── {}", name, conns.join("、"));
             }
         }
     }
 
     // ── 事件统计 ────────────────────────────────────────────────────────
-    eprintln!("\n━━━ 事件统计 (共 {} 件) ━━━━━━━━━━━━━━━━━━━━━━━\n", ctx.events.len());
+    eprintln!(
+        "\n━━━ 事件统计 (共 {} 件) ━━━━━━━━━━━━━━━━━━━━━━━\n",
+        ctx.events.len()
+    );
 
     let mut event_entity_counts: HashMap<String, usize> = HashMap::new();
     for ev in &ctx.events {
         for p in &ev.participants {
-            *event_entity_counts.entry(p.entity_name.clone()).or_default() += 1;
+            *event_entity_counts
+                .entry(p.entity_name.clone())
+                .or_default() += 1;
         }
     }
     let mut ranked: Vec<(&String, &usize)> = event_entity_counts.iter().collect();
@@ -116,11 +145,25 @@ async fn e2e_sanguo() {
     // ── 关键事件摘录 ──────────────────────────────────────────────────
     eprintln!("\n━━━ 关键事件摘录 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    let key_events = ["杀董卓", "斩华雄", "斩颜良", "诛文丑", "过五关", "赤壁",
-                       "借东风", "空城计", "七擒孟获", "六出祁山", "失街亭",
-                       "斩马谡", "五丈原"];
+    let key_events = [
+        "杀董卓",
+        "斩华雄",
+        "斩颜良",
+        "诛文丑",
+        "过五关",
+        "赤壁",
+        "借东风",
+        "空城计",
+        "七擒孟获",
+        "六出祁山",
+        "失街亭",
+        "斩马谡",
+        "五丈原",
+    ];
     for kw in &key_events {
-        let hits: Vec<&str> = ctx.events.iter()
+        let hits: Vec<&str> = ctx
+            .events
+            .iter()
             .filter(|ev| ev.title.contains(kw) || ev.description.contains(kw))
             .map(|ev| ev.title.as_str())
             .take(3)
@@ -131,6 +174,9 @@ async fn e2e_sanguo() {
     }
 
     // ── 断言 ────────────────────────────────────────────────────────────
-    assert!(ctx.events.len() > 100, "should extract at least 100 events from full text");
+    assert!(
+        ctx.events.len() > 100,
+        "should extract at least 100 events from full text"
+    );
     eprintln!("\n========== 测试完成 ==========\n");
 }

@@ -39,6 +39,7 @@ pub mod conversation_compiler;
 pub mod detector;
 pub mod distiller;
 pub mod embed;
+pub mod entity_resolver;
 pub mod error;
 pub mod extractor;
 pub mod faction;

@@ -202,6 +202,11 @@ mod tests {
             &text[chunks[0].end_offset - chunks[0].overlap_after..chunks[0].end_offset];
         let chunk1_start =
             &text[chunks[1].start_offset..chunks[1].start_offset + overlap_text.len()];
+        // The overlap region of chunk 0 must equal the opening bytes of chunk 1.
+        assert_eq!(
+            overlap_text, chunk1_start,
+            "overlap region should equal chunk 1's opening bytes"
+        );
         // For all-Chinese text, overlap char count should match configured overlap
         assert!(
             overlap_text.chars().count() >= cfg.overlap / 2,

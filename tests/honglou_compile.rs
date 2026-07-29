@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lore_scope::compiler::{chunk, sentence, extract, profile};
+use lore_scope::compiler::CompileContext;
 use lore_scope::compiler::document::Document;
 use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::CompileContext;
+use lore_scope::compiler::{chunk, extract, profile, sentence};
 
 #[tokio::test]
 async fn e2e_honglou() {
@@ -16,8 +16,10 @@ async fn e2e_honglou() {
     let doc = Document::from_file("corpus/红楼梦.txt").expect("load 红楼梦.txt");
     eprintln!("全文: {} 字符\n", doc.text.len());
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "红楼梦".into();
+    let mut ctx = CompileContext {
+        document_title: "红楼梦".into(),
+        ..Default::default()
+    };
 
     let mut registry = EntityRegistry::new();
     let provider = Arc::new(
@@ -26,22 +28,28 @@ async fn e2e_honglou() {
     );
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
-    let dict = registry.build_dictionary();
+    let mut dict = registry.build_dictionary();
 
     profile::extract_profiles(&doc.text, &mut ctx, Some(&dict));
+
+    // Wire Pass 1 → Pass 2: register discovered entities + aliases
+    profile::register_discovered_entities(&mut dict, &ctx);
 
     let chunks = chunk::plan(&doc.text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);
     let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
 
     let config = extract::Config {
-        strong_verbs: obs_config.get(0).cloned().unwrap_or_default(),
+        strong_verbs: obs_config.first().cloned().unwrap_or_default(),
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
     extract::compile(&mut ctx, &sent_texts, &dict, &config);
 
-    eprintln!("━━━ 人物节点 ({} 人) ━━━━━━━━━━━━━━━━━\n", ctx.entities.len());
+    eprintln!(
+        "━━━ 人物节点 ({} 人) ━━━━━━━━━━━━━━━━━\n",
+        ctx.entities.len()
+    );
     let mut entity_events: HashMap<String, usize> = HashMap::new();
     for ev in &ctx.events {
         for p in &ev.participants {
@@ -54,11 +62,18 @@ async fn e2e_honglou() {
         eprintln!("  {:>4}  {}", count, name);
     }
 
-    eprintln!("\n━━━ 关系网络 ({} 条) ━━━━━━━━━━━━━━━━━\n", ctx.relations.len());
+    eprintln!(
+        "\n━━━ 关系网络 ({} 条) ━━━━━━━━━━━━━━━━━\n",
+        ctx.relations.len()
+    );
     let mut adj: HashMap<String, Vec<String>> = HashMap::new();
     for r in &ctx.relations {
-        adj.entry(r.source.clone()).or_default().push(r.target.clone());
-        adj.entry(r.target.clone()).or_default().push(r.source.clone());
+        adj.entry(r.source.clone())
+            .or_default()
+            .push(r.target.clone());
+        adj.entry(r.target.clone())
+            .or_default()
+            .push(r.source.clone());
     }
     for v in adj.values_mut() {
         v.sort();
@@ -74,7 +89,10 @@ async fn e2e_honglou() {
         }
     }
 
-    eprintln!("\n━━━ 事件统计 (共 {} 件) ━━━━━━━━━━━━━━\n", ctx.events.len());
+    eprintln!(
+        "\n━━━ 事件统计 (共 {} 件) ━━━━━━━━━━━━━━\n",
+        ctx.events.len()
+    );
     let top10: Vec<&(&String, &usize)> = ranked.iter().take(10).collect();
     for (name, count) in top10 {
         eprintln!("  {:>4} 件  {}", count, name);

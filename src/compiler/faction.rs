@@ -1,53 +1,53 @@
-//! Faction Tracker — 阵营基线 + 时间线阵营变迁。
+//! Faction Tracker — baseline faction + timeline faction transitions.
 //!
-//! 每个角色出生在某个阵营（基线从 config/faction_map.json 加载）。
-//! 事件可能触发阵营变迁：
+//! Each entity starts in a baseline faction (loaded from config/faction_map.json).
+//! Events may trigger faction transitions:
 //!
 //! ```text
-//! 吕布: 群雄 (基线) → Ch.9 杀丁原 → 群雄(不变，但serves关系结束)
-//!       Ch.14 认董卓为义父 → 群雄(未正式跳槽)
-//!       Ch.19 被曹操擒 → 无(死)
-//! 张辽: 群雄(吕布麾下) → Ch.20 降曹操 → 魏
-//! 关羽: 蜀 → Ch.25 暂降曹操 → 魏(临时)
-//!       Ch.27 归刘备 → 蜀(恢复)
+//! Lü Bu: 群雄 (baseline) → Ch.9 kills Ding Yuan → 群雄 (unchanged, but serves-relation ends)
+//!        Ch.14 adopts Dong Zhuo as foster father → 群雄 (not official switch)
+//!        Ch.19 captured by Cao Cao → dead
+//! Zhang Liao: 群雄(under Lü Bu) → Ch.20 surrenders to Cao Cao → 魏
+//! Guan Yu: 蜀 → Ch.25 temporarily serves Cao Cao → 魏(temporary)
+//!          Ch.27 returns to Liu Bei → 蜀(restored)
 //! ```
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use serde::Deserialize;
-
-/// 一次阵营变迁记录。
+/// A single faction transition record.
 #[derive(Debug, Clone)]
 pub struct FactionTransition {
     pub entity: String,
     pub from_faction: String,
     pub to_faction: String,
     pub chapter: i32,
-    pub reason: String,      // 触发事件描述
+    pub reason: String,
     pub confidence: f64,
 }
 
-/// 阵营追踪器。
+/// Faction tracker that maintains baseline + current faction for each entity.
 pub struct FactionTracker {
-    /// 阵营基线映射：entity → faction
+    /// Baseline faction mapping: entity → faction
     baseline: HashMap<String, String>,
-    /// 当前阵营分配：entity → faction（随时间变化）
+    /// Current faction assignments (may change over time)
     current: HashMap<String, String>,
-    /// 阵营变迁历史
+    /// History of faction transitions
     pub transitions: Vec<FactionTransition>,
 }
 
 impl FactionTracker {
-    /// 从 faction_map.json 加载阵营基线。
-    pub fn from_file(novel: &str, path: impl AsRef<Path>) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Load baseline factions from `faction_map.json`.
+    pub fn from_file(
+        novel: &str,
+        path: impl AsRef<Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
         let map: HashMap<String, HashMap<String, Vec<String>>> = serde_json::from_str(&content)?;
         let mut baseline = HashMap::new();
         if let Some(factions) = map.get(novel) {
             for (faction, members) in factions {
                 for member in members {
-                    // 不在基线中或有更高置信度的阵营时覆盖
                     if !baseline.contains_key(member) {
                         baseline.insert(member.clone(), faction.clone());
                     }
@@ -62,75 +62,83 @@ impl FactionTracker {
         })
     }
 
-    /// 获取一个实体的当前阵营。
+    /// Get an entity's current faction.
     pub fn faction_of(&self, entity: &str) -> Option<&str> {
         self.current.get(entity).map(|s| s.as_str())
     }
 
-    /// 获取一个实体的基线阵营。
+    /// Get an entity's baseline (original) faction.
     pub fn baseline_of(&self, entity: &str) -> Option<&str> {
         self.baseline.get(entity).map(|s| s.as_str())
     }
 
-    /// 处理事件，检测阵营变迁。
+    /// Process an event to detect faction transitions.
     ///
-    /// 规则（更严格的匹配）：
-    /// - action 类事件 + "降X" → 实体叛变到 X 的阵营
-    /// - "杀X" + 被杀的 X 是该实体的主公/同僚 → 标记叛逃（低置信度）
-    /// - dialogue 类事件不触发阵营变迁（对话中的"降"不算投降）
+    /// Rules (strict matching):
+    /// - action-type events containing surrender ("降X") → entity switches to X's faction
+    /// - betrayal kills (杀主公/杀义父/弑) → marked as defector (low confidence)
+    /// - dialogue events never trigger transitions
     pub fn process_event(&mut self, event: &crate::compiler::Event) {
         let ts = event.timestamp.unwrap_or(0);
         let title = &event.title;
-        let participants: Vec<&str> = event.participants.iter().map(|p| p.entity_name.as_str()).collect();
-        if participants.len() < 2 { return; }
+        let participants: Vec<&str> = event
+            .participants
+            .iter()
+            .map(|p| p.entity_name.as_str())
+            .collect();
+        if participants.len() < 2 {
+            return;
+        }
 
-        // 只有 action 类事件才可能触发阵营变迁
-        if event.event_type != "action" { return; }
+        // Only action events can trigger faction changes
+        if event.event_type != "action" {
+            return;
+        }
 
-        // 检测"X降Y"模式——仅在事件标题明确描述投降时
-        // "降"字在 action 中通常是描述，如"张辽降曹操"
-        if title.ends_with("降") || title.contains("投降") || title.ends_with("降曹操") {
-            let factions: Vec<(String, Option<String>)> = participants.iter()
-                .map(|p| (p.to_string(), self.current.get(*p).cloned()))
-                .collect();
-
-            for p in &factions {
-                if let Some(pf) = &p.1 {
-                    for other in &factions {
-                        if p.0 == other.0 { continue; }
-                        if let Some(of) = &other.1 {
-                            if pf != of && title.contains(other.0.as_str()) {
-                                let old = pf.clone();
-                                self.current.insert(p.0.clone(), of.clone());
-                                self.transitions.push(FactionTransition {
-                                    entity: p.0.clone(),
-                                    from_faction: old,
-                                    to_faction: of.clone(),
-                                    chapter: ts,
-                                    reason: title.clone(),
-                                    confidence: 0.85,
-                                });
-                            }
+        // Detect "X降Y" patterns — a surrender action.
+        // Only the SUBJECT (the one surrendering) switches to the OBJECT's
+        // faction. The recipient must NOT switch — previously the nested loop
+        // switched both participants, corrupting the recipient's faction.
+        if title.contains("降") || title.contains("投降") {
+            if let (Some(subj), Some(obj)) = (
+                event.participants.iter().find(|p| p.role == "subject"),
+                event.participants.iter().find(|p| p.role == "object"),
+            ) {
+                let sn = &subj.entity_name;
+                let on = &obj.entity_name;
+                if sn != on {
+                    // Clone faction values to avoid borrowing self during mutation
+                    let sf = self.faction_of(sn).map(|s| s.to_string());
+                    let of = self.faction_of(on).map(|s| s.to_string());
+                    if let (Some(sf), Some(of)) = (sf, of) {
+                        if sf != of {
+                            self.current.insert(sn.to_string(), of.clone());
+                            self.transitions.push(FactionTransition {
+                                entity: sn.to_string(),
+                                from_faction: sf,
+                                to_faction: of,
+                                chapter: ts,
+                                reason: title.clone(),
+                                confidence: 0.85,
+                            });
                         }
                     }
                 }
             }
         }
 
-        // 检测"杀"——只有真正叛变的行为，不是战斗中的击杀
-        // 规则：subject 和 object 在同一阵营，且 subject 有"叛变历史"
-        //   或者事件标题包含"杀主公"类型模式
+        // Detect betrayal kill — subject kills someone in the same faction
+        // Only if the title contains explicit betrayal signals (not combat kills)
         if title.contains("杀") || title.contains("斩") {
-            if let (Some(subj), Some(obj)) = (event.participants.iter().find(|p| p.role == "subject"),
-                                                event.participants.iter().find(|p| p.role == "object")) {
+            if let (Some(subj), Some(obj)) = (
+                event.participants.iter().find(|p| p.role == "subject"),
+                event.participants.iter().find(|p| p.role == "object"),
+            ) {
                 let sn = &subj.entity_name;
                 let on = &obj.entity_name;
                 if let (Some(sf), Some(of)) = (self.faction_of(sn), self.faction_of(on)) {
                     if sf == of && sn != on && sf != "群雄" {
-                        // 同阵营相杀：可能是叛变
-                        // 但只在标题明确表示"X杀了自己的主公/同僚"时才记录
-                        // 战斗中的"曹操杀张辽"不算叛变
-                        let is_betrayal = title.contains("杀主公") 
+                        let is_betrayal = title.contains("杀主公")
                             || title.contains("杀义父")
                             || title.contains("弑")
                             || title.contains("袭杀");
@@ -150,8 +158,11 @@ impl FactionTracker {
         }
     }
 
-    /// 构建阵营关系图：按阵营分组的人物列表。
-    pub fn faction_graph(&self, entities: &[crate::compiler::Entity]) -> HashMap<String, Vec<String>> {
+    /// Build a faction graph: faction_name → list of entity names.
+    pub fn faction_graph(
+        &self,
+        entities: &[crate::compiler::Entity],
+    ) -> HashMap<String, Vec<String>> {
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
         for e in entities {
             let f = self.faction_of(&e.name).unwrap_or("未知").to_string();
@@ -160,15 +171,17 @@ impl FactionTracker {
         graph
     }
 
-    /// 打印阵营变迁报告。
+    /// Print faction transition report to stderr.
     pub fn print_report(&self) {
         if self.transitions.is_empty() {
-            eprintln!("  无阵营变迁");
+            eprintln!("  No faction transitions");
             return;
         }
         for t in &self.transitions {
-            eprintln!("  Ch.{}  {}  {} → {}  ({}) [conf={}]",
-                t.chapter, t.entity, t.from_faction, t.to_faction, t.reason, t.confidence);
+            eprintln!(
+                "  Ch.{}  {}  {} → {}  ({}) [conf={}]",
+                t.chapter, t.entity, t.from_faction, t.to_faction, t.reason, t.confidence
+            );
         }
     }
 }
@@ -180,33 +193,61 @@ mod tests {
 
     fn make_event(ts: i32, title: &str, subj: &str, obj: &str) -> Event {
         Event {
+            id: None,
+            title: title.into(),
+            event_type: "action".into(),
+            timestamp: Some(ts),
+            location: None,
+            description: String::new(),
             effects: vec![],
-            id: None, title: title.into(), event_type: "action".into(),
-            timestamp: Some(ts), location: None, description: String::new(),
             participants: vec![
-                EventParticipant { entity_name: subj.into(), role: "subject".into() },
-                EventParticipant { entity_name: obj.into(), role: "object".into() },
+                EventParticipant {
+                    entity_name: subj.into(),
+                    role: "subject".into(),
+                },
+                EventParticipant {
+                    entity_name: obj.into(),
+                    role: "object".into(),
+                },
             ],
             importance: 0.5,
         }
     }
 
-    /// Objective: Verify that a "降" event causes a faction switch.
-    /// Invariants: 张辽 baseline 在魏（最终阵营），但"降"事件仍产生正确的 transition 记录。
+    /// Verify surrender event triggers faction switch.
+    ///
+    /// Uses 袁绍 (baseline 群雄) surrendering to 曹操 (魏) so an actual
+    /// transition is recorded. Note: 张辽 is already 魏 in faction_map.json
+    /// (his end-state), so "张辽降曹操" records no transition — a known
+    /// config/doc inconsistency tracked in CODE_REVIEW_FINDINGS.
     #[test]
     fn surrender_changes_faction() {
         let mut ft = FactionTracker::from_file("三国演义", "config/faction_map.json").unwrap();
-        assert_eq!(ft.faction_of("吕布"), Some("群雄"), "baseline: 吕布在群雄");
+        assert_eq!(
+            ft.faction_of("吕布"),
+            Some("群雄"),
+            "baseline: Lu Bu in 群雄"
+        );
+        assert_eq!(
+            ft.faction_of("袁绍"),
+            Some("群雄"),
+            "baseline: Yuan Shao in 群雄"
+        );
 
-        ft.process_event(&make_event(20, "张辽降曹操", "张辽", "曹操"));
+        ft.process_event(&make_event(20, "袁绍降曹操", "袁绍", "曹操"));
         let trans = &ft.transitions;
-        // 张辽的 baseline 已经是魏，所以"降曹操"事件保持阵营不变
-        // 但 transition 仍然被记录（有嫌疑标记）
-        assert_eq!(ft.faction_of("张辽"), Some("魏"), "张辽的最终阵营是魏");
+        assert!(
+            trans.iter().any(|t| t.entity == "袁绍"),
+            "Yuan Shao surrender should record a faction transition"
+        );
+        assert_eq!(
+            ft.faction_of("袁绍"),
+            Some("魏"),
+            "Yuan Shao's final faction is 魏"
+        );
     }
 
-    /// Objective: Verify that faction graph groups entities correctly.
-    /// Invariants: 刘备 is in 蜀, 曹操 is in 魏.
+    /// Verify faction graph groups entities correctly.
     #[test]
     fn faction_graph_groups_correctly() {
         let ft = FactionTracker::from_file("三国演义", "config/faction_map.json").unwrap();

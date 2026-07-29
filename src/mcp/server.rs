@@ -167,9 +167,27 @@ impl MCPServer {
     /// Returns `Ok(())` on clean EOF, `Err` on transport/protocol failure.
     pub async fn serve(&self, transport: &mut dyn Transport) -> Result<()> {
         loop {
-            let msg = match transport.recv().await? {
-                Some(m) => m,
-                None => return Ok(()),
+            // A JSON parse failure is a *client* error (JSON-RPC 2.0 §5.1):
+            // the server MUST reply with `id: null` and code -32700, then keep
+            // the connection alive. Real I/O failures still terminate the loop.
+            let msg = match transport.recv().await {
+                Ok(Some(m)) => m,
+                Ok(None) => return Ok(()),
+                Err(Error::Internal(msg)) if msg.starts_with("parse:") => {
+                    let resp = JSONRPCMessage::Response(JSONRPCResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: Value::Null,
+                        result: None,
+                        error: Some(JSONRPCError {
+                            code: ERR_PARSE,
+                            message: msg,
+                            data: None,
+                        }),
+                    });
+                    transport.send(&resp).await?;
+                    continue;
+                }
+                Err(e) => return Err(e),
             };
             let response = self.dispatch(msg).await?;
             if let Some(resp) = response {
@@ -248,10 +266,25 @@ impl MCPServer {
     /// Handle a `tools/call` request.
     async fn handle_tool_call(&self, req: JSONRPCRequest, id: Value) -> Result<JSONRPCResponse> {
         let params = req.params.clone().unwrap_or(Value::Null);
-        let tool_name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidInput("missing `name` in tools/call".into()))?;
+        // Missing `name` is a client error, not a server-fatal condition.
+        // Return a JSON-RPC -32602 (invalid params) response instead of
+        // propagating `?`, which would terminate the whole connection and
+        // leave the client without any response (JSON-RPC 2.0 violation).
+        let tool_name = match params.get("name").and_then(Value::as_str) {
+            Some(n) => n,
+            None => {
+                return Ok(JSONRPCResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: None,
+                    error: Some(JSONRPCError {
+                        code: ERR_INVALID_PARAMS,
+                        message: "missing `name` in tools/call".into(),
+                        data: None,
+                    }),
+                });
+            }
+        };
         let arguments = params
             .get("arguments")
             .cloned()

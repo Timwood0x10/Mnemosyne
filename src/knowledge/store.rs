@@ -20,9 +20,9 @@ use crate::error::{Error, Result, StorageError};
 use crate::storage::KNOWLEDGE_SCHEMA;
 
 use super::{
-    Chapter, CompilerRun, Document, Evidence, EvidenceHit, EvidenceSourceType, GraphEdge,
-    GraphNode, InspectEntityResult, KnowledgeEdge, KnowledgeObject, Mention, ObjectType, Origin,
-    RelationGraphResult, TimelineEntry,
+    Chapter, CompilerRun, Document, EntityProfileEntry, Evidence, EvidenceHit, EvidenceSourceType,
+    GraphEdge, GraphNode, InspectEntityResult, KnowledgeEdge, KnowledgeObject, Mention, ObjectType,
+    Origin, RelationGraphResult, TimelineEntry,
 };
 
 /// Convert a rusqlite row into a [`Document`].
@@ -160,6 +160,9 @@ pub trait KnowledgeStore: Send + Sync {
     // ── edges ─────────────────────────────────────────────────
     async fn create_edge(&self, e: &KnowledgeEdge) -> Result<i64>;
     async fn get_edges_touching(&self, object_id: i64) -> Result<Vec<KnowledgeEdge>>;
+    /// Re-target an edge to point at `new_target_id`. Used by the
+    /// `correct_relation` MCP tool to fix misattributed relations in place.
+    async fn update_edge_target(&self, edge_id: i64, new_target_id: i64) -> Result<()>;
 
     // ── evidence + links ──────────────────────────────────────
     async fn create_evidence(&self, e: &Evidence) -> Result<i64>;
@@ -244,28 +247,93 @@ impl SQLiteKnowledgeStore {
 
     async fn init(&self) -> Result<()> {
         let conn = self.conn.lock().await;
+        // busy_timeout makes concurrent connections wait (up to 5s) for a lock
+        // instead of failing immediately. foreign_keys enforces declared FK
+        // constraints (otherwise they're cosmetic and orphan rows can be
+        // inserted). WAL is intentionally NOT enabled: its `-wal`/`-shm` sidecar
+        // files don't always survive cleanly across separate processes (e.g.
+        // nextest test processes), causing "file is not a database" on the next
+        // open. The default rollback journal is process-safe for our access
+        // pattern (serialized writers, concurrent readers).
+        conn.execute_batch(
+            "PRAGMA busy_timeout = 5000;
+             PRAGMA foreign_keys = ON;",
+        )?;
         conn.execute_batch(KNOWLEDGE_SCHEMA)
             .map_err(|e| StorageError::Schema(format!("init knowledge schema: {e}")))?;
         Ok(())
     }
 
-    /// Drop all general-model rows. Used by the migrator to make a re-run a
-    /// clean clobber rather than an accumulating append.
+    /// Toggle FK enforcement on this connection. The migrator disables FKs for
+    /// the duration of a run (it inserts in the correct parent→child order, so
+    /// enforcement is unnecessary, and cross-novel edges can transiently
+    /// reference not-yet-migrated objects). Production queries keep FKs ON.
+    pub async fn set_foreign_keys_enabled(&self, on: bool) -> Result<()> {
+        let conn = self.conn.lock().await;
+        let sql = if on {
+            "PRAGMA foreign_keys = ON"
+        } else {
+            "PRAGMA foreign_keys = OFF"
+        };
+        conn.execute(sql, [])?;
+        Ok(())
+    }
+
+    /// Drop all general-model rows. Called by the migrator at the start of a
+    /// full run so a re-migration is a clean rebuild rather than an
+    /// accumulating append.
     ///
-    /// Order respects FK references: children first.
-    #[allow(dead_code)]
+    /// FK enforcement is temporarily disabled during the wipe: the tables may
+    /// contain rows inserted by other connections (e.g. test helpers using raw
+    /// `rusqlite::Connection`s without `foreign_keys = ON`) that violate FK
+    /// constraints, and we delete everything anyway, so enforcing FKs here only
+    /// risks a spurious "FOREIGN KEY constraint failed" on the parent deletes.
     pub async fn clear_all(&self) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute_batch(
-            "DELETE FROM knowledge_evidence;
+            "PRAGMA foreign_keys = OFF;
+             DELETE FROM knowledge_evidence;
              DELETE FROM mentions;
              DELETE FROM knowledge_edges;
              DELETE FROM evidence;
              DELETE FROM knowledge_objects;
              DELETE FROM compiler_runs;
              DELETE FROM chapters;
-             DELETE FROM documents;",
+             DELETE FROM documents;
+             PRAGMA foreign_keys = ON;",
         )?;
+        Ok(())
+    }
+
+    /// Drop all rows belonging to a single document (chapters, objects, edges,
+    /// evidence, mentions, compiler_runs). Used by the migrator to make
+    /// re-migrating one novel a clean rebuild without touching other novels'
+    /// data. FK enforcement is disabled during the wipe for the same reason as
+    /// [`clear_all`].
+    pub async fn clear_for_document(&self, doc_id: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF;
+             DELETE FROM knowledge_evidence
+               WHERE source_type = 'object' AND source_id IN
+                 (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
+               OR source_type = 'edge' AND source_id IN
+                 (SELECT id FROM knowledge_edges WHERE source_id IN
+                   (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
+                 OR target_id IN
+                   (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id}));
+             DELETE FROM mentions WHERE object_id IN
+               (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id});
+             DELETE FROM knowledge_edges WHERE source_id IN
+               (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
+               OR target_id IN
+               (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id});
+             DELETE FROM evidence WHERE doc_id = {doc_id};
+             DELETE FROM knowledge_objects WHERE doc_id = {doc_id};
+             DELETE FROM compiler_runs WHERE doc_id = {doc_id};
+             DELETE FROM chapters WHERE doc_id = {doc_id};
+             PRAGMA foreign_keys = ON;",
+        ))?;
         Ok(())
     }
 }
@@ -420,6 +488,15 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         Ok(out)
     }
 
+    async fn update_edge_target(&self, edge_id: i64, new_target_id: i64) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "UPDATE knowledge_edges SET target_id = ?1 WHERE id = ?2",
+            params![new_target_id, edge_id],
+        )?;
+        Ok(())
+    }
+
     async fn create_evidence(&self, e: &Evidence) -> Result<i64> {
         let conn = self.conn.lock().await;
         conn.execute(
@@ -542,8 +619,10 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         let edges = self.get_edges_touching(object.id).await?;
 
         // Split edges: `participated_in` edges point at event objects; the rest
-        // are entity↔entity relations.
-        let mut event_ids: Vec<i64> = Vec::new();
+        // are entity↔entity relations. Dedup event ids so duplicate edges (e.g.
+        // from a non-idempotent re-migration) don't inflate the events list and
+        // `event_count`.
+        let mut event_ids: HashSet<i64> = HashSet::new();
         let mut relations: Vec<KnowledgeEdge> = Vec::new();
         for e in &edges {
             if e.predicate == "participated_in" {
@@ -554,7 +633,7 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 } else {
                     e.source_id
                 };
-                event_ids.push(target);
+                event_ids.insert(target);
             } else {
                 relations.push(e.clone());
             }
@@ -592,17 +671,79 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         let mentions = self.get_mentions_for_object(object.id).await?;
         let event_count = events.len();
 
+        // Derive lifecycle from mentions (first/last chapter the entity appears
+        // in) and events (death chapter). Previously these were hardcoded to
+        // `None` even though the data was available.
+        //
+        // NEW-K1 fix: `Mention.chapter_id` is a surrogate FK into `chapters.id`,
+        // NOT the narrative chapter number. For the first migrated document
+        // these align (both start at 1), but for the second document the
+        // chapter IDs are offset by however many chapters the first document
+        // had. We resolve to `chapter_no` via a bulk lookup so the lifecycle
+        // reports the narrative chapter (e.g. 41 for 赵云 rescuing 阿斗), not
+        // the row id (e.g. 161).
+        let chapter_nos = self.resolve_chapter_nos(&mentions).await?;
+        let first_seen = chapter_nos.iter().copied().min();
+        let last_seen = chapter_nos.iter().copied().max();
+        let death_chapter = events.iter().find_map(|ev| {
+            let name = ev.name.as_str();
+            let desc = ev
+                .properties
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            // Check both event name and description for death keywords.
+            // The old code only checked the name, missing deaths described
+            // in the `properties.description` field (NEW-K8).
+            let death_kws = [
+                "战死", "去世", "身亡", "阵亡", "死亡", "死", "病逝", "病故", "殒命", "毙命",
+                "驾崩", "圆寂", "陨落", "卒",
+            ];
+            if death_kws
+                .iter()
+                .any(|k| name.contains(k) || desc.contains(k))
+            {
+                ev.properties
+                    .get("chapter")
+                    .and_then(|v| v.as_i64())
+                    .map(|c| c as i32)
+            } else {
+                None
+            }
+        });
+
+        // Populate profile entries from the object's properties JSON (clothing,
+        // personality, description, aliases) instead of always returning empty.
+        let mut profile: Vec<EntityProfileEntry> = Vec::new();
+        if let Some(props) = object.properties.as_object() {
+            for key in ["description", "personality", "clothing", "aliases"] {
+                if let Some(val) = props.get(key) {
+                    let value = match val {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    };
+                    if !value.is_empty() && value != "null" {
+                        profile.push(EntityProfileEntry {
+                            key: key.to_string(),
+                            value,
+                            confidence: object.confidence,
+                        });
+                    }
+                }
+            }
+        }
+
         Ok(Some(InspectEntityResult {
             object,
-            profile: Vec::new(),
+            profile,
             events,
             relations,
             evidences,
             mentions,
             lifecycle: crate::knowledge::EntityLifecycle {
-                first_seen: None,
-                last_seen: None,
-                death_chapter: None,
+                first_seen,
+                last_seen,
+                death_chapter,
                 event_count,
             },
             character_arc: None,
@@ -779,6 +920,9 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         limit: usize,
     ) -> Result<Vec<EvidenceHit>> {
         let conn = self.conn.lock().await;
+        // Clamp to avoid `usize::MAX as i64` overflow (which becomes -1 and is
+        // treated as "no limit" by SQLite) and to bound memory use.
+        let limit = limit.min(10_000) as i64;
         let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match doc_title {
             Some(t) => (
@@ -792,7 +936,7 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 vec![
                     Box::new(like) as Box<dyn rusqlite::types::ToSql>,
                     Box::new(t.to_string()),
-                    Box::new(limit as i64),
+                    Box::new(limit),
                 ],
             ),
             None => (
@@ -805,7 +949,7 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                     .to_string(),
                 vec![
                     Box::new(like) as Box<dyn rusqlite::types::ToSql>,
-                    Box::new(limit as i64),
+                    Box::new(limit),
                 ],
             ),
         };
@@ -845,6 +989,45 @@ impl SQLiteKnowledgeStore {
             },
             None => Ok(None),
         }
+    }
+
+    /// Resolve a batch of mentions' `chapter_id` (surrogate FK) to their
+    /// narrative `chapter_no`. Used by `inspect_entity` so that lifecycle
+    /// `first_seen`/`last_seen` report the chapter number a reader expects
+    /// (e.g. 41), not the row id (e.g. 161) — see NEW-K1.
+    ///
+    /// Mentions whose `chapter_id` has no matching chapter row (stale data)
+    /// are silently dropped from the result.
+    async fn resolve_chapter_nos(&self, mentions: &[Mention]) -> Result<Vec<i32>> {
+        if mentions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let ids: Vec<i64> = mentions.iter().map(|m| m.chapter_id).collect();
+        let conn = self.conn.lock().await;
+        // Build a parameterized `IN (?, ?, ...)` clause.
+        let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
+        let sql = format!(
+            "SELECT id, chapter_no FROM chapters WHERE id IN ({})",
+            placeholders.join(", ")
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let params: Vec<Box<dyn rusqlite::types::ToSql>> = ids
+            .iter()
+            .map(|id| Box::new(*id) as Box<dyn rusqlite::types::ToSql>)
+            .collect();
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i32>(1)?)),
+        )?;
+        let mut id_to_no: HashMap<i64, i32> = HashMap::new();
+        for r in rows {
+            let (id, no) = r?;
+            id_to_no.insert(id, no);
+        }
+        Ok(mentions
+            .iter()
+            .filter_map(|m| id_to_no.get(&m.chapter_id).copied())
+            .collect())
     }
 }
 
