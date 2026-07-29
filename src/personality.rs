@@ -91,9 +91,9 @@ pub fn extract_profile(entity: &str, evidence: &[Evidence]) -> PersonalityProfil
         let text = &ev.content;
         for &(keyword, trait_name, weight) in TRAIT_PATTERNS {
             if text.contains(keyword) {
-                let entry = trait_scores.entry(trait_name.to_string()).or_insert_with(|| {
-                    (0.0, String::new())
-                });
+                let entry = trait_scores
+                    .entry(trait_name.to_string())
+                    .or_insert_with(|| (0.0, String::new()));
                 entry.0 = entry.0.max(weight);
                 // Keep the shortest evidence snippet that matches
                 if entry.1.is_empty() || text.len() < entry.1.len() {
@@ -113,7 +113,11 @@ pub fn extract_profile(entity: &str, evidence: &[Evidence]) -> PersonalityProfil
         })
         .collect();
 
-    traits.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    traits.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     PersonalityProfile {
         entity: entity.to_string(),
@@ -130,20 +134,20 @@ mod tests {
     /// Invariants: "心重" should produce a "sensitive" trait.
     #[test]
     fn detects_sensitive() {
-        let evidence = vec![
-            Evidence {
-                id: 1,
-                doc_id: 1,
-                chapter_id: 1,
-                content: "林丫头那孩子倒罢了，只是心重些".into(),
-                start_offset: None,
-                end_offset: None,
-                created_at: 0,
-            },
-        ];
+        let evidence = vec![Evidence {
+            id: 1,
+            doc_id: 1,
+            chapter_id: 1,
+            content: "林丫头那孩子倒罢了，只是心重些".into(),
+            start_offset: None,
+            end_offset: None,
+            created_at: 0,
+        }];
         let profile = extract_profile("林黛玉", &evidence);
-        assert!(profile.traits.iter().any(|t| t.name == "sensitive"),
-            "should detect 'sensitive' from '心重'");
+        assert!(
+            profile.traits.iter().any(|t| t.name == "sensitive"),
+            "should detect 'sensitive' from '心重'"
+        );
     }
 
     /// Objective: Verify that multiple evidence items for the same trait
@@ -153,20 +157,34 @@ mod tests {
     fn max_confidence_used() {
         let evidence = vec![
             Evidence {
-                id: 1, doc_id: 1, chapter_id: 1,
+                id: 1,
+                doc_id: 1,
+                chapter_id: 1,
                 content: "侬今葬花人笑痴".into(),
-                start_offset: None, end_offset: None, created_at: 0,
+                start_offset: None,
+                end_offset: None,
+                created_at: 0,
             },
             Evidence {
-                id: 2, doc_id: 1, chapter_id: 1,
+                id: 2,
+                doc_id: 1,
+                chapter_id: 1,
                 content: "多愁善感".into(),
-                start_offset: None, end_offset: None, created_at: 0,
+                start_offset: None,
+                end_offset: None,
+                created_at: 0,
             },
         ];
         let profile = extract_profile("林黛玉", &evidence);
-        let mel = profile.traits.iter().find(|t| t.name == "melancholic").unwrap();
-        assert!((mel.confidence - 0.90).abs() < 0.01,
-            "max confidence should be 0.90 (from '葬花')");
+        let mel = profile
+            .traits
+            .iter()
+            .find(|t| t.name == "melancholic")
+            .unwrap();
+        assert!(
+            (mel.confidence - 0.90).abs() < 0.01,
+            "max confidence should be 0.90 (from '葬花')"
+        );
     }
 
     /// Objective: Verify that empty evidence returns an empty profile.
@@ -174,6 +192,9 @@ mod tests {
     #[test]
     fn empty_evidence_returns_empty() {
         let profile = extract_profile("林黛玉", &[]);
-        assert!(profile.traits.is_empty(), "no evidence should produce no traits");
+        assert!(
+            profile.traits.is_empty(),
+            "no evidence should produce no traits"
+        );
     }
 }

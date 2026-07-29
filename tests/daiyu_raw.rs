@@ -12,8 +12,14 @@ async fn daiyu_raw() {
 
     match k.inspect_entity("林黛玉", Some("红楼梦")).await.unwrap() {
         Some(r) => {
-            println!("object: {}", serde_json::to_string_pretty(&r.object).unwrap());
-            println!("\nevents: {}", serde_json::to_string_pretty(&r.events).unwrap());
+            println!(
+                "object: {}",
+                serde_json::to_string_pretty(&r.object).unwrap()
+            );
+            println!(
+                "\nevents: {}",
+                serde_json::to_string_pretty(&r.events).unwrap()
+            );
             println!("\nrelations ({}):", r.relations.len());
             for rel in &r.relations {
                 println!("  {}", serde_json::to_string(rel).unwrap());

@@ -91,7 +91,8 @@ impl EntityResolver {
         index: Arc<dyn VectorIndex>,
         cache: Arc<Mutex<dyn EmbeddingCache>>,
     ) -> Self {
-        self.pipeline.push(EmbeddingStage::new(embedder, index, cache));
+        self.pipeline
+            .push(EmbeddingStage::new(embedder, index, cache));
         self
     }
 

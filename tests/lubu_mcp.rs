@@ -25,8 +25,18 @@ async fn lubu_query() {
             println!("\n  Timeline:");
             let mut prev_ts = 0i32;
             for ev in &r.events {
-                if ev.properties.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0) as i32 != prev_ts {
-                    prev_ts = ev.properties.get("timestamp").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                if ev
+                    .properties
+                    .get("timestamp")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0) as i32
+                    != prev_ts
+                {
+                    prev_ts = ev
+                        .properties
+                        .get("timestamp")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(0) as i32;
                     println!("    Chapter {}:", prev_ts);
                 }
                 println!("      {}", ev.name);
@@ -35,7 +45,10 @@ async fn lubu_query() {
             // Relations
             println!("\n  Relations ({}):", r.relations.len());
             for rel in &r.relations {
-                println!("    predicate={}, src={}, tgt={}", rel.predicate, rel.source_id, rel.target_id);
+                println!(
+                    "    predicate={}, src={}, tgt={}",
+                    rel.predicate, rel.source_id, rel.target_id
+                );
             }
 
             // Evidence
@@ -61,9 +74,16 @@ async fn lubu_query() {
 
     // 3. evidence
     println!("\n━━━ evidence(Lu Bu) ━━━━━━━━━━━━━━━━━━━\n");
-    let hits = k.search_evidence("吕布", Some("三国演义"), 10).await.unwrap();
+    let hits = k
+        .search_evidence("吕布", Some("三国演义"), 10)
+        .await
+        .unwrap();
     for h in &hits {
-        println!("  Ch.{}: {}", h.chapter, h.text.chars().take(120).collect::<String>());
+        println!(
+            "  Ch.{}: {}",
+            h.chapter,
+            h.text.chars().take(120).collect::<String>()
+        );
     }
 
     println!("\n========== COMPLETE ==========");

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::entity_resolver::cache::EmbeddingCache;
 use crate::entity_resolver::pipeline::{ResolveContext, ResolverStage};
-use crate::entity_resolver::{ResolveResult, RESOLVE_THRESHOLD};
+use crate::entity_resolver::{RESOLVE_THRESHOLD, ResolveResult};
 use crate::error::EmbeddingError;
 use crate::error::Error;
 use crate::vector::VectorIndex;
@@ -90,7 +90,11 @@ impl EmbeddingStage {
         index: Arc<dyn VectorIndex>,
         cache: Arc<Mutex<dyn EmbeddingCache>>,
     ) -> Self {
-        EmbeddingStage { embedder, index, cache }
+        EmbeddingStage {
+            embedder,
+            index,
+            cache,
+        }
     }
 }
 
@@ -101,7 +105,10 @@ impl ResolverStage for EmbeddingStage {
             let results = self.index.search(&vec, 1).ok()?;
             if let Some((id, score)) = results.into_iter().next() {
                 if score >= RESOLVE_THRESHOLD {
-                    return Some(ResolveResult::Matched { entity_id: id, score });
+                    return Some(ResolveResult::Matched {
+                        entity_id: id,
+                        score,
+                    });
                 }
             }
         }
@@ -114,7 +121,10 @@ impl ResolverStage for EmbeddingStage {
         let results = self.index.search(&vec, 1).ok()?;
         if let Some((id, score)) = results.into_iter().next() {
             if score >= RESOLVE_THRESHOLD {
-                return Some(ResolveResult::Matched { entity_id: id, score });
+                return Some(ResolveResult::Matched {
+                    entity_id: id,
+                    score,
+                });
             }
         }
 
