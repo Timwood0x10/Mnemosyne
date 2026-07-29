@@ -64,6 +64,12 @@ petgraph = "0.6"
 # Multi-pattern string matching for alias resolution
 aho-corasick = "1.1"
 
+# HNSW vector index for entity resolution
+instant-distance = "0.6"
+
+# Entity embedding for fuzzy resolution (ONNX local, no API key)
+fastembed = "4"
+
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
 tempfile = "3.20"

@@ -54,3 +54,4 @@ pub mod scorer;
 pub mod storage;
 pub mod store;
 pub mod types;
+pub mod vector;

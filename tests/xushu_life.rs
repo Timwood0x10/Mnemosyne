@@ -44,7 +44,7 @@ async fn xushu_trajectory() {
         action_verbs: obs_cfg.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config);
+    extract::compile(&mut ctx, &sent_texts, &dict, &config, None);
 
     let mut ft = faction::FactionTracker::from_file("三国演义", "config/faction_map.json").unwrap();
     for ev in &ctx.events {

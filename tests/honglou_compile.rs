@@ -44,7 +44,7 @@ async fn e2e_honglou() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config);
+    extract::compile(&mut ctx, &sent_texts, &dict, &config, None);
 
     eprintln!(
         "━━━ 人物节点 ({} 人) ━━━━━━━━━━━━━━━━━\n",

@@ -58,6 +58,16 @@ impl ResolverStats {
         self.cache_miss.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Reset all counters to zero.
+    pub fn reset(&self) {
+        self.total_mentions.store(0, Ordering::Relaxed);
+        self.alias_hit.store(0, Ordering::Relaxed);
+        self.embedding_hit.store(0, Ordering::Relaxed);
+        self.unknown.store(0, Ordering::Relaxed);
+        self.cache_hit.store(0, Ordering::Relaxed);
+        self.cache_miss.store(0, Ordering::Relaxed);
+    }
+
     // ── Derived metrics ──────────────────────────────────────────────
 
     /// Percentage of mentions resolved via alias exact match.

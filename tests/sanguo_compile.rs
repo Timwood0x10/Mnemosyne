@@ -11,6 +11,7 @@ use lore_scope::compiler::document::Document;
 use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::sentence;
 use lore_scope::compiler::{extract, profile};
+use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 
 #[tokio::test]
 async fn e2e_sanguo() {
@@ -41,6 +42,19 @@ async fn e2e_sanguo() {
     // Wire Pass 1 → Pass 2: register discovered entities + aliases
     profile::register_discovered_entities(&mut dict, &ctx);
 
+    // Build EntityResolver from the dictionary's alias map
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
+        .filter_map(|(alias, canonical)| {
+            dict.name_to_id
+                .get(canonical)
+                .map(|id| (alias.clone(), *id))
+        })
+        .collect();
+    let alias_resolver = AliasResolver::from_pairs(alias_pairs);
+    let entity_resolver = EntityResolver::new(alias_resolver);
+
     // ── Pass 2: Story Compiler ──────────────────────────────────────────
     let chunks = chunk::plan(&doc.text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);
@@ -51,7 +65,13 @@ async fn e2e_sanguo() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config);
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
 
     // ── 人物节点 ────────────────────────────────────────────────────────
     eprintln!(

@@ -156,6 +156,20 @@ pub fn extract_profiles(text: &str, ctx: &mut CompileContext, dict: Option<&Enti
 /// registered, plus any profile values whose key is `courtesy_name` or
 /// `title` (these serve as aliases — e.g. "玄德" → "刘备").
 pub fn register_discovered_entities(dict: &mut EntityDictionary, ctx: &CompileContext) {
+    // Start synthetic IDs from 10000 to avoid conflicts with real DB IDs.
+    let mut next_id = 10000i64;
+    // Seed with the max existing ID if any were pre-assigned.
+    for &id in dict.name_to_id.values() {
+        if id >= next_id {
+            next_id = id + 1;
+        }
+    }
+    // Also check existing alias_to_canonical keys that might have IDs.
+    // Reset the counter to a safe offset.
+    if next_id < 10000 {
+        next_id = 10000;
+    }
+
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx
             .profiles
@@ -164,7 +178,12 @@ pub fn register_discovered_entities(dict: &mut EntityDictionary, ctx: &CompileCo
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
             .collect();
-        dict.register_discovered(&entity.name, &aliases);
+        // Only register if not already in the dictionary
+        if !dict.name_to_id.contains_key(&entity.name) {
+            dict.register_discovered(&entity.name, &aliases);
+            dict.name_to_id.insert(entity.name.clone(), next_id);
+            next_id += 1;
+        }
     }
 }
 

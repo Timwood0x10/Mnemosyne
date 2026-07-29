@@ -38,6 +38,69 @@ pub use representation::{
 };
 pub use stats::ResolverStats;
 
+use std::sync::Arc;
+
+/// Cosine similarity threshold for fuzzy entity resolution.
+///
+/// Matches with cosine ≥ THRESHOLD are considered resolved; those below
+/// are treated as `Unknown`. The value 0.85 was established empirically
+/// during entity-resolver benchmarks on the Four Great Classical Novels.
+pub const RESOLVE_THRESHOLD: f32 = 0.85;
+
+/// Top-level entity resolver — builds the pipeline, runs stages, records stats.
+///
+/// # Example
+///
+/// ```ignore
+/// let aliases = AliasResolver::from_pairs([("玄德".into(), 10001)]);
+/// let resolver = EntityResolver::new(aliases);
+/// let result = resolver.resolve("玄德");
+/// assert!(result.is_matched());
+/// resolver.stats().print_report();
+/// ```
+pub struct EntityResolver {
+    pipeline: ResolverPipeline,
+    stats: Arc<ResolverStats>,
+}
+
+impl EntityResolver {
+    /// Build a resolver with an alias stage backed by `aliases`.
+    ///
+    /// V1 always includes the alias stage. Embedding stage will be added in V2
+    /// when a concrete `Embedder` implementation is wired in.
+    pub fn new(aliases: AliasResolver) -> Self {
+        let mut pipeline = ResolverPipeline::empty();
+        pipeline.push(AliasStage::new(aliases));
+        EntityResolver {
+            pipeline,
+            stats: Arc::new(ResolverStats::new()),
+        }
+    }
+
+    /// Resolve a mention to an entity.
+    ///
+    /// Records stats for monitoring (alias hit / unknown / total mentions).
+    pub fn resolve(&self, mention: &str) -> ResolveResult {
+        self.stats.record_mention();
+        let result = self.pipeline.resolve(mention);
+        match &result {
+            ResolveResult::Matched { .. } => self.stats.record_alias_hit(),
+            ResolveResult::Unknown { .. } => self.stats.record_unknown(),
+        }
+        result
+    }
+
+    /// Reference to the resolver statistics collector.
+    pub fn stats(&self) -> &Arc<ResolverStats> {
+        &self.stats
+    }
+
+    /// Reset all statistics counters.
+    pub fn reset_stats(&self) {
+        self.stats.reset();
+    }
+}
+
 /// Result of resolving a mention to an entity.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolveResult {

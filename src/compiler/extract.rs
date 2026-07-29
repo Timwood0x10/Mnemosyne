@@ -11,6 +11,7 @@
 
 use crate::compiler::entity::EntityDictionary;
 use crate::compiler::{CompileContext, Event, EventParticipant, Mention, Relation};
+use crate::entity_resolver::EntityResolver;
 
 /// Config for the story compiler's observation extraction.
 #[derive(Debug, Clone)]
@@ -45,11 +46,16 @@ impl Default for Config {
 }
 
 /// Scan sentences for entity mentions, extract events, and populate the context.
+///
+/// When `resolver` is `Some`, it is used in addition to the dictionary for
+/// mention resolution — the resolver handles alias matching and fuzzy
+/// embedding lookup, while the dictionary provides the fallback.
 pub fn compile(
     ctx: &mut CompileContext,
     sentences: &[&str],
     dict: &EntityDictionary,
     config: &Config,
+    resolver: Option<&EntityResolver>,
 ) {
     let mut current_chapter = ctx.current_timestamp.unwrap_or(1);
 
@@ -69,7 +75,7 @@ pub fn compile(
             ctx.current_timestamp = Some(current_chapter);
         }
 
-        let local_mentions = scan_mentions(text, dict);
+        let local_mentions = scan_mentions(text, dict, resolver);
         if local_mentions.is_empty() {
             continue;
         }
@@ -228,8 +234,17 @@ fn chinese_to_int(s: &str) -> Option<i32> {
     if total > 0 { Some(total) } else { None }
 }
 
-/// Scan a single sentence for entity mentions using the dictionary.
-fn scan_mentions(text: &str, dict: &EntityDictionary) -> Vec<Mention> {
+/// Scan a single sentence for entity mentions using the dictionary and resolver.
+///
+/// The dictionary provides the fallback. When `resolver` is `Some`, mentions
+/// that the resolver can match (via alias or embedding) are included even if
+/// they are not in the dictionary — this is how "刘皇叔" resolves to 刘备
+/// without being explicitly listed in the alias map.
+fn scan_mentions(
+    text: &str,
+    dict: &EntityDictionary,
+    resolver: Option<&EntityResolver>,
+) -> Vec<Mention> {
     let mut mentions = Vec::new();
 
     // Simple longest-first scan: check if any known alias appears in the text
@@ -262,6 +277,67 @@ fn scan_mentions(text: &str, dict: &EntityDictionary) -> Vec<Mention> {
     }
 
     mentions.sort_by_key(|a| a.offset.start);
+
+    // Resolver-based mention scan: try the resolver for mentions the
+    // dictionary didn't already find. This catches aliases like "刘皇叔"
+    // that aren't explicitly listed in the alias map.
+    if let Some(resolver) = resolver {
+        // Walk the text using char indices to avoid UTF-8 slicing issues.
+        let char_indices: Vec<(usize, char)> = text.char_indices().collect();
+        let mut ci = 0;
+        while ci < char_indices.len() {
+            let (byte_start, ch) = char_indices[ci];
+            // Skip positions already covered by a dictionary mention
+            if mentions
+                .iter()
+                .any(|m| byte_start >= m.offset.start && byte_start < m.offset.end)
+            {
+                ci += 1;
+                continue;
+            }
+            // Only consider CJK characters as potential mention starts
+            if ch < '\u{4e00}' || ch > '\u{9fff}' {
+                ci += 1;
+                continue;
+            }
+            // Try the resolver on spans of 1-4 additional chars
+            let mut matched = false;
+            for len in (2..=char_indices.len().saturating_sub(ci).min(6)).rev() {
+                let end_idx = ci + len - 1;
+                let candidate_byte_end =
+                    char_indices[end_idx].0 + char_indices[end_idx].1.len_utf8();
+                let candidate = &text[byte_start..candidate_byte_end];
+                // Check all chars in candidate are CJK
+                if !candidate
+                    .chars()
+                    .all(|c| c >= '\u{4e00}' && c <= '\u{9fff}')
+                {
+                    continue;
+                }
+                let result = resolver.resolve(candidate);
+                if let Some(entity_id) = result.entity_id() {
+                    if !mentions.iter().any(|m| m.offset.start == byte_start) {
+                        mentions.push(Mention {
+                            sentence_id: 0,
+                            entity_id: Some(entity_id),
+                            surface: candidate.to_string(),
+                            canonical_name: candidate.to_string(),
+                            offset: byte_start..candidate_byte_end,
+                            confidence: 0.85,
+                        });
+                    }
+                    matched = true;
+                    break;
+                }
+            }
+            if !matched {
+                ci += 1;
+            }
+        }
+    }
+
+    mentions.sort_by_key(|a| a.offset.start);
+    mentions.dedup_by(|a, b| a.offset.start == b.offset.start);
     mentions
 }
 

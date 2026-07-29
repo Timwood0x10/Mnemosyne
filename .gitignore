@@ -8,3 +8,5 @@ docs/
 
 .codescope/
 .workbuddy/
+
+.fastembed_cache/
