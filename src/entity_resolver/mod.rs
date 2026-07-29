@@ -32,13 +32,16 @@ pub use alias::AliasResolver;
 pub use alias::AliasStage;
 pub use cache::{EmbeddingCache, MemoryEmbeddingCache};
 pub use embedding::Embedder;
+pub use embedding::EmbeddingStage;
 pub use pipeline::{ResolveContext, ResolverPipeline, ResolverStage};
 pub use representation::{
     EntityRepresentationBuilder, EntitySnapshot, EventSummary, FixedTemplateBuilder,
 };
 pub use stats::ResolverStats;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+use crate::vector::VectorIndex;
 
 /// Cosine similarity threshold for fuzzy entity resolution.
 ///
@@ -75,6 +78,21 @@ impl EntityResolver {
             pipeline,
             stats: Arc::new(ResolverStats::new()),
         }
+    }
+
+    /// Add an embedding stage to the pipeline (after alias, before fallback).
+    ///
+    /// The embedding stage performs fuzzy matching: mention → embed → vector
+    /// search → threshold check. When the alias stage fails to match, the
+    /// embedding stage may still resolve the mention via cosine similarity.
+    pub fn with_embedding(
+        mut self,
+        embedder: Arc<dyn Embedder>,
+        index: Arc<dyn VectorIndex>,
+        cache: Arc<Mutex<dyn EmbeddingCache>>,
+    ) -> Self {
+        self.pipeline.push(EmbeddingStage::new(embedder, index, cache));
+        self
     }
 
     /// Resolve a mention to an entity.

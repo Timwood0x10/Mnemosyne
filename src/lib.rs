@@ -47,6 +47,7 @@ pub mod filter;
 pub mod ingest;
 pub mod knowledge;
 pub mod mcp;
+pub mod personality;
 pub mod prompt;
 pub mod resolver;
 pub mod retrieval;

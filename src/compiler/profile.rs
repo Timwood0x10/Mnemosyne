@@ -293,7 +293,20 @@ fn discover_entity_name(line: &str) -> Option<String> {
                     break;
                 }
             }
-            if result.chars().count() >= 2 && !NOISE.contains(&result.as_str()) {
+            if result.chars().count() >= 2
+                && result.chars().count() <= 4
+                && !NOISE.contains(&result.as_str())
+                && !result.contains("侧放")
+                && !result.contains("书一行")
+                && !result.contains("上系")
+                && !result.contains("相连")
+                && !result.contains("尚幼")
+                && !result.contains("皆与")
+                && !result.contains("太守")
+                && !result.contains("却有")
+                && !result.contains("篆文")
+                && !result.contains("锦绣")
+            {
                 return Some(result);
             }
         }

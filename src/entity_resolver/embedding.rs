@@ -4,8 +4,14 @@
 //! embedding model. Providers (FastEmbed, BGE, Jina, E5) swap out below this
 //! trait without touching any resolver code.
 
+use std::sync::{Arc, Mutex};
+
+use crate::entity_resolver::cache::EmbeddingCache;
+use crate::entity_resolver::pipeline::{ResolveContext, ResolverStage};
+use crate::entity_resolver::{ResolveResult, RESOLVE_THRESHOLD};
 use crate::error::EmbeddingError;
 use crate::error::Error;
+use crate::vector::VectorIndex;
 
 /// Converts text into a dense vector representation.
 ///
@@ -65,6 +71,54 @@ impl Embedder for FastEmbedProvider {
         self.model
             .embed(refs, None)
             .map_err(|e| Error::Embedding(EmbeddingError::Transport(e.to_string())))
+    }
+}
+
+/// Stage 2 of the resolution pipeline — fuzzy entity matching via embedding.
+///
+/// Embeds the mention text, searches the vector index for the nearest neighbor,
+/// and returns a match if cosine similarity ≥ [`RESOLVE_THRESHOLD`] (0.85).
+pub struct EmbeddingStage {
+    embedder: Arc<dyn Embedder>,
+    index: Arc<dyn VectorIndex>,
+    cache: Arc<Mutex<dyn EmbeddingCache>>,
+}
+
+impl EmbeddingStage {
+    pub fn new(
+        embedder: Arc<dyn Embedder>,
+        index: Arc<dyn VectorIndex>,
+        cache: Arc<Mutex<dyn EmbeddingCache>>,
+    ) -> Self {
+        EmbeddingStage { embedder, index, cache }
+    }
+}
+
+impl ResolverStage for EmbeddingStage {
+    fn resolve(&self, mention: &str, _ctx: &ResolveContext) -> Option<ResolveResult> {
+        // 1. Cache check (read-only, no lock needed — just use get)
+        if let Some(vec) = self.cache.lock().ok().and_then(|c| c.get(mention)) {
+            let results = self.index.search(&vec, 1).ok()?;
+            if let Some((id, score)) = results.into_iter().next() {
+                if score >= RESOLVE_THRESHOLD {
+                    return Some(ResolveResult::Matched { entity_id: id, score });
+                }
+            }
+        }
+
+        // 2. Embed + search
+        let vec = self.embedder.embed(mention).ok()?;
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.put(mention, vec.clone());
+        }
+        let results = self.index.search(&vec, 1).ok()?;
+        if let Some((id, score)) = results.into_iter().next() {
+            if score >= RESOLVE_THRESHOLD {
+                return Some(ResolveResult::Matched { entity_id: id, score });
+            }
+        }
+
+        None // pass to next stage
     }
 }
 

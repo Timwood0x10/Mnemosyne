@@ -402,7 +402,7 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        compile(&mut ctx, &["赵云救阿斗。"], &dict, &config);
+        compile(&mut ctx, &["赵云救阿斗。"], &dict, &config, None);
         assert!(!ctx.events.is_empty(), "should create at least one event");
         let has_action = ctx.events.iter().any(|e| e.event_type == "action");
         assert!(has_action, "should have action-type event");
@@ -415,7 +415,7 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        compile(&mut ctx, &["刘备曰：关羽"], &dict, &config);
+        compile(&mut ctx, &["刘备曰：关羽"], &dict, &config, None);
         let has_dialogue = ctx.events.iter().any(|e| e.event_type == "dialogue");
         assert!(has_dialogue, "dialog sentence should create dialogue event");
     }
@@ -429,7 +429,7 @@ mod tests {
         let config = Config::default();
         let sentences = ["刘备救关羽。", "刘备救张飞。"];
         let refs: Vec<&str> = sentences.to_vec();
-        compile(&mut ctx, &refs, &dict, &config);
+        compile(&mut ctx, &refs, &dict, &config, None);
         let has_rel = ctx.relations.iter().any(|r| {
             (r.source == "刘备" && r.target == "关羽") || (r.source == "关羽" && r.target == "刘备")
         });
