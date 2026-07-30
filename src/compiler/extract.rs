@@ -61,6 +61,9 @@ pub fn compile(
 ) {
     let mut current_chapter = ctx.current_timestamp.unwrap_or(1);
 
+    // Build the alias index once for all sentences (ChunkCompiler optimisation)
+    let alias_index = AliasIndex::build(dict);
+
     for text in sentences.iter() {
         if text.len() < 2 {
             continue;
@@ -77,7 +80,7 @@ pub fn compile(
             ctx.current_timestamp = Some(current_chapter);
         }
 
-        let local_mentions = scan_mentions(text, dict, resolver);
+        let local_mentions = scan_mentions(text, dict, resolver, Some(&alias_index));
         if local_mentions.is_empty() {
             continue;
         }
@@ -247,54 +250,96 @@ fn chinese_to_int(s: &str) -> Option<i32> {
 /// that the resolver can match (via alias or embedding) are included even if
 /// they are not in the dictionary — this is how "刘皇叔" resolves to 刘备
 /// without being explicitly listed in the alias map.
+/// Pre-built entity alias index used by all sentences in a compile run.
+///
+/// Building the Aho-Corasick automaton once per compile (instead of once
+/// per sentence, which is the current `scan_mentions` behaviour) reduces
+/// the bottleneck from O(S×A) to O(S+A) where S is sentence count and A
+/// is alias count — critical for English novels with ~17k sentences.
+struct AliasIndex {
+    // (alias, canonical_name) pairs in longest-first order
+    aliases: Vec<(String, String)>,
+    // Optional Aho-Corasick automaton (None if empty)
+    ac: Option<aho_corasick::AhoCorasick>,
+}
+
+impl AliasIndex {
+    fn build(dict: &EntityDictionary) -> Self {
+        let mut aliases: Vec<(String, String)> = dict
+            .alias_to_canonical
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+        let patterns: Vec<&str> = aliases.iter().map(|(k, _)| k.as_str()).collect();
+        let ac = match patterns.is_empty() {
+            true => None,
+            false => aho_corasick::AhoCorasick::new(&patterns).ok(),
+        };
+        AliasIndex { aliases, ac }
+    }
+}
+
+/// Scan a single sentence for entity mentions using a pre-built alias index.
 fn scan_mentions(
     text: &str,
     dict: &EntityDictionary,
     resolver: Option<&EntityResolver>,
+    alias_index: Option<&AliasIndex>,
 ) -> Vec<Mention> {
     let mut mentions = Vec::new();
 
-    // Build alias list sorted longest-first for Aho-Corasick
-    let mut aliases: Vec<(String, String)> = dict
-        .alias_to_canonical
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len())); // longest first
-
-    if aliases.is_empty() {
-        // Skip to resolver-based scan below
-    } else {
-        // Use Aho-Corasick for single-pass alias matching instead of O(N*A)
-        let patterns: Vec<&str> = aliases.iter().map(|(k, _)| k.as_str()).collect();
-        let ac = match AhoCorasick::new(&patterns) {
-            Ok(ac) => ac,
-            Err(_) => return mentions,
-        };
-
-        for m in ac.find_iter(text) {
-            let alias = &patterns[m.pattern()];
-            let pos = m.start();
-
-            // Avoid overlapping matches (skip if within an existing mention)
-            if mentions
-                .iter()
-                .any(|existing: &Mention| pos >= existing.offset.start && pos < existing.offset.end)
-            {
-                continue;
+    if let Some(idx) = alias_index {
+        // Use pre-built automaton (built once per compile)
+        if let Some(ref ac) = idx.ac {
+            for m in ac.find_iter(text) {
+                let alias = &idx.aliases[m.pattern()].0;
+                let pos = m.start();
+                if mentions.iter().any(|existing: &Mention| pos >= existing.offset.start && pos < existing.offset.end) {
+                    continue;
+                }
+                let canonical = idx.aliases[m.pattern()].1.clone();
+                let (_, entity_id) = dict.resolve(alias).unwrap_or((canonical.clone(), None));
+                mentions.push(Mention {
+                    sentence_id: 0,
+                    entity_id,
+                    surface: alias.to_string(),
+                    canonical_name: canonical,
+                    offset: pos..(pos + alias.len()),
+                    confidence: 0.9,
+                });
             }
-
-            // Find the canonical name and entity ID
-            let canonical = aliases[m.pattern()].1.clone();
-            let (_, entity_id) = dict.resolve(alias).unwrap_or((canonical.clone(), None));
-            mentions.push(Mention {
-                sentence_id: 0,
-                entity_id,
-                surface: alias.to_string(),
-                canonical_name: canonical,
-                offset: pos..(pos + alias.len()),
-                confidence: 0.9,
-            });
+        }
+        // Resolver fallback runs regardless of alias_index
+    } else {
+        // Legacy path — build alias list on every call (fallback)
+        let mut aliases: Vec<(String, String)> = dict
+            .alias_to_canonical
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
+        if !aliases.is_empty() {
+            let patterns: Vec<&str> = aliases.iter().map(|(k, _)| k.as_str()).collect();
+            if let Ok(ac) = aho_corasick::AhoCorasick::new(&patterns) {
+                for m in ac.find_iter(text) {
+                    let alias = &patterns[m.pattern()];
+                    let pos = m.start();
+                    if mentions.iter().any(|existing: &Mention| pos >= existing.offset.start && pos < existing.offset.end) {
+                        continue;
+                    }
+                    let canonical = aliases[m.pattern()].1.clone();
+                    let (_, entity_id) = dict.resolve(alias).unwrap_or((canonical.clone(), None));
+                    mentions.push(Mention {
+                        sentence_id: 0,
+                        entity_id,
+                        surface: alias.to_string(),
+                        canonical_name: canonical,
+                        offset: pos..(pos + alias.len()),
+                        confidence: 0.9,
+                    });
+                }
+            }
         }
     }
 

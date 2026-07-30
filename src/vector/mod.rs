@@ -13,6 +13,7 @@
 //! index or in the embeddings themselves.
 
 mod brute_force;
+mod builder;
 mod hnsw;
 
 pub use brute_force::BruteForceIndex;

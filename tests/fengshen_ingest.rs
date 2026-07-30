@@ -23,7 +23,7 @@ async fn fengshen_ingest() {
     ctx.document_title = "封神演义".into();
 
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &[]);
+    profile::extract_profiles(text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
     let mut entity_resolver = EntityResolver::new(AliasResolver::empty());
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx

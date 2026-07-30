@@ -30,7 +30,7 @@ async fn e2e_honglou() {
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[]);
+    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
 
     // Wire Pass 1 → Pass 2: register discovered entities + aliases
     profile::register_discovered_entities(&mut dict, &ctx);

@@ -23,7 +23,7 @@ async fn war_peace() {
 
     // Try with empty dict — English text won't match Chinese patterns
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &[]);
+    profile::extract_profiles(text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
 
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx.profiles.iter()

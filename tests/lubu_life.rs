@@ -28,7 +28,7 @@ async fn lubu_life() {
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &[]);
+    profile::extract_profiles(text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
     profile::register_discovered_entities(&mut dict, &ctx);
 
     let alias_pairs: Vec<(String, i64)> = dict

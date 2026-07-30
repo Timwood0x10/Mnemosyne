@@ -12,6 +12,7 @@
 
 use crate::compiler::entity::EntityDictionary;
 use crate::compiler::{CompileContext, Entity, EntityProfile};
+use crate::language::LanguageProvider;
 use serde::Deserialize;
 
 /// A single profile extraction pattern loaded from JSON config.
@@ -46,7 +47,7 @@ impl ProfilePattern {
 }
 
 /// Default profile patterns with their key names (classical Chinese novel format).
-/// These can be overridden by per-novel config in JSON profiles.
+/// Used when no `LanguageProvider` override is provided.
 pub(crate) const DEFAULT_PROFILE_PATTERNS: &[(&str, &str, ExtractMode)] = &[
     // (pattern, profile_key, extraction_mode)
     ("字", "courtesy_name", ExtractMode::After),
@@ -91,6 +92,7 @@ pub fn extract_profiles(
     ctx: &mut CompileContext,
     dict: Option<&EntityDictionary>,
     extra_patterns: &[ProfilePattern],
+    lang: &dyn LanguageProvider,
 ) {
     for line in text.lines() {
         let line = line.trim();
@@ -102,7 +104,7 @@ pub fn extract_profiles(
         let entity_name = dict
             .and_then(|d| find_entity_in_text(line, d))
             .map(|(name, _)| name)
-            .or_else(|| discover_entity_name(line));
+            .or_else(|| discover_entity_name(line, lang.discovery_markers()));
 
         let Some(entity_name) = entity_name else {
             continue;
@@ -257,17 +259,12 @@ fn find_entity_in_text(text: &str, dict: &EntityDictionary) -> Option<(String, O
     None
 }
 
-/// Heuristically discover entity name from a profile line without a dictionary.
-/// Looks for pattern markers that indicate a character introduction:
-/// - "刘备**字**玄德" → text before "字" is entity name
-/// - "**身长**八尺" → text before "身长"
-/// - "**面如**冠玉" → text before "面如"
+/// Heuristically discover entity name from a profile line.
 ///
-/// Validation: the extracted name must be 2-4 CJK characters and must be
-/// preceded by a sentence boundary (start of text, punctuation, or whitespace),
-/// NOT by another CJK character (which would mean we're extracting a substring
-/// of a longer word).
-fn discover_entity_name(line: &str) -> Option<String> {
+/// Uses the provided `markers` to find introduction patterns.
+/// Chinese markers: "字", "者也", "身长", "面如", ...
+/// English markers: "Prince", "Count", "Mr.", ...
+fn discover_entity_name(line: &str, markers: &[&str]) -> Option<String> {
     // Explicit noise words — function words that are never entity names.
     const NOISE: &[&str] = &[
         "不", "来", "一", "而", "有", "乃", "二", "后", "自", "可", "皆", "之", "以", "其", "此",
@@ -317,7 +314,6 @@ fn discover_entity_name(line: &str) -> Option<String> {
     // before is `姓刘名备，` — stopping at `名` yields `备` instead of the old
     // garbage `名备` that spanned the given-name marker).
     const STOP_BOUNDARIES: &[char] = &['名', '姓'];
-    let markers = &["字", "者也", "身长", "面如", "使", "姓", "号", "威风"];
     for marker in markers {
         if let Some(pos) = line.find(marker) {
             let before = &line[..pos];
@@ -425,7 +421,7 @@ mod tests {
     #[test]
     fn courtesy_from_dialog() {
         let mut ctx = CompileContext::default();
-        extract_profiles("刘备字玄德，涿郡人也", &mut ctx, Some(&make_dict()), &[]);
+        extract_profiles("刘备字玄德，涿郡人也", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
         let cp = ctx.profiles.iter().find(|p| p.key == "courtesy_name");
         assert!(cp.is_some(), "courtesy_name should be extracted");
         assert_eq!(cp.unwrap().value, "玄德");
@@ -440,7 +436,7 @@ mod tests {
     #[test]
     fn birthplace_extracted() {
         let mut ctx = CompileContext::default();
-        extract_profiles("张飞涿郡人也", &mut ctx, Some(&make_dict()), &[]);
+        extract_profiles("张飞涿郡人也", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
         let bp = ctx.profiles.iter().find(|p| p.key == "birthplace");
         assert!(bp.is_some(), "birthplace should be extracted");
         assert!(bp.unwrap().value.contains("涿郡"));
@@ -451,7 +447,7 @@ mod tests {
     #[test]
     fn weapon_extracted() {
         let mut ctx = CompileContext::default();
-        extract_profiles("关羽使青龙偃月刀", &mut ctx, Some(&make_dict()), &[]);
+        extract_profiles("关羽使青龙偃月刀", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
         let wp = ctx.profiles.iter().find(|p| p.key == "weapon");
         assert!(wp.is_some(), "weapon should be extracted");
         assert_eq!(wp.unwrap().value, "青龙偃月刀");
@@ -462,7 +458,7 @@ mod tests {
     #[test]
     fn narrative_text_ignored() {
         let mut ctx = CompileContext::default();
-        extract_profiles("话说天下大势，分久必合", &mut ctx, Some(&make_dict()), &[]);
+        extract_profiles("话说天下大势，分久必合", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
         assert!(ctx.entities.is_empty(), "no entity for narrative text");
         assert!(ctx.profiles.is_empty(), "no profiles for narrative text");
     }
@@ -472,7 +468,7 @@ mod tests {
     #[test]
     fn alias_resolves_to_canonical() {
         let mut ctx = CompileContext::default();
-        extract_profiles("玄德幼孤，事母至孝", &mut ctx, Some(&make_dict()), &[]);
+        extract_profiles("玄德幼孤，事母至孝", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
         // At minimum, the function should not panic and should find at least
         // a profile pattern if the text contains one. If no profile pattern
         // is present (just narrative), no entities/profiles are created.

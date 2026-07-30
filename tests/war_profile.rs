@@ -38,7 +38,7 @@ async fn war_profile() {
 
     // Phase 3: Profile extraction
     let t3_start = Instant::now();
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &[]);
+    profile::extract_profiles(text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
     let t3 = t3_start.elapsed();
 
     // Phase 4: Register discovered entities

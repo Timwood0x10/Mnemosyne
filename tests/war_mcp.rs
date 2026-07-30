@@ -6,6 +6,7 @@ use std::sync::Arc;
 use lore_scope::compiler::CompileContext;
 use lore_scope::compiler::document::Document;
 use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
+use lore_scope::compiler::writer::{EvidenceBatch, EvidenceWriter};
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 use lore_scope::knowledge::{KnowledgeObject, KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
@@ -34,7 +35,7 @@ async fn war_mcp() {
     let mut dict = registry.build_dictionary();
 
     let patterns = provider.profile_patterns();
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &patterns);
+    profile::extract_profiles(text, &mut ctx, Some(&dict), &patterns, &lore_scope::language::EnglishLanguageProvider::new());
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx.profiles.iter()
             .filter(|p| p.entity_id == entity.id)
@@ -107,31 +108,22 @@ async fn war_mcp() {
     }
 
     let mut evidc = 0usize;
-    let mut batch: Vec<String> = Vec::new();
+    let mut batch: Vec<EvidenceBatch> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         if line.len() < 20 { continue; }
         let snippet: String = line.chars().take(300).collect();
-        // Escape single quotes for SQL
-        let escaped = snippet.replace('\'', "''");
-        batch.push(format!("({}, {}, '{}', 0)", doc_id, i / 100, escaped));
-        // Flush every 100 rows
-        if batch.len() >= 100 {
-            let sql = format!(
-                "INSERT INTO evidence (doc_id, chapter_id, content, created_at) VALUES {}",
-                batch.join(",")
-            );
-            let _ = conn.execute(&sql, []);
-            evidc += batch.len();
+        batch.push(EvidenceBatch {
+            doc_id,
+            chapter_id: (i / 100) as i64,
+            content: snippet,
+        });
+        if batch.len() >= 1000 {
+            evidc += EvidenceWriter::default().write(&conn, &batch);
             batch.clear();
         }
     }
     if !batch.is_empty() {
-        let sql = format!(
-            "INSERT INTO evidence (doc_id, chapter_id, content, created_at) VALUES {}",
-            batch.join(",")
-        );
-        let _ = conn.execute(&sql, []);
-        evidc += batch.len();
+        evidc += EvidenceWriter::default().write(&conn, &batch);
     }
     conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
     drop(conn);

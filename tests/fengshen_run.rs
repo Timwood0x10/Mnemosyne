@@ -29,7 +29,7 @@ async fn fengshen_run() {
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[]);
+    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
 
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx.profiles.iter()
