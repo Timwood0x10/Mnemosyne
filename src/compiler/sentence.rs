@@ -18,7 +18,7 @@
 use crate::compiler::{Chunk, Sentence, SentenceId};
 
 /// Separator characters that end a sentence.
-const SEPARATORS: &[char] = &['。', '！', '？', '；', '!', '?', ';', '\n'];
+const SEPARATORS: &[char] = &['。', '！', '？', '；', '.', '!', '?', ';', '\n'];
 
 /// Split a single [`Chunk`] into [`Sentence`]s.
 ///

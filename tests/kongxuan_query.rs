@@ -25,7 +25,7 @@ async fn kongxuan_query() {
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict));
+    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[]);
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx.profiles.iter()
             .filter(|p| p.entity_id == entity.id)

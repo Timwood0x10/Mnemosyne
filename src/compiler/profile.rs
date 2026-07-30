@@ -7,12 +7,43 @@
 //!   → Entity("刘备") + Profile(courtesy_name="玄德") + Profile(birthplace="涿郡")
 //! ```
 //!
-//! Uses the [`EntityDictionary`] to validate entity names — only text regions
-//! that contain known entity names (or their aliases) are scanned. This
-//! prevents false positives from narrative text ("话说", "且说", ...).
+//! Supports both Chinese classical patterns (字, 人也, 身长...) and arbitrary
+//! per-novel patterns loaded from JSON config (e.g. "was the son of", "married").
 
 use crate::compiler::entity::EntityDictionary;
 use crate::compiler::{CompileContext, Entity, EntityProfile};
+use serde::Deserialize;
+
+/// A single profile extraction pattern loaded from JSON config.
+///
+/// Each pattern defines a substring to match in the text, a profile key to
+/// store the extracted value under, and an extraction mode that determines
+/// how the value is extracted relative to the matched pattern.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProfilePattern {
+    pub pattern: String,
+    pub key: String,
+    pub mode: String, // "After", "Before", "Between", "Until"
+    #[serde(default)]
+    pub suffix: Option<String>,
+    #[serde(default)]
+    pub fallback: Option<String>,
+}
+
+impl ProfilePattern {
+    /// Convert the string mode to an [`ExtractMode`].
+    /// JSON patterns use static defaults for suffix/fallback since
+    /// [`ExtractMode`] stores `&'static str` references.
+    pub(crate) fn to_extract_mode(&self) -> ExtractMode {
+        match self.mode.as_str() {
+            "After" => ExtractMode::After,
+            "Before" => ExtractMode::Before,
+            "Between" => ExtractMode::Between(""),
+            "Until" => ExtractMode::Until("，"),
+            _ => ExtractMode::After,
+        }
+    }
+}
 
 /// Default profile patterns with their key names (classical Chinese novel format).
 /// These can be overridden by per-novel config in JSON profiles.
@@ -55,7 +86,12 @@ fn is_stop(c: char) -> bool {
 /// When `dict` is `Some`, known entity names are validated against the dictionary
 /// and aliases are resolved to canonical names. When `dict` is `None`, entity
 /// names are discovered heuristically from introduction patterns.
-pub fn extract_profiles(text: &str, ctx: &mut CompileContext, dict: Option<&EntityDictionary>) {
+pub fn extract_profiles(
+    text: &str,
+    ctx: &mut CompileContext,
+    dict: Option<&EntityDictionary>,
+    extra_patterns: &[ProfilePattern],
+) {
     for line in text.lines() {
         let line = line.trim();
         if line.len() < 6 {
@@ -72,28 +108,45 @@ pub fn extract_profiles(text: &str, ctx: &mut CompileContext, dict: Option<&Enti
             continue;
         };
 
-        // Extract profile attributes
+        // Extract profile attributes using configured or default patterns.
         let mut profiles: Vec<(&str, String)> = Vec::new();
-        for &(pattern, key, ref mode) in DEFAULT_PROFILE_PATTERNS {
-            if !line.contains(pattern) {
-                continue;
+
+        // Pattern source 1: JSON-configured patterns
+        for pp in extra_patterns {
+            if line.contains(&pp.pattern) {
+                let mode = pp.to_extract_mode();
+                let val = match &mode {
+                    ExtractMode::After => extract_after(line, &pp.pattern),
+                    ExtractMode::Before => extract_before(line, &pp.pattern),
+                    ExtractMode::Between(suffix) => extract_between(line, &pp.pattern, suffix),
+                    ExtractMode::Until(stop) => extract_until(line, &pp.pattern, stop),
+                    ExtractMode::BeforeWithFallback(fallback) => {
+                        extract_before(line, &pp.pattern).or_else(|| extract_before(line, fallback))
+                    }
+                };
+                if let Some(v) = val {
+                    profiles.push((pp.key.as_str(), v));
+                }
             }
-            let value = match mode {
-                ExtractMode::After => extract_after(line, pattern),
-                ExtractMode::Before => extract_before(line, pattern),
-                ExtractMode::Between(suffix) => extract_between(line, pattern, suffix),
-                ExtractMode::Until(stop) => extract_until(line, pattern, stop),
-                ExtractMode::BeforeWithFallback(fallback) => {
-                    let v = extract_before(line, pattern);
-                    if v.is_none() {
-                        extract_before(line, fallback)
-                    } else {
-                        v
+        }
+
+        // Pattern source 2: hardcoded Chinese defaults
+        for &(pattern, key, ref mode) in DEFAULT_PROFILE_PATTERNS {
+            if line.contains(pattern) {
+                let val = match mode {
+                    ExtractMode::After => extract_after(line, pattern),
+                    ExtractMode::Before => extract_before(line, pattern),
+                    ExtractMode::Between(suffix) => extract_between(line, pattern, suffix),
+                    ExtractMode::Until(stop) => extract_until(line, pattern, stop),
+                    ExtractMode::BeforeWithFallback(fallback) => {
+                        extract_before(line, pattern).or_else(|| extract_before(line, fallback))
+                    }
+                };
+                if let Some(v) = val {
+                    if !profiles.iter().any(|(k, _)| *k == key && v.contains(k)) {
+                        profiles.push((key, v));
                     }
                 }
-            };
-            if let Some(val) = value {
-                profiles.push((key, val));
             }
         }
 
@@ -372,7 +425,7 @@ mod tests {
     #[test]
     fn courtesy_from_dialog() {
         let mut ctx = CompileContext::default();
-        extract_profiles("刘备字玄德，涿郡人也", &mut ctx, Some(&make_dict()));
+        extract_profiles("刘备字玄德，涿郡人也", &mut ctx, Some(&make_dict()), &[]);
         let cp = ctx.profiles.iter().find(|p| p.key == "courtesy_name");
         assert!(cp.is_some(), "courtesy_name should be extracted");
         assert_eq!(cp.unwrap().value, "玄德");
@@ -387,7 +440,7 @@ mod tests {
     #[test]
     fn birthplace_extracted() {
         let mut ctx = CompileContext::default();
-        extract_profiles("张飞涿郡人也", &mut ctx, Some(&make_dict()));
+        extract_profiles("张飞涿郡人也", &mut ctx, Some(&make_dict()), &[]);
         let bp = ctx.profiles.iter().find(|p| p.key == "birthplace");
         assert!(bp.is_some(), "birthplace should be extracted");
         assert!(bp.unwrap().value.contains("涿郡"));
@@ -398,7 +451,7 @@ mod tests {
     #[test]
     fn weapon_extracted() {
         let mut ctx = CompileContext::default();
-        extract_profiles("关羽使青龙偃月刀", &mut ctx, Some(&make_dict()));
+        extract_profiles("关羽使青龙偃月刀", &mut ctx, Some(&make_dict()), &[]);
         let wp = ctx.profiles.iter().find(|p| p.key == "weapon");
         assert!(wp.is_some(), "weapon should be extracted");
         assert_eq!(wp.unwrap().value, "青龙偃月刀");
@@ -409,7 +462,7 @@ mod tests {
     #[test]
     fn narrative_text_ignored() {
         let mut ctx = CompileContext::default();
-        extract_profiles("话说天下大势，分久必合", &mut ctx, Some(&make_dict()));
+        extract_profiles("话说天下大势，分久必合", &mut ctx, Some(&make_dict()), &[]);
         assert!(ctx.entities.is_empty(), "no entity for narrative text");
         assert!(ctx.profiles.is_empty(), "no profiles for narrative text");
     }
@@ -419,7 +472,7 @@ mod tests {
     #[test]
     fn alias_resolves_to_canonical() {
         let mut ctx = CompileContext::default();
-        extract_profiles("玄德幼孤，事母至孝", &mut ctx, Some(&make_dict()));
+        extract_profiles("玄德幼孤，事母至孝", &mut ctx, Some(&make_dict()), &[]);
         // At minimum, the function should not panic and should find at least
         // a profile pattern if the text contains one. If no profile pattern
         // is present (just narrative), no entities/profiles are created.

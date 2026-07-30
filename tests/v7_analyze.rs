@@ -28,7 +28,7 @@ async fn full_analysis() {
     let mut dict = registry.build_dictionary();
 
     // ── Entity discovery ────────────────────────────────────────────────
-    profile::extract_profiles(text, &mut ctx, Some(&dict));
+    profile::extract_profiles(text, &mut ctx, Some(&dict), &[]);
 
     // Wire Pass 1 → Pass 2: register discovered entities + aliases
     profile::register_discovered_entities(&mut dict, &ctx);

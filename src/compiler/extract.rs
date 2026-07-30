@@ -8,6 +8,8 @@
 //! ```text
 //! Sentences → Mention Scan → Observation (SPO) → Event → Relation
 //! ```
+//!
+use aho_corasick::AhoCorasick;
 
 use crate::compiler::entity::EntityDictionary;
 use crate::compiler::{CompileContext, Event, EventParticipant, Mention, Relation};
@@ -122,16 +124,23 @@ pub fn compile(
             .map(|s| s.as_str())
             .collect();
 
-        for verb in &all_verbs {
-            for (pos, _) in text.match_indices(verb) {
-                let subject = local_mentions.iter().rfind(|m| {
-                    m.offset.end <= pos && (pos - m.offset.end) < config.proximity_chars
-                });
+        // Build Aho-Corasick automaton for all verbs — single-pass scan
+        // instead of O(N×V) repeated match_indices calls. This is orders of
+        // magnitude faster when V (verb count) × N (sentence count) is large,
+        // which is especially important for English text processing.
+        let ac = AhoCorasick::new(&all_verbs).unwrap();
 
-                let object = local_mentions.iter().find(|m| {
-                    m.offset.start >= pos + verb.len()
-                        && (m.offset.start - (pos + verb.len())) < config.proximity_chars
-                });
+        for m in ac.find_iter(text) {
+            let verb = &all_verbs[m.pattern()];
+            let pos = m.start();
+            let subject = local_mentions.iter().rfind(|mention| {
+                mention.offset.end <= pos && (pos - mention.offset.end) < config.proximity_chars
+            });
+
+            let object = local_mentions.iter().find(|mention| {
+                mention.offset.start >= pos + verb.len()
+                    && (mention.offset.start - (pos + verb.len())) < config.proximity_chars
+            });
 
                 if let Some(s) = subject {
                     let mut title = format!("{}{}", s.canonical_name, verb);
@@ -161,8 +170,6 @@ pub fn compile(
                 }
             }
         }
-    }
-
     // Build relations from co-occurring event participants
     build_relations(ctx);
 }
@@ -247,29 +254,44 @@ fn scan_mentions(
 ) -> Vec<Mention> {
     let mut mentions = Vec::new();
 
-    // Simple longest-first scan: check if any known alias appears in the text
-    let mut aliases: Vec<(&str, &str)> = dict
+    // Build alias list sorted longest-first for Aho-Corasick
+    let mut aliases: Vec<(String, String)> = dict
         .alias_to_canonical
         .iter()
-        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    aliases.sort_by_key(|b| std::cmp::Reverse(b.0.len())); // longest first
+    aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len())); // longest first
 
-    for (alias, canonical) in &aliases {
-        for (pos, _) in text.match_indices(alias) {
+    if aliases.is_empty() {
+        // Skip to resolver-based scan below
+    } else {
+        // Use Aho-Corasick for single-pass alias matching instead of O(N*A)
+        let patterns: Vec<&str> = aliases.iter().map(|(k, _)| k.as_str()).collect();
+        let ac = match AhoCorasick::new(&patterns) {
+            Ok(ac) => ac,
+            Err(_) => return mentions,
+        };
+
+        for m in ac.find_iter(text) {
+            let alias = &patterns[m.pattern()];
+            let pos = m.start();
+
             // Avoid overlapping matches (skip if within an existing mention)
             if mentions
                 .iter()
-                .any(|m: &Mention| pos >= m.offset.start && pos < m.offset.end)
+                .any(|existing: &Mention| pos >= existing.offset.start && pos < existing.offset.end)
             {
                 continue;
             }
-            let (_, entity_id) = dict.resolve(alias).unwrap_or((canonical.to_string(), None));
+
+            // Find the canonical name and entity ID
+            let canonical = aliases[m.pattern()].1.clone();
+            let (_, entity_id) = dict.resolve(alias).unwrap_or((canonical.clone(), None));
             mentions.push(Mention {
                 sentence_id: 0,
                 entity_id,
                 surface: alias.to_string(),
-                canonical_name: canonical.to_string(),
+                canonical_name: canonical,
                 offset: pos..(pos + alias.len()),
                 confidence: 0.9,
             });

@@ -56,6 +56,8 @@ pub struct EntityProfile {
     pub faction_switch_triggers: Option<HashMap<String, Vec<String>>>,
     #[serde(default)]
     pub personality_patterns: Vec<String>,
+    #[serde(default)]
+    pub profile_patterns: Vec<serde_json::Value>,
     pub entities: Vec<JsonEntity>,
 }
 
@@ -85,6 +87,8 @@ pub struct JsonEntityProvider {
     faction_switch_triggers: HashMap<String, Vec<String>>,
     /// Personality pattern strings (性, 为人, 平生...) for character arc detection.
     personality_patterns: Vec<String>,
+    /// Profile extraction patterns (used by profile.rs when non-empty).
+    profile_patterns: Vec<serde_json::Value>,
 }
 
 impl JsonEntityProvider {
@@ -125,6 +129,7 @@ impl JsonEntityProvider {
             friendly_verbs: profile.friendly_verbs,
             faction_switch_triggers: profile.faction_switch_triggers.unwrap_or_default(),
             personality_patterns: profile.personality_patterns,
+            profile_patterns: profile.profile_patterns,
         })
     }
 
@@ -151,6 +156,15 @@ impl JsonEntityProvider {
     /// Return the personality patterns (性, 为人, ...) for character arc detection.
     pub fn personality_patterns(&self) -> &[String] {
         &self.personality_patterns
+    }
+
+    /// Return profile extraction patterns as deserialized [`ProfilePattern`]s.
+    #[cfg(feature = "remote-embed")]
+    pub fn profile_patterns(&self) -> Vec<crate::compiler::profile::ProfilePattern> {
+        self.profile_patterns
+            .iter()
+            .filter_map(|v| serde_json::from_value(v.clone()).ok())
+            .collect()
     }
 
     /// Build an observation config from the profile's verb groups.

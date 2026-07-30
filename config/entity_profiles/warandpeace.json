@@ -1,0 +1,42 @@
+{
+  "profile_name": "War and Peace",
+  "doc_type_hint": "novel",
+  "chapter_markers": ["BOOK", "CHAPTER"],
+  "verbs": [
+    ["killed","murdered","shot","stabbed","wounded","struck","beat","fought","attacked","destroyed","captured","executed","died","escaped","fled","retreated","surrendered","betrayed","defeated","conquered","slaughtered","burned","sacked","plundered","massacred"],
+    ["said","replied","answered","asked","cried","exclaimed","whispered","shouted","murmured","observed","remarked","continued","began","added","interrupted","thought","felt","remembered"],
+    ["loved","hated","despised","admired","respected","desired","longed","feared","hoped","believed","understood","realized","decided","resolved"]
+  ],
+  "hostile_verbs": ["killed","murdered","shot","stabbed","wounded","struck","beat","fought","attacked","destroyed","captured","executed","died","escaped","fled","betrayed","defeated","conquered"],
+  "friendly_verbs": ["loved","married","embraced","kissed","wept","saved","rescued","protected","pardoned","forgave","comforted","consoled"],
+  "faction_switch_triggers": {
+    "surrender": ["surrendered","capitulated","submitted","yielded"],
+    "betrayal": ["betrayed","deserted","defected","abandoned"]
+  },
+  "personality_patterns": [
+    "was a", "was an", "character", "nature", "disposition", "temper",
+    "known for", "known as", "remarkable for", "notable for",
+    "kind", "cruel", "gentle", "proud", "ambitious", "intelligent",
+    "foolish", "brave", "cowardly", "generous", "selfish", "passionate",
+    "cold", "warm", "reserved", "affectionate", "melancholy", "cheerful"
+  ],
+  "profile_patterns": [
+    {"pattern":"was the son of","key":"parentage","mode":"Before"},
+    {"pattern":"was the daughter of","key":"parentage","mode":"Before"},
+    {"pattern":"was born","key":"birth","mode":"After"},
+    {"pattern":"married","key":"spouse","mode":"Between"},
+    {"pattern":"known as","key":"alias","mode":"After"},
+    {"pattern":"called","key":"nickname","mode":"After"},
+    {"pattern":"aged","key":"age","mode":"Before"},
+    {"pattern":"Count","key":"title","mode":"Before"},
+    {"pattern":"Prince","key":"title","mode":"Before"},
+    {"pattern":"Princess","key":"title","mode":"Before"},
+    {"pattern":"General","key":"title","mode":"Before"},
+    {"pattern":"Duke","key":"title","mode":"Before"}
+  ],
+  "chapter_heading_patterns": [
+    "^(BOOK|CHAPTER|EPILOGUE|PART)\\s+[IVXLCDM]+",
+    "^(\\d+)\\s*$"
+  ],
+  "entities": []
+}
