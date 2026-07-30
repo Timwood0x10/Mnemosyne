@@ -79,17 +79,72 @@ impl LanguageProvider for ChineseLanguageProvider {
 
     fn profile_patterns(&self) -> &[ProfilePatternDef] {
         &[
-            ProfilePatternDef { pattern: "字", key: "courtesy_name", mode: "After", suffix: None },
-            ProfilePatternDef { pattern: "人也", key: "birthplace", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "之后", key: "ancestry", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "身长", key: "appearance_height", mode: "Between", suffix: Some("尺") },
-            ProfilePatternDef { pattern: "面如", key: "appearance_face", mode: "After", suffix: None },
-            ProfilePatternDef { pattern: "为业", key: "occupation", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "使", key: "weapon", mode: "Until", suffix: Some("，") },
-            ProfilePatternDef { pattern: "姓", key: "surname", mode: "Between", suffix: Some("名") },
-            ProfilePatternDef { pattern: "名", key: "given_name", mode: "BeforeWithFallback", suffix: Some("字") },
-            ProfilePatternDef { pattern: "号", key: "title", mode: "After", suffix: None },
-            ProfilePatternDef { pattern: "威风", key: "demeanor", mode: "After", suffix: None },
+            ProfilePatternDef {
+                pattern: "字",
+                key: "courtesy_name",
+                mode: "After",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "人也",
+                key: "birthplace",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "之后",
+                key: "ancestry",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "身长",
+                key: "appearance_height",
+                mode: "Between",
+                suffix: Some("尺"),
+            },
+            ProfilePatternDef {
+                pattern: "面如",
+                key: "appearance_face",
+                mode: "After",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "为业",
+                key: "occupation",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "使",
+                key: "weapon",
+                mode: "Until",
+                suffix: Some("，"),
+            },
+            ProfilePatternDef {
+                pattern: "姓",
+                key: "surname",
+                mode: "Between",
+                suffix: Some("名"),
+            },
+            ProfilePatternDef {
+                pattern: "名",
+                key: "given_name",
+                mode: "BeforeWithFallback",
+                suffix: Some("字"),
+            },
+            ProfilePatternDef {
+                pattern: "号",
+                key: "title",
+                mode: "After",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "威风",
+                key: "demeanor",
+                mode: "After",
+                suffix: None,
+            },
         ]
     }
 
@@ -132,20 +187,67 @@ impl LanguageProvider for EnglishLanguageProvider {
 
     fn profile_patterns(&self) -> &[ProfilePatternDef] {
         &[
-            ProfilePatternDef { pattern: "was the son of", key: "parentage", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "was the daughter of", key: "parentage", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "married", key: "spouse", mode: "Between", suffix: Some("and") },
-            ProfilePatternDef { pattern: "known as", key: "alias", mode: "After", suffix: None },
-            ProfilePatternDef { pattern: "Count", key: "title", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "Prince", key: "title", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "Princess", key: "title", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "General", key: "title", mode: "Before", suffix: None },
-            ProfilePatternDef { pattern: "Duke", key: "title", mode: "Before", suffix: None },
+            ProfilePatternDef {
+                pattern: "was the son of",
+                key: "parentage",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "was the daughter of",
+                key: "parentage",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "married",
+                key: "spouse",
+                mode: "Between",
+                suffix: Some("and"),
+            },
+            ProfilePatternDef {
+                pattern: "known as",
+                key: "alias",
+                mode: "After",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "Count",
+                key: "title",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "Prince",
+                key: "title",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "Princess",
+                key: "title",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "General",
+                key: "title",
+                mode: "Before",
+                suffix: None,
+            },
+            ProfilePatternDef {
+                pattern: "Duke",
+                key: "title",
+                mode: "Before",
+                suffix: None,
+            },
         ]
     }
 
     fn discovery_markers(&self) -> &[&str] {
-        &["Prince", "Princess", "Count", "General", "Mr.", "Mrs.", "Dr.", "Sir", "Lord", "Lady"]
+        &[
+            "Prince", "Princess", "Count", "General", "Mr.", "Mrs.", "Dr.", "Sir", "Lord", "Lady",
+        ]
     }
 
     fn chapter_pattern(&self) -> &str {

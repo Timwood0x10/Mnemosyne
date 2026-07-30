@@ -18,16 +18,23 @@ async fn kongxuan_query() {
     ctx.document_title = "封神演义".into();
 
     let mut registry = EntityRegistry::new();
-    let provider = Arc::new(
-        JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap(),
-    );
+    let provider =
+        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
+    profile::extract_profiles(
+        &doc.text,
+        &mut ctx,
+        Some(&dict),
+        &[],
+        &lore_scope::language::ChineseLanguageProvider::new(),
+    );
     for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx.profiles.iter()
+        let aliases: Vec<&str> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == entity.id)
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
@@ -35,7 +42,9 @@ async fn kongxuan_query() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict.alias_to_canonical.iter()
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
     let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
@@ -48,11 +57,21 @@ async fn kongxuan_query() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&entity_resolver));
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
 
     // Query 孔宣 events (MCP-style)
-    let kongxuan_events: Vec<_> = ctx.events.iter()
-        .filter(|ev| ev.title.contains("孔宣") || ev.participants.iter().any(|p| p.entity_name == "孔宣"))
+    let kongxuan_events: Vec<_> = ctx
+        .events
+        .iter()
+        .filter(|ev| {
+            ev.title.contains("孔宣") || ev.participants.iter().any(|p| p.entity_name == "孔宣")
+        })
         .collect();
 
     if kongxuan_events.is_empty() {
@@ -63,7 +82,11 @@ async fn kongxuan_query() {
         println!("\n  Timeline:");
         for ev in &kongxuan_events {
             let ts = ev.timestamp.unwrap_or(0);
-            let parts: Vec<&str> = ev.participants.iter().map(|p| p.entity_name.as_str()).collect();
+            let parts: Vec<&str> = ev
+                .participants
+                .iter()
+                .map(|p| p.entity_name.as_str())
+                .collect();
             println!("    Ch.{:<4} {} [{}]", ts, ev.title, parts.join(", "));
         }
     }

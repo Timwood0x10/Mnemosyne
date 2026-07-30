@@ -145,34 +145,34 @@ pub fn compile(
                     && (mention.offset.start - (pos + verb.len())) < config.proximity_chars
             });
 
-                if let Some(s) = subject {
-                    let mut title = format!("{}{}", s.canonical_name, verb);
-                    let mut participants = vec![EventParticipant {
-                        entity_name: s.canonical_name.clone(),
-                        role: "subject".into(),
-                    }];
-                    if let Some(o) = object {
-                        title = format!("{}{}{}", s.canonical_name, verb, o.canonical_name);
-                        participants.push(EventParticipant {
-                            entity_name: o.canonical_name.clone(),
-                            role: "object".into(),
-                        });
-                    }
-
-                    ctx.events.push(Event {
-                        effects: vec![],
-                        id: None,
-                        title,
-                        event_type: "action".into(),
-                        timestamp: Some(current_chapter),
-                        location: None,
-                        description: text[..pos.min(text.len())].to_string(),
-                        participants,
-                        importance: 0.6,
+            if let Some(s) = subject {
+                let mut title = format!("{}{}", s.canonical_name, verb);
+                let mut participants = vec![EventParticipant {
+                    entity_name: s.canonical_name.clone(),
+                    role: "subject".into(),
+                }];
+                if let Some(o) = object {
+                    title = format!("{}{}{}", s.canonical_name, verb, o.canonical_name);
+                    participants.push(EventParticipant {
+                        entity_name: o.canonical_name.clone(),
+                        role: "object".into(),
                     });
                 }
+
+                ctx.events.push(Event {
+                    effects: vec![],
+                    id: None,
+                    title,
+                    event_type: "action".into(),
+                    timestamp: Some(current_chapter),
+                    location: None,
+                    description: text[..pos.min(text.len())].to_string(),
+                    participants,
+                    importance: 0.6,
+                });
             }
         }
+    }
     // Build relations from co-occurring event participants
     build_relations(ctx);
 }
@@ -295,7 +295,9 @@ fn scan_mentions(
             for m in ac.find_iter(text) {
                 let alias = &idx.aliases[m.pattern()].0;
                 let pos = m.start();
-                if mentions.iter().any(|existing: &Mention| pos >= existing.offset.start && pos < existing.offset.end) {
+                if mentions.iter().any(|existing: &Mention| {
+                    pos >= existing.offset.start && pos < existing.offset.end
+                }) {
                     continue;
                 }
                 let canonical = idx.aliases[m.pattern()].1.clone();
@@ -325,7 +327,9 @@ fn scan_mentions(
                 for m in ac.find_iter(text) {
                     let alias = &patterns[m.pattern()];
                     let pos = m.start();
-                    if mentions.iter().any(|existing: &Mention| pos >= existing.offset.start && pos < existing.offset.end) {
+                    if mentions.iter().any(|existing: &Mention| {
+                        pos >= existing.offset.start && pos < existing.offset.end
+                    }) {
                         continue;
                     }
                     let canonical = aliases[m.pattern()].1.clone();

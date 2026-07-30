@@ -20,8 +20,8 @@
 use std::sync::Arc;
 
 use crate::compiler::CompileContext;
-use crate::error::Error;
 use crate::entity_resolver::Embedder;
+use crate::error::Error;
 use crate::vector::VectorIndex;
 
 /// Builder that takes compiler output and produces a queryable vector index.
@@ -92,7 +92,11 @@ impl VectorBuilder {
         // Events (top N by importance)
         let mut sorted = events.to_vec();
         sorted.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-        let top: Vec<&str> = sorted.iter().take(self.max_events).map(|(t, _, _)| t.as_str()).collect();
+        let top: Vec<&str> = sorted
+            .iter()
+            .take(self.max_events)
+            .map(|(t, _, _)| t.as_str())
+            .collect();
         if !top.is_empty() {
             parts.push(format!("Events:{}", top.join(",")));
         }
@@ -104,27 +108,42 @@ impl VectorBuilder {
     ///
     /// Iterates over all discovered entities, builds their text
     /// representations, embeds them, and indexes them.
-    pub fn build<T: VectorIndex + Default + 'static>(&self, ctx: &CompileContext) -> Result<Arc<dyn VectorIndex>, Error> {
+    pub fn build<T: VectorIndex + Default + 'static>(
+        &self,
+        ctx: &CompileContext,
+    ) -> Result<Arc<dyn VectorIndex>, Error> {
         let mut items: Vec<(i64, Vec<f32>)> = Vec::new();
 
         for entity in &ctx.entities {
             let eid = entity.id.unwrap_or(0);
-            if eid == 0 { continue; }
+            if eid == 0 {
+                continue;
+            }
 
             // Collect aliases, relations, and events for this entity
-            let aliases: Vec<String> = ctx.profiles.iter()
+            let aliases: Vec<String> = ctx
+                .profiles
+                .iter()
                 .filter(|p| p.entity_id == entity.id)
                 .filter(|p| p.key == "courtesy_name" || p.key == "title")
                 .map(|p| p.value.clone())
                 .collect();
 
-            let relations: Vec<(String, String)> = ctx.events.iter()
+            let relations: Vec<(String, String)> = ctx
+                .events
+                .iter()
                 .filter(|ev| ev.participants.iter().any(|p| p.entity_name == entity.name))
-                .flat_map(|ev| ev.participants.iter().map(|p| (p.entity_name.clone(), ev.event_type.clone())))
+                .flat_map(|ev| {
+                    ev.participants
+                        .iter()
+                        .map(|p| (p.entity_name.clone(), ev.event_type.clone()))
+                })
                 .filter(|(n, _)| n != &entity.name)
                 .collect();
 
-            let events: Vec<(String, i32, f64)> = ctx.events.iter()
+            let events: Vec<(String, i32, f64)> = ctx
+                .events
+                .iter()
                 .filter(|ev| ev.participants.iter().any(|p| p.entity_name == entity.name))
                 .map(|ev| (ev.title.clone(), ev.timestamp.unwrap_or(0), ev.importance))
                 .collect();

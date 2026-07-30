@@ -421,7 +421,13 @@ mod tests {
     #[test]
     fn courtesy_from_dialog() {
         let mut ctx = CompileContext::default();
-        extract_profiles("刘备字玄德，涿郡人也", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
+        extract_profiles(
+            "刘备字玄德，涿郡人也",
+            &mut ctx,
+            Some(&make_dict()),
+            &[],
+            &crate::language::ChineseLanguageProvider::new(),
+        );
         let cp = ctx.profiles.iter().find(|p| p.key == "courtesy_name");
         assert!(cp.is_some(), "courtesy_name should be extracted");
         assert_eq!(cp.unwrap().value, "玄德");
@@ -436,7 +442,13 @@ mod tests {
     #[test]
     fn birthplace_extracted() {
         let mut ctx = CompileContext::default();
-        extract_profiles("张飞涿郡人也", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
+        extract_profiles(
+            "张飞涿郡人也",
+            &mut ctx,
+            Some(&make_dict()),
+            &[],
+            &crate::language::ChineseLanguageProvider::new(),
+        );
         let bp = ctx.profiles.iter().find(|p| p.key == "birthplace");
         assert!(bp.is_some(), "birthplace should be extracted");
         assert!(bp.unwrap().value.contains("涿郡"));
@@ -447,7 +459,13 @@ mod tests {
     #[test]
     fn weapon_extracted() {
         let mut ctx = CompileContext::default();
-        extract_profiles("关羽使青龙偃月刀", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
+        extract_profiles(
+            "关羽使青龙偃月刀",
+            &mut ctx,
+            Some(&make_dict()),
+            &[],
+            &crate::language::ChineseLanguageProvider::new(),
+        );
         let wp = ctx.profiles.iter().find(|p| p.key == "weapon");
         assert!(wp.is_some(), "weapon should be extracted");
         assert_eq!(wp.unwrap().value, "青龙偃月刀");
@@ -458,7 +476,13 @@ mod tests {
     #[test]
     fn narrative_text_ignored() {
         let mut ctx = CompileContext::default();
-        extract_profiles("话说天下大势，分久必合", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
+        extract_profiles(
+            "话说天下大势，分久必合",
+            &mut ctx,
+            Some(&make_dict()),
+            &[],
+            &crate::language::ChineseLanguageProvider::new(),
+        );
         assert!(ctx.entities.is_empty(), "no entity for narrative text");
         assert!(ctx.profiles.is_empty(), "no profiles for narrative text");
     }
@@ -468,7 +492,13 @@ mod tests {
     #[test]
     fn alias_resolves_to_canonical() {
         let mut ctx = CompileContext::default();
-        extract_profiles("玄德幼孤，事母至孝", &mut ctx, Some(&make_dict()), &[], &ChineseLanguageProvider::new());
+        extract_profiles(
+            "玄德幼孤，事母至孝",
+            &mut ctx,
+            Some(&make_dict()),
+            &[],
+            &crate::language::ChineseLanguageProvider::new(),
+        );
         // At minimum, the function should not panic and should find at least
         // a profile pattern if the text contains one. If no profile pattern
         // is present (just narrative), no entities/profiles are created.

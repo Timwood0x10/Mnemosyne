@@ -27,17 +27,24 @@ async fn war_mcp() {
     ctx.document_title = "War and Peace".into();
 
     let mut registry = EntityRegistry::new();
-    let provider = Arc::new(
-        JsonEntityProvider::from_file("config/entity_profiles/warandpeace.json").unwrap(),
-    );
+    let provider =
+        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/warandpeace.json").unwrap());
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
     let patterns = provider.profile_patterns();
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &patterns, &lore_scope::language::EnglishLanguageProvider::new());
+    profile::extract_profiles(
+        text,
+        &mut ctx,
+        Some(&dict),
+        &patterns,
+        &lore_scope::language::EnglishLanguageProvider::new(),
+    );
     for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx.profiles.iter()
+        let aliases: Vec<&str> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == entity.id)
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
@@ -45,7 +52,9 @@ async fn war_mcp() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict.alias_to_canonical.iter()
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
     let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
@@ -58,7 +67,13 @@ async fn war_mcp() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&entity_resolver));
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
     println!("Compiled: {} events\n", ctx.events.len());
 
     // 2. Bootstrap MCP store
@@ -72,17 +87,25 @@ async fn war_mcp() {
          VALUES (1, 'concept', 'War and Peace', '{}', 1.0, 0)", [],
     ).unwrap();
     let doc_id = conn.last_insert_rowid();
-    conn.execute("UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1", [doc_id]).unwrap();
+    conn.execute(
+        "UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1",
+        [doc_id],
+    )
+    .unwrap();
     conn.execute(
         "INSERT INTO documents (id, title, doc_type, created_at)
-         VALUES (?1, 'War and Peace', 'novel', 0)", [doc_id],
-    ).unwrap();
+         VALUES (?1, 'War and Peace', 'novel', 0)",
+        [doc_id],
+    )
+    .unwrap();
     let k = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
 
     // 3. Write entities + events + evidence
     let mut ec = 0usize;
     for e in &ctx.entities {
-        if e.name.len() > 20 { continue; }
+        if e.name.len() > 20 {
+            continue;
+        }
         let props = serde_json::json!({"type": e.entity_type, "status": e.status}).to_string();
         let _ = conn.execute(
             "INSERT INTO knowledge_objects (doc_id, object_type, name, properties, confidence, created_at)
@@ -94,11 +117,14 @@ async fn war_mcp() {
 
     let mut evc = 0usize;
     for ev in &ctx.events {
-        if ev.title.len() > 200 { continue; }
+        if ev.title.len() > 200 {
+            continue;
+        }
         let props = serde_json::json!({
             "chapter": ev.timestamp,
             "participants": ev.participants.iter().map(|p| &p.entity_name).collect::<Vec<_>>(),
-        }).to_string();
+        })
+        .to_string();
         let _ = conn.execute(
             "INSERT INTO knowledge_objects (doc_id, object_type, name, properties, confidence, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 0)",
@@ -110,7 +136,9 @@ async fn war_mcp() {
     let mut evidc = 0usize;
     let mut batch: Vec<EvidenceBatch> = Vec::new();
     for (i, line) in text.lines().enumerate() {
-        if line.len() < 20 { continue; }
+        if line.len() < 20 {
+            continue;
+        }
         let snippet: String = line.chars().take(300).collect();
         batch.push(EvidenceBatch {
             doc_id,
@@ -145,7 +173,10 @@ async fn war_mcp() {
     }
 
     println!("\n━━━ evidence search: Anna ━━━━━━━━━━━━━━\n");
-    let hits = k.search_evidence("Anna", Some("War and Peace"), 10).await.unwrap();
+    let hits = k
+        .search_evidence("Anna", Some("War and Peace"), 10)
+        .await
+        .unwrap();
     for h in &hits {
         println!("  {}", h.text.chars().take(120).collect::<String>());
     }

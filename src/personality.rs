@@ -11,7 +11,6 @@
 //! // → [Trait { name: "sensitive", confidence: 0.85, evidence: "心重些" }, ...]
 //! ```
 
-use crate::error::Error;
 use crate::knowledge::Evidence;
 
 /// A single personality trait with confidence and supporting evidence.

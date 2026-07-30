@@ -22,17 +22,24 @@ async fn fengshen_run() {
 
     // Load JSON config profile
     let mut registry = EntityRegistry::new();
-    let provider = Arc::new(
-        JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap(),
-    );
+    let provider =
+        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
+    profile::extract_profiles(
+        &doc.text,
+        &mut ctx,
+        Some(&dict),
+        &[],
+        &lore_scope::language::ChineseLanguageProvider::new(),
+    );
 
     for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx.profiles.iter()
+        let aliases: Vec<&str> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == entity.id)
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
@@ -40,7 +47,9 @@ async fn fengshen_run() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict.alias_to_canonical.iter()
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
     let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
@@ -54,7 +63,13 @@ async fn fengshen_run() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&entity_resolver));
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
 
     // ── 人物活跃度 ─────────────────────────────────
     println!("━━━ 主要人物（事件活跃度 Top 15）━━━━━━━━━\n");
@@ -74,7 +89,10 @@ async fn fengshen_run() {
     println!("\n━━━ 关键回目事件 ━━━━━━━━━━━━━━━━━━━━━━━━\n");
     let mut by_ch: HashMap<i32, Vec<&str>> = HashMap::new();
     for ev in &ctx.events {
-        by_ch.entry(ev.timestamp.unwrap_or(0)).or_default().push(ev.title.as_str());
+        by_ch
+            .entry(ev.timestamp.unwrap_or(0))
+            .or_default()
+            .push(ev.title.as_str());
     }
     let mut chs: Vec<i32> = by_ch.keys().copied().collect();
     chs.sort();
@@ -89,12 +107,17 @@ async fn fengshen_run() {
 
     // ── 关键事件搜索 ────────────────────────────────
     println!("\n━━━ 重大事件 ━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    let markers = ["封神", "斩", "大战", "破", "擒", "诛仙", "瘟", "阵", "死", "化"];
+    let markers = [
+        "封神", "斩", "大战", "破", "擒", "诛仙", "瘟", "阵", "死", "化",
+    ];
     for m in &markers {
-        let hits: Vec<&str> = ctx.events.iter()
+        let hits: Vec<&str> = ctx
+            .events
+            .iter()
             .filter(|ev| ev.title.contains(m))
             .map(|ev| ev.title.as_str())
-            .take(4).collect();
+            .take(4)
+            .collect();
         if !hits.is_empty() {
             println!("  {}  →  {}", m, hits.join(" | "));
         }
@@ -104,7 +127,11 @@ async fn fengshen_run() {
     println!("\n━━━ 统计 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     println!("  实体: {}", ctx.entities.len());
     println!("  事件: {}", ctx.events.len());
-    println!("  跨度: Ch.{} ~ Ch.{}", chs.first().unwrap_or(&0), chs.last().unwrap_or(&0));
+    println!(
+        "  跨度: Ch.{} ~ Ch.{}",
+        chs.first().unwrap_or(&0),
+        chs.last().unwrap_or(&0)
+    );
 
     assert!(ctx.events.len() > 50);
     println!("\n========== COMPLETE ==========");

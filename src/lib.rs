@@ -33,6 +33,7 @@
 
 pub mod character;
 pub mod classifier;
+pub mod cognition;
 pub mod compiler;
 pub mod config;
 pub mod conversation_compiler;
@@ -42,12 +43,14 @@ pub mod embed;
 pub mod entity_resolver;
 pub mod error;
 pub mod extractor;
+pub mod fact_store;
 pub mod faction;
 pub mod filter;
 pub mod ingest;
 pub mod knowledge;
 pub mod language;
 pub mod mcp;
+pub mod observation_compiler;
 pub mod personality;
 pub mod prompt;
 pub mod resolver;

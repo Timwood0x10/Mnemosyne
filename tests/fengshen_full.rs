@@ -1,13 +1,13 @@
 //! 封神演义 full ingest: raw SQL writes, MCP query.
 //! Run: cargo test --test fengshen_full -- --nocapture
 
-use std::sync::Arc;
 use lore_scope::compiler::CompileContext;
 use lore_scope::compiler::document::Document;
 use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 use lore_scope::knowledge::{KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
+use std::sync::Arc;
 
 const DB: &str = "/tmp/fengshen_mcp.db";
 
@@ -21,15 +21,22 @@ async fn fengshen_full() {
     let mut ctx = CompileContext::default();
     ctx.document_title = "封神演义".into();
     let mut registry = EntityRegistry::new();
-    let provider = Arc::new(
-        JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap(),
-    );
+    let provider =
+        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
-    profile::extract_profiles(text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
+    profile::extract_profiles(
+        text,
+        &mut ctx,
+        Some(&dict),
+        &[],
+        &lore_scope::language::ChineseLanguageProvider::new(),
+    );
     for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx.profiles.iter()
+        let aliases: Vec<&str> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == entity.id)
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
@@ -37,7 +44,9 @@ async fn fengshen_full() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict.alias_to_canonical.iter()
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
     let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
@@ -49,7 +58,13 @@ async fn fengshen_full() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&entity_resolver));
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
 
     // 2. Open store to create tables, then use raw SQL for ALL writes
     let _ = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
@@ -62,19 +77,26 @@ async fn fengshen_full() {
          VALUES (1, 'concept', '封神演义', '{}', 1.0, 0)", [],
     ).unwrap();
     let doc_id = conn.last_insert_rowid();
-    conn.execute("UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1", [doc_id]).unwrap();
+    conn.execute(
+        "UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1",
+        [doc_id],
+    )
+    .unwrap();
 
     // Create documents table entry (needed by search_evidence JOIN)
     conn.execute(
         "INSERT INTO documents (id, title, doc_type, created_at)
          VALUES (?1, '封神演义', 'novel', 0)",
         [doc_id],
-    ).unwrap();
+    )
+    .unwrap();
 
     // Write entities
     let mut entity_count = 0usize;
     for e in &ctx.entities {
-        if e.name.len() > 20 { continue; }
+        if e.name.len() > 20 {
+            continue;
+        }
         let props = serde_json::json!({"type": e.entity_type, "status": e.status}).to_string();
         if conn.execute(
             "INSERT INTO knowledge_objects (doc_id, object_type, name, properties, confidence, created_at)
@@ -86,11 +108,14 @@ async fn fengshen_full() {
     // Write events
     let mut event_count = 0usize;
     for ev in &ctx.events {
-        if ev.title.len() > 200 { continue; }
+        if ev.title.len() > 200 {
+            continue;
+        }
         let props = serde_json::json!({
             "chapter": ev.timestamp,
             "participants": ev.participants.iter().map(|p| &p.entity_name).collect::<Vec<_>>(),
-        }).to_string();
+        })
+        .to_string();
         if conn.execute(
             "INSERT INTO knowledge_objects (doc_id, object_type, name, properties, confidence, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, 0)",
@@ -103,10 +128,12 @@ async fn fengshen_full() {
     let mut evid_count = 0usize;
     let mut chapter_ids: std::collections::HashMap<i32, i64> = std::collections::HashMap::new();
     for (i, line) in text.lines().enumerate() {
-        if line.len() < 20 { continue; }
+        if line.len() < 20 {
+            continue;
+        }
         // Detect chapter number from "第X回" patterns
         let ch = if let Some(pos) = line.find("第") {
-            let rest = &line[pos+3..];
+            let rest = &line[pos + 3..];
             let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
             num_str.parse::<i32>().unwrap_or(i as i32 / 100)
         } else {
@@ -123,11 +150,16 @@ async fn fengshen_full() {
             );
         }
         let snippet: String = line.chars().take(300).collect();
-        if conn.execute(
-            "INSERT INTO evidence (doc_id, chapter_id, content, created_at)
+        if conn
+            .execute(
+                "INSERT INTO evidence (doc_id, chapter_id, content, created_at)
              VALUES (?1, ?2, ?3, 0)",
-            rusqlite::params![doc_id, chapter_ids[&ch], snippet],
-        ).is_ok() { evid_count += 1; }
+                rusqlite::params![doc_id, chapter_ids[&ch], snippet],
+            )
+            .is_ok()
+        {
+            evid_count += 1;
+        }
     }
 
     // Re-enable FK
@@ -144,8 +176,16 @@ async fn fengshen_full() {
             println!("Events:   {}", r.events.len());
             println!("Evidence: {}", r.evidences.len());
             for ev in &r.events {
-                let ch = ev.properties.get("chapter").and_then(|v| v.as_i64()).unwrap_or(0);
-                println!("  Ch.{}  {}", ch, ev.name.chars().take(80).collect::<String>());
+                let ch = ev
+                    .properties
+                    .get("chapter")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                println!(
+                    "  Ch.{}  {}",
+                    ch,
+                    ev.name.chars().take(80).collect::<String>()
+                );
             }
         }
         Ok(None) => println!("孔宣 not found as entity"),
@@ -154,12 +194,22 @@ async fn fengshen_full() {
 
     // 4. Evidence search
     println!("\n━━━ evidence search: 孔宣 ━━━━━━━━━━━\n");
-    let hits = k.search_evidence("孔宣", Some("封神演义"), 5).await.unwrap();
+    let hits = k
+        .search_evidence("孔宣", Some("封神演义"), 5)
+        .await
+        .unwrap();
     for h in &hits {
-        println!("  Ch.{}: {}", h.chapter, h.text.chars().take(120).collect::<String>());
+        println!(
+            "  Ch.{}: {}",
+            h.chapter,
+            h.text.chars().take(120).collect::<String>()
+        );
     }
 
     println!("\n━━━ Stats ━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    println!("  Entities: {}, Events: {}, Evidence: {}", entity_count, event_count, evid_count);
+    println!(
+        "  Entities: {}, Events: {}, Evidence: {}",
+        entity_count, event_count, evid_count
+    );
     println!("\n========== COMPLETE ==========");
 }

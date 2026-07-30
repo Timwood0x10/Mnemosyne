@@ -6,7 +6,11 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn ch69() {
-    let k = Arc::new(SQLiteKnowledgeStore::open("/tmp/fengshen_mcp.db").await.unwrap());
+    let k = Arc::new(
+        SQLiteKnowledgeStore::open("/tmp/fengshen_mcp.db")
+            .await
+            .unwrap(),
+    );
 
     println!("========== 第六十九回 孔宣兵阻金鸡岭 ==========\n");
 

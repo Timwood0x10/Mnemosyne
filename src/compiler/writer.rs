@@ -146,9 +146,21 @@ mod tests {
         create_evidence_table(&conn);
 
         let records = vec![
-            EvidenceBatch { doc_id: 1, chapter_id: 1, content: "Chapter 1 text.".into() },
-            EvidenceBatch { doc_id: 1, chapter_id: 2, content: "Chapter 2 text.".into() },
-            EvidenceBatch { doc_id: 1, chapter_id: 3, content: "Chapter 3 text.".into() },
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 1,
+                content: "Chapter 1 text.".into(),
+            },
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 2,
+                content: "Chapter 2 text.".into(),
+            },
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 3,
+                content: "Chapter 3 text.".into(),
+            },
         ];
         let writer = EvidenceWriter::new(10);
         let n = writer.write(&conn, &records);
@@ -177,11 +189,9 @@ mod tests {
         writer.write(&conn, &records);
 
         let content: String = conn
-            .query_row(
-                "SELECT content FROM evidence WHERE id = 1",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT content FROM evidence WHERE id = 1", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(content, "Prince O'Brien's regiment");
     }

@@ -33,6 +33,7 @@ pub use alias::AliasStage;
 pub use cache::{EmbeddingCache, MemoryEmbeddingCache};
 pub use embedding::Embedder;
 pub use embedding::EmbeddingStage;
+pub use embedding::FastEmbedProvider;
 pub use pipeline::{ResolveContext, ResolverPipeline, ResolverStage};
 pub use representation::{
     EntityRepresentationBuilder, EntitySnapshot, EventSummary, FixedTemplateBuilder,

@@ -22,7 +22,10 @@ fn create_root_doc_safe(db_path: &str) -> rusqlite::Result<i64> {
         [],
     )?;
     let id = conn.last_insert_rowid();
-    conn.execute("UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1", [id])?;
+    conn.execute(
+        "UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1",
+        [id],
+    )?;
     conn.execute_batch("PRAGMA foreign_keys = ON;")?;
     Ok(id)
 }
@@ -45,16 +48,23 @@ async fn fengshen_fk() {
     ctx.document_title = "封神演义".into();
 
     let mut registry = EntityRegistry::new();
-    let provider = Arc::new(
-        JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap(),
-    );
+    let provider =
+        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
+    profile::extract_profiles(
+        &doc.text,
+        &mut ctx,
+        Some(&dict),
+        &[],
+        &lore_scope::language::ChineseLanguageProvider::new(),
+    );
     for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx.profiles.iter()
+        let aliases: Vec<&str> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == entity.id)
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
@@ -62,7 +72,9 @@ async fn fengshen_fk() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict.alias_to_canonical.iter()
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
     let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
@@ -75,15 +87,24 @@ async fn fengshen_fk() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&entity_resolver));
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
 
     // 2. Ingest events into MCP store
     let mut written = 0usize;
     for ev in &ctx.events {
         let title = &ev.title;
-        if title.len() > 200 { continue; }
+        if title.len() > 200 {
+            continue;
+        }
         let obj = KnowledgeObject {
-            id: 0, doc_id,
+            id: 0,
+            doc_id,
             object_type: ObjectType::Event,
             name: title.to_string(),
             properties: serde_json::json!({
@@ -106,15 +127,28 @@ async fn fengshen_fk() {
             println!("Events:   {}", r.events.len());
             println!("Evidence: {}\n", r.evidences.len());
             for ev in &r.events {
-                let ch = ev.properties.get("chapter").and_then(|v| v.as_i64()).unwrap_or(0);
-                println!("  Ch.{}  {}", ch, ev.name.chars().take(80).collect::<String>());
+                let ch = ev
+                    .properties
+                    .get("chapter")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                println!(
+                    "  Ch.{}  {}",
+                    ch,
+                    ev.name.chars().take(80).collect::<String>()
+                );
             }
         }
         None => println!("孔宣 not found in MCP store"),
     }
 
     println!("\n━━━ Stats ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    println!("Compiled events: {}, Ingested: {}, Doc ID: {}", ctx.events.len(), written, doc_id);
+    println!(
+        "Compiled events: {}, Ingested: {}, Doc ID: {}",
+        ctx.events.len(),
+        written,
+        doc_id
+    );
 
     let _ = std::fs::remove_file(DB);
     println!("\n========== COMPLETE ==========");

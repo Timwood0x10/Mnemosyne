@@ -87,7 +87,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
         norm_a += ai * ai;
         norm_b += bi * bi;
     }
-    let denom = (norm_a.sqrt() * norm_b.sqrt());
+    let denom = norm_a.sqrt() * norm_b.sqrt();
     if denom < 1e-12 {
         0.0
     } else {

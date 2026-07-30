@@ -21,7 +21,13 @@ async fn fengshen_main_story() {
     ctx.document_title = "封神演义".into();
 
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
+    profile::extract_profiles(
+        &doc.text,
+        &mut ctx,
+        Some(&dict),
+        &[],
+        &lore_scope::language::ChineseLanguageProvider::new(),
+    );
 
     // Build EntityResolver from discovered entities
     let mut entity_resolver = EntityResolver::new(AliasResolver::empty());

@@ -24,16 +24,23 @@ async fn fengshen_mcp_query() {
     ctx.document_title = "封神演义".into();
 
     let mut registry = EntityRegistry::new();
-    let provider = Arc::new(
-        JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap(),
-    );
+    let provider =
+        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());
     let obs_config = provider.observation_config();
     registry.register(provider.clone());
     let mut dict = registry.build_dictionary();
 
-    profile::extract_profiles(&doc.text, &mut ctx, Some(&dict), &[], &lore_scope::language::ChineseLanguageProvider::new());
+    profile::extract_profiles(
+        &doc.text,
+        &mut ctx,
+        Some(&dict),
+        &[],
+        &lore_scope::language::ChineseLanguageProvider::new(),
+    );
     for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx.profiles.iter()
+        let aliases: Vec<&str> = ctx
+            .profiles
+            .iter()
             .filter(|p| p.entity_id == entity.id)
             .filter(|p| p.key == "courtesy_name" || p.key == "title")
             .map(|p| p.value.as_str())
@@ -41,7 +48,9 @@ async fn fengshen_mcp_query() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict.alias_to_canonical.iter()
+    let alias_pairs: Vec<(String, i64)> = dict
+        .alias_to_canonical
+        .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
     let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
@@ -54,16 +63,24 @@ async fn fengshen_mcp_query() {
         action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
         ..extract::Config::default()
     };
-    extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&entity_resolver));
+    extract::compile(
+        &mut ctx,
+        &sent_texts,
+        &dict,
+        &config,
+        Some(&entity_resolver),
+    );
 
     // 2. Ingest into MCP store
     // First create the document object — doc_id refers to itself
     let doc_obj = KnowledgeObject {
-        id: 1, doc_id: 1,
+        id: 1,
+        doc_id: 1,
         object_type: ObjectType::Concept,
         name: "封神演义".into(),
         properties: serde_json::json!({"source": "corpus/封神演义.txt"}),
-        confidence: 1.0, created_at: 0,
+        confidence: 1.0,
+        created_at: 0,
     };
     let doc_id = k.create_object(&doc_obj).await.unwrap();
 
@@ -74,7 +91,8 @@ async fn fengshen_mcp_query() {
             continue;
         }
         let obj = KnowledgeObject {
-            id: 0, doc_id,
+            id: 0,
+            doc_id,
             object_type: ObjectType::Event,
             name: title.to_string(),
             properties: serde_json::json!({
@@ -98,8 +116,16 @@ async fn fengshen_mcp_query() {
 
             println!("Events:");
             for ev in &r.events {
-                let ch = ev.properties.get("chapter").and_then(|v| v.as_i64()).unwrap_or(0);
-                println!("  Ch.{}  {}", ch, ev.name.chars().take(80).collect::<String>());
+                let ch = ev
+                    .properties
+                    .get("chapter")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                println!(
+                    "  Ch.{}  {}",
+                    ch,
+                    ev.name.chars().take(80).collect::<String>()
+                );
             }
 
             println!("\nEvidence:");

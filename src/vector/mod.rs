@@ -17,6 +17,7 @@ mod builder;
 mod hnsw;
 
 pub use brute_force::BruteForceIndex;
+pub use builder::VectorBuilder;
 pub use hnsw::HnswIndex;
 
 use crate::error::Error;
