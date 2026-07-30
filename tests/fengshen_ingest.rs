@@ -63,15 +63,25 @@ async fn fengshen_ingest() {
     );
 
     // 2. Write to MCP store
-    let db_path = "/tmp/fengshen_temp.db";
-    let _ = std::fs::remove_file(db_path);
-    let k = Arc::new(SQLiteKnowledgeStore::open(db_path).await.unwrap());
+    let k = Arc::new(SQLiteKnowledgeStore::open_in_memory().await.unwrap());
 
-    // Create doc
+    // Create document first (required by FK constraint on knowledge_objects)
+    let doc = k
+        .create_document(&lore_scope::knowledge::Document {
+            id: 0,
+            title: "封神演义".into(),
+            author: None,
+            doc_type: Some("novel".into()),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+
+    // Create doc concept object referencing the document
     let doc_id = k
         .create_object(&lore_scope::knowledge::KnowledgeObject {
             id: 0,
-            doc_id: 0,
+            doc_id: doc,
             object_type: lore_scope::knowledge::ObjectType::Concept,
             name: "封神演义".into(),
             properties: serde_json::json!({"source": "corpus/封神演义.txt"}),
@@ -150,14 +160,8 @@ async fn fengshen_ingest() {
     }
 
     println!("\n━━━ 统计 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
-    println!(
-        "  实体: {}, 事件: {}, DB: {}",
-        ctx.entities.len(),
-        ctx.events.len(),
-        db_path
-    );
+    println!("  实体: {}, 事件: {}", ctx.entities.len(), ctx.events.len(),);
 
     assert!(ctx.events.len() > 50);
-    _ = std::fs::remove_file(db_path);
     println!("\n========== COMPLETE ==========");
 }

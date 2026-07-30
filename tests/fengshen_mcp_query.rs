@@ -19,6 +19,19 @@ async fn fengshen_mcp_query() {
 
     // 1. Compile
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
+
+    // Create document first (required by FK constraint on knowledge_objects)
+    let doc_row = k
+        .create_document(&lore_scope::knowledge::Document {
+            id: 0,
+            title: "封神演义".into(),
+            author: None,
+            doc_type: Some("novel".into()),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
+
     let mut ctx = CompileContext {
         document_title: "封神演义".into(),
         ..Default::default()
@@ -73,18 +86,6 @@ async fn fengshen_mcp_query() {
     );
 
     // 2. Ingest into MCP store
-    // First create the document object — doc_id refers to itself
-    let doc_obj = KnowledgeObject {
-        id: 1,
-        doc_id: 1,
-        object_type: ObjectType::Concept,
-        name: "封神演义".into(),
-        properties: serde_json::json!({"source": "corpus/封神演义.txt"}),
-        confidence: 1.0,
-        created_at: 0,
-    };
-    let doc_id = k.create_object(&doc_obj).await.unwrap();
-
     // Create event objects referencing the doc_id
     for ev in &ctx.events {
         let title = &ev.title;
@@ -93,7 +94,7 @@ async fn fengshen_mcp_query() {
         }
         let obj = KnowledgeObject {
             id: 0,
-            doc_id,
+            doc_id: doc_row,
             object_type: ObjectType::Event,
             name: title.to_string(),
             properties: serde_json::json!({
@@ -141,7 +142,7 @@ async fn fengshen_mcp_query() {
     println!("\n━━━ Stats ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     // Count objects by type
     let kongxuan = k.find_object_by_name("孔宣", None).await.unwrap();
-    println!("Total objects: {}, doc_id: {}", ctx.events.len(), doc_id);
+    println!("Total events: {}, doc_id: {}", ctx.events.len(), doc_row);
     println!("孔宣: {:?}", kongxuan.map(|o| o.name));
 
     // Cleanup

@@ -10,37 +10,22 @@ use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 use lore_scope::knowledge::{KnowledgeObject, KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
 
-const DB: &str = "/tmp/fengshen_mcp.db";
-
-fn create_root_doc_safe(db_path: &str) -> rusqlite::Result<i64> {
-    let conn = rusqlite::Connection::open(db_path)?;
-    // Table already exists (created by SQLiteKnowledgeStore::open)
-    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
-    conn.execute(
-        "INSERT INTO knowledge_objects (doc_id, object_type, name, properties, confidence, created_at)
-         VALUES (1, 'concept', '封神演义', '{}', 1.0, 0)",
-        [],
-    )?;
-    let id = conn.last_insert_rowid();
-    conn.execute(
-        "UPDATE knowledge_objects SET doc_id = ?1 WHERE id = ?1",
-        [id],
-    )?;
-    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-    Ok(id)
-}
-
 #[tokio::test]
 async fn fengshen_fk() {
-    let _ = std::fs::remove_file(DB);
+    // Use in-memory store to avoid /tmp file-system race conditions
+    let k = Arc::new(SQLiteKnowledgeStore::open_in_memory().await.unwrap());
 
-    // Step 1: Open store FIRST to create tables
-    let k_init = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
-    drop(k_init); // close, DB persists with tables created
-
-    // Step 2: Insert root doc with raw SQL (FK bypass for bootstrap)
-    let doc_id = create_root_doc_safe(DB).unwrap();
-    let k = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
+    // Create document first (required by FK constraint on knowledge_objects)
+    let doc_id = k
+        .create_document(&lore_scope::knowledge::Document {
+            id: 0,
+            title: "封神演义".into(),
+            author: None,
+            doc_type: Some("novel".into()),
+            created_at: 0,
+        })
+        .await
+        .unwrap();
 
     // 1. Compile
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
@@ -152,6 +137,5 @@ async fn fengshen_fk() {
         doc_id
     );
 
-    let _ = std::fs::remove_file(DB);
     println!("\n========== COMPLETE ==========");
 }

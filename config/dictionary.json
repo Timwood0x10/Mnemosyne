@@ -1,78 +1,1000 @@
 {
-  "english_stop_names": [
-    "I", "me", "my", "mine", "myself", "you", "your", "yours", "yourself",
-    "he", "him", "his", "himself", "she", "her", "hers", "herself",
-    "it", "its", "itself", "we", "us", "our", "ours", "ourselves",
-    "they", "them", "their", "theirs", "themselves", "who", "whom", "whose",
-    "this", "that", "these", "those",
-    "Well", "Yes", "No", "Indeed", "Surely", "Certainly", "Absolutely", "Perhaps", "Maybe",
-    "Oh", "Ah", "Alas", "Why",
-    "The", "A", "An", "Another", "Some", "Any", "Every", "Each", "All", "Both", "Few", "Many", "Several",
-    "For", "To", "In", "On", "At", "By", "With", "From", "Of", "About", "Into", "Through",
-    "During", "Before", "After", "Above", "Below", "Between",
-    "And", "But", "Or", "Nor", "Yet", "So", "Because",
-    "Do", "Does", "Did", "Will", "Would", "Can", "Could", "Shall", "Should", "May", "Might", "Must",
-    "Have", "Has", "Had", "Be", "Am", "Is", "Are", "Was", "Were", "Been", "Being",
-    "Say", "Says", "Said", "Know", "Knows", "Knew", "Think", "Thinks", "Thought",
-    "Go", "Goes", "Went", "Come", "Came", "Take", "Takes", "Took", "Make", "Makes", "Made",
-    "See", "Sees", "Saw", "Look", "Looks", "Looked", "Tell", "Tells", "Told"
+  "_meta": {
+    "version": 1,
+    "description": "LoreScope Elite Lexicon — core word lists",
+    "license": "Apache-2.0",
+    "generated_from": "corpus frequency analysis (9 texts)"
+  },
+
+  "lexemes": [
+    {
+      "id": "en.action.speech.said",
+      "language": "en", "lemma": "say", "forms": ["says", "said", "saying"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 900,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.asked",
+      "language": "en", "lemma": "ask", "forms": ["asks", "asked", "asking"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.replied",
+      "language": "en", "lemma": "reply", "forms": ["replies", "replied", "replying"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.exclaimed",
+      "language": "en", "lemma": "exclaim", "forms": ["exclaims", "exclaimed", "exclaiming"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.shouted",
+      "language": "en", "lemma": "shout", "forms": ["shouts", "shouted", "shouting"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.whispered",
+      "language": "en", "lemma": "whisper", "forms": ["whispers", "whispered", "whispering"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.called",
+      "language": "en", "lemma": "call", "forms": ["calls", "called", "calling"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.cried",
+      "language": "en", "lemma": "cry", "forms": ["cries", "cried", "crying"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}, {"type": "modifier", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.speech.answered",
+      "language": "en", "lemma": "answer", "forms": ["answers", "answered", "answering"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.entered",
+      "language": "en", "lemma": "enter", "forms": ["enters", "entered", "entering"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.turned",
+      "language": "en", "lemma": "turn", "forms": ["turns", "turned", "turning"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.returned",
+      "language": "en", "lemma": "return", "forms": ["returns", "returned", "returning"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.rode",
+      "language": "en", "lemma": "ride", "forms": ["rides", "rode", "ridden", "riding"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.went",
+      "language": "en", "lemma": "go", "forms": ["goes", "went", "gone", "going"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.came",
+      "language": "en", "lemma": "come", "forms": ["comes", "came", "come", "coming"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.left",
+      "language": "en", "lemma": "leave", "forms": ["leaves", "left", "leaving"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.movement.rose",
+      "language": "en", "lemma": "rise", "forms": ["rises", "rose", "risen", "rising"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.killed",
+      "language": "en", "lemma": "kill", "forms": ["kills", "killed", "killing"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 900,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.captured",
+      "language": "en", "lemma": "capture", "forms": ["captures", "captured", "capturing"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.fought",
+      "language": "en", "lemma": "fight", "forms": ["fights", "fought", "fighting"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.defeated",
+      "language": "en", "lemma": "defeat", "forms": ["defeats", "defeated", "defeating"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.fled",
+      "language": "en", "lemma": "flee", "forms": ["flees", "fled", "fleeing"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.died",
+      "language": "en", "lemma": "die", "forms": ["dies", "died", "dying"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.attacked",
+      "language": "en", "lemma": "attack", "forms": ["attacks", "attacked", "attacking"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.attack.struck",
+      "language": "en", "lemma": "strike", "forms": ["strikes", "struck", "striking", "stricken"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.rescue.saved",
+      "language": "en", "lemma": "save", "forms": ["saves", "saved", "saving"],
+      "pos": "verb", "semantic_class": "rescue",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.rescue.rescued",
+      "language": "en", "lemma": "rescue", "forms": ["rescues", "rescued", "rescuing"],
+      "pos": "verb", "semantic_class": "rescue",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.rescue.married",
+      "language": "en", "lemma": "marry", "forms": ["marries", "married", "marrying"],
+      "pos": "verb", "semantic_class": "rescue",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.rescue.embraced",
+      "language": "en", "lemma": "embrace", "forms": ["embraces", "embraced", "embracing"],
+      "pos": "verb", "semantic_class": "rescue",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.cognition.knew",
+      "language": "en", "lemma": "know", "forms": ["knows", "knew", "known", "knowing"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.cognition.thought",
+      "language": "en", "lemma": "think", "forms": ["thinks", "thought", "thinking"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.cognition.wished",
+      "language": "en", "lemma": "wish", "forms": ["wishes", "wished", "wishing"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.intention.wanted",
+      "language": "en", "lemma": "want", "forms": ["wants", "wanted", "wanting"],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.cognition.felt",
+      "language": "en", "lemma": "feel", "forms": ["feels", "felt", "feeling"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.emotion.laughed",
+      "language": "en", "lemma": "laugh", "forms": ["laughs", "laughed", "laughing"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.emotion.smiled",
+      "language": "en", "lemma": "smile", "forms": ["smiles", "smiled", "smiling"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.emotion.frowned",
+      "language": "en", "lemma": "frown", "forms": ["frowns", "frowned", "frowning"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.emotion.wept",
+      "language": "en", "lemma": "weep", "forms": ["weeps", "wept", "weeping"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.seemed",
+      "language": "en", "lemma": "seem", "forms": ["seems", "seemed", "seeming"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "modifier", "value": "uncertainty"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.took",
+      "language": "en", "lemma": "take", "forms": ["takes", "took", "taken", "taking"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.gave",
+      "language": "en", "lemma": "give", "forms": ["gives", "gave", "given", "giving"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.sat",
+      "language": "en", "lemma": "sit", "forms": ["sits", "sat", "sitting"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.stood",
+      "language": "en", "lemma": "stand", "forms": ["stands", "stood", "standing"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.looked",
+      "language": "en", "lemma": "look", "forms": ["looks", "looked", "looking"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.heard",
+      "language": "en", "lemma": "hear", "forms": ["hears", "heard", "hearing"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.began",
+      "language": "en", "lemma": "begin", "forms": ["begins", "began", "begun", "beginning"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.made",
+      "language": "en", "lemma": "make", "forms": ["makes", "made", "making"],
+      "pos": "verb", "semantic_class": "creation",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.found",
+      "language": "en", "lemma": "find", "forms": ["finds", "found", "finding"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.sent",
+      "language": "en", "lemma": "send", "forms": ["sends", "sent", "sending"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.told",
+      "language": "en", "lemma": "tell", "forms": ["tells", "told", "telling"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.action.state.spoke",
+      "language": "en", "lemma": "speak", "forms": ["speaks", "spoke", "spoken", "speaking"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+
+    {
+      "id": "zh.action.speech.yue",
+      "language": "zh", "lemma": "曰", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 900,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.shuo",
+      "language": "zh", "lemma": "说", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.dao",
+      "language": "zh", "lemma": "道", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.wen",
+      "language": "zh", "lemma": "问", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.da",
+      "language": "zh", "lemma": "答", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.jiao",
+      "language": "zh", "lemma": "叫", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.hu",
+      "language": "zh", "lemma": "呼", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.speech.yan",
+      "language": "zh", "lemma": "言", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.lai",
+      "language": "zh", "lemma": "来", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.qu",
+      "language": "zh", "lemma": "去", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.hui",
+      "language": "zh", "lemma": "回", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.xia",
+      "language": "zh", "lemma": "下", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.shang",
+      "language": "zh", "lemma": "上", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.ru",
+      "language": "zh", "lemma": "入", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.jin",
+      "language": "zh", "lemma": "进", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.zou",
+      "language": "zh", "lemma": "走", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.movement.chu",
+      "language": "zh", "lemma": "出", "forms": [],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.sha",
+      "language": "zh", "lemma": "杀", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 900,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.zhan",
+      "language": "zh", "lemma": "战", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.gong",
+      "language": "zh", "lemma": "攻", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.po",
+      "language": "zh", "lemma": "破", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.zhan2",
+      "language": "zh", "lemma": "斩", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 900,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.qin",
+      "language": "zh", "lemma": "擒", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.attack.da",
+      "language": "zh", "lemma": "打", "forms": [],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.rescue.jiu",
+      "language": "zh", "lemma": "救", "forms": [],
+      "pos": "verb", "semantic_class": "rescue",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.laugh",
+      "language": "zh", "lemma": "笑", "forms": [],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.ku",
+      "language": "zh", "lemma": "哭", "forms": [],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.nu",
+      "language": "zh", "lemma": "怒", "forms": [],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.xi",
+      "language": "zh", "lemma": "喜", "forms": [],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.jing",
+      "language": "zh", "lemma": "惊", "forms": [],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 600,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.bai",
+      "language": "zh", "lemma": "拜", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.feng",
+      "language": "zh", "lemma": "封", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.qu",
+      "language": "zh", "lemma": "取", "forms": [],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.cognition.jian",
+      "language": "zh", "lemma": "见", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.cognition.zhi",
+      "language": "zh", "lemma": "知", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.cognition.kan",
+      "language": "zh", "lemma": "看", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.cognition.wen2",
+      "language": "zh", "lemma": "闻", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.cognition.ting",
+      "language": "zh", "lemma": "听", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.cognition.wang",
+      "language": "zh", "lemma": "望", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.si",
+      "language": "zh", "lemma": "死", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.xiang",
+      "language": "zh", "lemma": "想", "forms": [],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.zuo",
+      "language": "zh", "lemma": "坐", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.state.li",
+      "language": "zh", "lemma": "立", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.transfer.ci",
+      "language": "zh", "lemma": "赐", "forms": [],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.action.transfer.shang",
+      "language": "zh", "lemma": "赏", "forms": [],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    }
   ],
-  "chinese_stop_names": [
-    "之", "其", "何", "谁", "哪", "这", "那",
-    "我", "你", "他", "她", "它", "我们", "你们", "他们",
-    "是", "在", "有", "为", "以", "不", "也", "都", "就", "又", "很",
-    "的", "了", "着", "过", "吗", "呢", "吧", "呀", "啊", "嘛",
-    "什么", "怎么", "为什么"
-  ],
-  "english_strong_verbs": [
-    "killed", "captured", "saved", "rescued", "fought", "defeated",
-    "fled", "died", "wounded", "struck", "attacked", "shot",
-    "destroyed", "escaped", "pursued", "surrendered", "betrayed",
-    "ordered", "commanded", "forced", "executed", "bound"
-  ],
-  "english_action_verbs": [
-    "said", "asked", "replied", "answered", "cried", "exclaimed",
-    "shouted", "whispered", "murmured", "called", "added",
-    "continued", "repeated", "began",
-    "entered", "turned", "returned", "rose", "rode", "went",
-    "came", "left", "ran", "walked", "moved", "followed",
-    "sat", "stood", "knelt", "lay",
-    "looked", "saw", "watched", "heard", "felt", "seemed",
-    "smiled", "frowned", "laughed", "wept", "trembled", "blushed",
-    "thought", "knew", "wished", "wanted", "tried",
-    "took", "gave", "made", "held", "put", "brought", "sent",
-    "found", "told", "spoke"
-  ],
-  "english_hostile_verbs": [
-    "killed", "wounded", "attacked", "struck", "defeated",
-    "captured", "pursued", "executed", "betrayed", "destroyed",
-    "shot", "fled", "fought"
-  ],
-  "english_friendly_verbs": [
-    "saved", "rescued", "blessed", "rewarded", "pardoned",
-    "healed", "embraced", "married", "loved", "kissed"
-  ],
-  "chinese_strong_verbs": [
-    "杀", "战", "打", "攻", "破", "擒", "斩", "绑", "缚",
-    "死", "逃", "降", "败", "胜", "报", "取", "进", "入",
-    "领", "追", "赶", "逐", "奔", "驰"
-  ],
-  "chinese_action_verbs": [
-    "来", "去", "回", "出", "上", "下", "起", "到", "过",
-    "走", "行", "从", "随", "入", "出", "开", "分", "定",
-    "立", "坐", "住", "安", "作", "化", "合", "放", "举",
-    "曰", "言", "道", "说", "问", "答", "听", "闻", "知",
-    "见", "看", "望", "观", "请", "报", "传", "叫", "呼",
-    "笑", "哭", "怒", "喜", "惊", "急", "忙", "怕",
-    "想", "念", "知", "晓", "等", "待", "候", "吃", "饮",
-    "变", "化", "改"
-  ],
-  "chinese_hostile_verbs": [
-    "杀", "斩", "攻", "破", "擒", "绑", "缚", "打", "骂",
-    "刺", "射", "围", "追", "赶"
-  ],
-  "chinese_friendly_verbs": [
-    "救", "拜", "封", "赐", "赏", "赦", "嫁", "娶", "抚",
-    "助", "援"
-  ]
+
+  "stop_names": {
+    "en": [
+      "I", "me", "my", "mine", "myself", "you", "your", "yours", "yourself",
+      "he", "him", "his", "himself", "she", "her", "hers", "herself",
+      "it", "its", "itself", "we", "us", "our", "ours", "ourselves",
+      "they", "them", "their", "theirs", "themselves", "who", "whom", "whose",
+      "this", "that", "these", "those",
+      "Well", "Yes", "No", "Indeed", "Surely", "Certainly", "Absolutely", "Perhaps", "Maybe",
+      "Oh", "Ah", "Alas", "Why",
+      "The", "A", "An", "Another", "Some", "Any", "Every", "Each", "All", "Both", "Few", "Many", "Several",
+      "For", "To", "In", "On", "At", "By", "With", "From", "Of", "About", "Into", "Through",
+      "During", "Before", "After", "Above", "Below", "Between",
+      "And", "But", "Or", "Nor", "Yet", "So", "Because",
+      "Do", "Does", "Did", "Will", "Would", "Can", "Could", "Shall", "Should", "May", "Might", "Must",
+      "Have", "Has", "Had", "Be", "Am", "Is", "Are", "Was", "Were", "Been", "Being",
+      "Say", "Says", "Said", "Know", "Knows", "Knew", "Think", "Thinks", "Thought",
+      "Go", "Goes", "Went", "Come", "Came", "Take", "Takes", "Took", "Make", "Makes", "Made",
+      "See", "Sees", "Saw", "Look", "Looks", "Looked", "Tell", "Tells", "Told"
+    ],
+    "zh": [
+      "之", "其", "何", "谁", "哪", "这", "那",
+      "我", "你", "他", "她", "它", "我们", "你们", "他们",
+      "是", "在", "有", "为", "以", "不", "也", "都", "就", "又", "很",
+      "的", "了", "着", "过", "吗", "呢", "吧", "呀", "啊", "嘛",
+      "什么", "怎么", "为什么"
+    ]
+  }
 }
