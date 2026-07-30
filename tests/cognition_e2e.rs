@@ -1,9 +1,7 @@
 //! End-to-end integration test: 三国演义 Observation → Fact → Snapshot → Context.
 //! Run: cargo test --test cognition_e2e full_pipeline -- --nocapture
 
-use lore_scope::cognition::{
-    FactStore, Rule, StateEngine, build_context, build_snapshot,
-};
+use lore_scope::cognition::{FactStore, Rule, StateEngine, build_context, build_snapshot};
 use lore_scope::fact_store::SqliteFactStore;
 use lore_scope::language::{ChineseLanguageProvider, LanguageProvider};
 use lore_scope::observation_compiler::{DefaultRule, compile_observations};

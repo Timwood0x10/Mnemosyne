@@ -106,27 +106,19 @@ fn find_subject(
     pos: usize,
     resolve: &dyn Fn(&str) -> Option<Mention>,
 ) -> Option<Mention> {
-    // Try sliding windows of 2-6 chars before the position
-    // Use char_indices to avoid UTF-8 byte boundary issues
-    let char_offset = text[..pos].chars().count();
-    let start_char = char_offset.saturating_sub(4);
-    let before: String = text
-        .chars()
-        .skip(start_char)
-        .take(char_offset - start_char)
-        .collect();
-    for len in (2..=6).rev() {
-        if len > before.chars().count() {
+    let before: Vec<char> = text[..pos].chars().rev().take(64).collect();
+    let before: Vec<char> = before.into_iter().rev().collect();
+    for len in 1..=before.len() {
+        let candidate: String = before[before.len() - len..]
+            .iter()
+            .collect::<String>()
+            .trim_matches(|character: char| {
+                character.is_whitespace() || character.is_ascii_punctuation()
+            })
+            .to_string();
+        if candidate.is_empty() {
             continue;
         }
-        let candidate: String = before
-            .chars()
-            .rev()
-            .take(len)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
         if let Some(mention) = resolve(&candidate) {
             return Some(mention);
         }
@@ -140,12 +132,18 @@ fn find_object(
     start: usize,
     resolve: &dyn Fn(&str) -> Option<Mention>,
 ) -> Option<Mention> {
-    let after = &text[start..];
-    for len in (2..=6).rev() {
-        if len > after.chars().count() {
+    let after: Vec<char> = text[start..].chars().take(64).collect();
+    for len in 1..=after.len() {
+        let candidate: String = after[..len]
+            .iter()
+            .collect::<String>()
+            .trim_matches(|character: char| {
+                character.is_whitespace() || character.is_ascii_punctuation()
+            })
+            .to_string();
+        if candidate.is_empty() {
             continue;
         }
-        let candidate: String = after.chars().take(len).collect();
         if let Some(mention) = resolve(&candidate) {
             return Some(mention);
         }
@@ -196,5 +194,73 @@ impl Rule for DefaultRule {
             evidence_id: None,
             created_at: 0,
         }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn resolver(text: &str) -> Option<Mention> {
+        [(1, "Anna"), (2, "Vronsky"), (3, "刘备"), (4, "诸葛亮")]
+            .into_iter()
+            .find(|(_, name)| text.contains(name))
+            .map(|(entity_id, name)| Mention {
+                entity_id: Some(entity_id),
+                surface: name.to_string(),
+                canonical_name: name.to_string(),
+            })
+    }
+
+    /// Objective: Verify long English mentions survive the universal IR path.
+    /// Invariants: Subject and object resolve on opposite sides of the verb.
+    #[test]
+    fn compiles_english_subject_and_object_without_cjk_length_limits() {
+        let observations =
+            compile_observations(&["Anna loved Vronsky"], &["loved".to_string()], &resolver);
+
+        assert_eq!(
+            observations.len(),
+            1,
+            "One transitive sentence should emit one observation"
+        );
+        assert_eq!(
+            observations[0].subject.canonical_name, "Anna",
+            "English subject should resolve before the action"
+        );
+        assert_eq!(
+            observations[0]
+                .object
+                .as_ref()
+                .map(|mention| mention.canonical_name.as_str()),
+            Some("Vronsky"),
+            "English object should resolve after the action"
+        );
+    }
+
+    /// Objective: Verify UTF-8 mention windows do not cross invalid boundaries.
+    /// Invariants: Chinese subject and object resolve without panic or truncation.
+    #[test]
+    fn compiles_chinese_subject_and_object_on_character_boundaries() {
+        let observations =
+            compile_observations(&["刘备拜访诸葛亮"], &["拜访".to_string()], &resolver);
+
+        assert_eq!(
+            observations.len(),
+            1,
+            "One Chinese action should emit one observation"
+        );
+        assert_eq!(
+            observations[0].subject.canonical_name, "刘备",
+            "Chinese subject should remain intact"
+        );
+        assert_eq!(
+            observations[0]
+                .object
+                .as_ref()
+                .map(|mention| mention.canonical_name.as_str()),
+            Some("诸葛亮"),
+            "Chinese object should remain intact"
+        );
     }
 }

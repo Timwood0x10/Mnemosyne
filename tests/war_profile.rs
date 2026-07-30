@@ -29,7 +29,10 @@ async fn war_profile() {
 
     // Phase 2: Build registry + dict
     let t2_start = Instant::now();
-    let mut ctx = CompileContext { document_title: "War and Peace".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "War and Peace".into(),
+        ..Default::default()
+    };
     let mut registry = EntityRegistry::new();
     let provider =
         Arc::new(JsonEntityProvider::from_file("config/entity_profiles/warandpeace.json").unwrap());

@@ -18,7 +18,10 @@ async fn fengshen_full() {
     // 1. Compile 封神演义
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
     let text = &doc.text;
-    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "封神演义".into(),
+        ..Default::default()
+    };
     let mut registry = EntityRegistry::new();
     let provider =
         Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());

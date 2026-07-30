@@ -16,16 +16,19 @@ async fn war_peace() {
     let text = &doc.text;
     println!("Text: {} chars\n", text.len());
 
-    let mut ctx = CompileContext { document_title: "War and Peace".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "War and Peace".into(),
+        ..Default::default()
+    };
 
-    // Try with empty dict — English text won't match Chinese patterns
+    // Compile profiles with the English language frontend.
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(
         text,
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &lore_scope::language::EnglishLanguageProvider::new(),
     );
 
     for entity in &ctx.entities {
@@ -98,5 +101,18 @@ async fn war_peace() {
         }
     }
 
-    println!("\n========== COMPLETE ==========");
+    assert!(
+        sent_texts.len() > 10_000,
+        "Full War and Peace regression should compile a substantial English corpus"
+    );
+    assert!(
+        !ctx.entities.is_empty(),
+        "English title discovery should produce at least one entity"
+    );
+    assert!(
+        ctx.entities
+            .iter()
+            .all(|entity| entity.name.chars().any(char::is_alphabetic)),
+        "Discovered English entities should contain alphabetic names"
+    );
 }

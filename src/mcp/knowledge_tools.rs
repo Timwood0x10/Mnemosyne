@@ -17,6 +17,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::error::Error;
+use crate::fact_store::SqliteFactStore;
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::{KnowledgeEdge, SQLiteKnowledgeStore};
 use crate::mcp::server::ServerBuilder;
@@ -224,13 +225,16 @@ impl ToolHandler for CorrectRelationHandler {
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
-/// Register the four general-knowledge MCP tools on `builder`.
+/// Register the general-knowledge MCP tools on `builder`.
 ///
+/// `fact_store` provides durable fact reads for cognition snapshots, sharing
+/// the same SQLite database written by the compilation pipeline.
 /// Each tool wraps a [`KnowledgeStore`] method and speaks JSON-RPC 2.0 over
 /// the existing [`ServerBuilder`] infrastructure.
 pub async fn register_knowledge_tools(
     builder: ServerBuilder,
     store: Arc<SQLiteKnowledgeStore>,
+    fact_store: Arc<SqliteFactStore>,
 ) -> ServerBuilder {
     let kstore = store;
     builder
@@ -331,7 +335,10 @@ pub async fn register_knowledge_tools(
                     "required": ["name"]
                 }),
             },
-            Arc::new(CognitiveContextHandler { store: kstore }),
+            Arc::new(CognitiveContextHandler {
+                store: kstore,
+                fact_store,
+            }),
         )
         .await
 }
@@ -342,41 +349,36 @@ pub async fn register_knowledge_tools(
 /// pipeline: Facts → StateEngine → Snapshot → CognitiveContext.
 struct CognitiveContextHandler {
     store: Arc<SQLiteKnowledgeStore>,
+    fact_store: Arc<SqliteFactStore>,
 }
 
 #[async_trait::async_trait]
 impl ToolHandler for CognitiveContextHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
         use crate::cognition::{FactStore as CognitionFactStore, StateEngine, build_snapshot};
-        use crate::fact_store::SqliteFactStore;
 
         let name = req_str(args, "name")?;
         let store = &self.store;
 
-        // 1. Resolve entity via the knowledge store
-        let object = store
-            .find_object_by_name(&name, None)
-            .await?
-            .ok_or_else(|| Error::NotFound(format!("entity `{name}` not found")))?;
+        // 1. Resolve persisted knowledge entities. The local User root is a
+        // first-class cognition entity even before it has a legacy object row.
+        let (entity_id, entity_name, entity_type) = if name.eq_ignore_ascii_case("user") {
+            (1, "User".to_string(), "User".to_string())
+        } else {
+            let object = store
+                .find_object_by_name(&name, None)
+                .await?
+                .ok_or_else(|| Error::NotFound(format!("entity `{name}` not found")))?;
+            (object.id, object.name, format!("{:?}", object.object_type))
+        };
 
-        // 2. Open a FactStore (reusing the same DB path, or in-memory)
-        let db_path = std::env::temp_dir().join("cognition_facts.db");
-        let db_str = db_path.to_str().unwrap_or("/tmp/cognition_facts.db");
-        let fact_store = SqliteFactStore::open(db_str)
-            .map_err(|e| Error::Config(format!("failed to open fact store: {e}")))?;
-
-        // 3. Query facts for this entity
-        let facts = fact_store.get_facts(object.id);
+        // 2. Read Facts from the same SQLite database as the knowledge store.
+        // This keeps entity resolution and cognition state on one durable path.
+        let facts = self.fact_store.get_facts(entity_id);
 
         // 4. Build snapshot
         let state_engine = StateEngine::new();
-        let snapshot = build_snapshot(
-            object.id,
-            object.name.clone(),
-            format!("{:?}", object.object_type),
-            facts,
-            &state_engine,
-        );
+        let snapshot = build_snapshot(entity_id, entity_name, entity_type, facts, &state_engine);
 
         // 5. Return as JSON
         let json = snapshot.format_json();

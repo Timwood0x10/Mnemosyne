@@ -15,11 +15,13 @@ use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
 use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
+use lore_scope::cognition::FactStore;
 use lore_scope::config::{CliArgs, Command, EmbeddingProvider};
-use lore_scope::conversation_compiler::ConversationCompiler;
+use lore_scope::conversation_compiler::{ConversationCompiler, compile_user_facts};
 use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 use lore_scope::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
 use lore_scope::error::Error;
+use lore_scope::fact_store::SqliteFactStore;
 use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::register_knowledge_tools;
@@ -250,6 +252,7 @@ fn build_retrieval_engine(
 /// Optionally distills and builds a reconstruction prompt.
 struct MemoryCompileTool {
     distiller: Option<Arc<PipelineDistiller>>,
+    fact_store: Arc<SqliteFactStore>,
 }
 
 #[async_trait::async_trait]
@@ -267,6 +270,13 @@ impl ToolHandler for MemoryCompileTool {
             .unwrap_or("default");
         let compiler = ConversationCompiler::new();
         let compiled = compiler.compile(tenant_id, &messages);
+
+        // Compile the same user input through the unified Observation → Fact
+        // path. Entity id 1 is the stable local User root until identity
+        // resolution assigns per-user ids.
+        let logical_time = chrono::Utc::now().timestamp() as i32;
+        let user_facts = compile_user_facts(&messages, 1, logical_time);
+        let stored_facts = self.fact_store.insert_batch(&user_facts);
 
         // Build reconstruction prompt
         let builder = PromptBuilder;
@@ -343,6 +353,11 @@ impl ToolHandler for MemoryCompileTool {
             "decisions": compiled.decisions,
             "session": compiled.session,
             "prompt": prompt,
+            "cognition": {
+                "user_entity_id": 1,
+                "facts_compiled": user_facts.len(),
+                "facts_stored": stored_facts,
+            },
             "distilled_memories": memories,
         });
         Ok(ToolCallResult::text(payload.to_string()))
@@ -793,6 +808,10 @@ async fn build_server(
             },
             Arc::new(MemoryCompileTool {
                 distiller: Some(distiller.clone()),
+                fact_store: Arc::new(
+                    SqliteFactStore::open(&cfg.db_path)
+                        .expect("open fact store for compile tool"),
+                ),
             }),
         )
         .await;
@@ -906,7 +925,10 @@ async fn build_server(
             .await
             .context("open knowledge store")?,
     );
-    builder = register_knowledge_tools(builder, kstore).await;
+    let fact_store_knowledge = Arc::new(
+        SqliteFactStore::open(&cfg.db_path).context("open fact store for knowledge tools")?,
+    );
+    builder = register_knowledge_tools(builder, kstore, fact_store_knowledge).await;
 
     Ok((builder.build(), distiller, engine))
 }

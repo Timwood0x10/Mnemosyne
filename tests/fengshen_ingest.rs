@@ -18,7 +18,10 @@ async fn fengshen_ingest() {
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
     let text = &doc.text;
 
-    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "封神演义".into(),
+        ..Default::default()
+    };
 
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(

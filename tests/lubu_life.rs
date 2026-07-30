@@ -19,7 +19,10 @@ async fn lubu_life() {
     let doc = Document::from_file("corpus/三国演义.txt").unwrap();
     let text = &doc.text;
 
-    let mut ctx = CompileContext { document_title: "Romance of Three Kingdoms".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "Romance of Three Kingdoms".into(),
+        ..Default::default()
+    };
 
     let mut registry = EntityRegistry::new();
     let provider =

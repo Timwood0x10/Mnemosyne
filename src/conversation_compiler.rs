@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 
 use crate::classifier::MemoryClassifier;
-use crate::cognition::{Fact, FactType};
+use crate::cognition::{Fact, FactType, Mention, Observation, Rule};
 use crate::extractor::{ExperienceExtractor, ExtractorConfig};
 use crate::filter::NoiseFilter;
+use crate::observation_compiler::DefaultRule;
 use crate::scorer::ImportanceScorer;
 use crate::types::{
     CompiledConversation, Decision, Memory, MemoryType, Message, ReasoningStep, SessionState,
@@ -266,6 +267,91 @@ impl Default for ConversationCompiler {
     }
 }
 
+/// Compile user-authored messages through the unified Observation IR.
+///
+/// The legacy conversation result remains unchanged; these observations are an
+/// additive event-sourced view used by the cognition store.
+pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> Vec<Observation> {
+    let subject = Mention {
+        entity_id: Some(user_entity_id),
+        surface: "User".to_string(),
+        canonical_name: "User".to_string(),
+    };
+    let actions = [
+        ("喜欢", "喜欢"),
+        ("偏好", "喜欢"),
+        ("love", "love"),
+        ("like", "like"),
+        ("准备", "准备"),
+        ("打算", "打算"),
+        ("计划", "plan"),
+        ("want", "want"),
+        ("压力", "feel"),
+        ("焦虑", "feel"),
+        ("stress", "feel"),
+        ("tired", "feel"),
+    ];
+
+    messages
+        .iter()
+        .filter(|message| message.is_user())
+        .flat_map(|message| {
+            let subject = subject.clone();
+            actions.iter().filter_map(move |(marker, action)| {
+                message.content.find(marker).map(|offset| Observation {
+                    subject: subject.clone(),
+                    action: (*action).to_string(),
+                    object: None,
+                    modifiers: vec![crate::cognition::Modifier {
+                        key: "content".to_string(),
+                        value: message.content.clone(),
+                    }],
+                    timestamp: None,
+                    evidence: Some(crate::cognition::EvidenceRef {
+                        doc_id: 0,
+                        offset,
+                        length: marker.len(),
+                        text: message.content.clone(),
+                    }),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Convert unified user observations into immutable facts.
+pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i32) -> Vec<Fact> {
+    let rule = DefaultRule;
+    compile_user_observations(messages, user_entity_id)
+        .iter()
+        .flat_map(|observation| {
+            let mut facts = rule.apply(observation);
+            for fact in &mut facts {
+                fact.time = time;
+                fact.created_at = i64::from(time);
+                if let Some(content) = observation
+                    .modifiers
+                    .iter()
+                    .find(|modifier| modifier.key == "content")
+                {
+                    fact.payload["content"] = serde_json::Value::String(content.value.clone());
+                }
+                // Propagate observation evidence into the fact payload so
+                // provenance (source message offset, length, text) is not lost.
+                if let Some(ref ev) = observation.evidence {
+                    fact.payload["evidence"] = serde_json::json!({
+                        "doc_id": ev.doc_id,
+                        "offset": ev.offset,
+                        "length": ev.length,
+                        "text": ev.text,
+                    });
+                }
+            }
+            facts
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -334,8 +420,73 @@ mod tests {
             Message::new("user", "为什么慢？"),
             Message::new("assistant", "因为lancedb太重"),
         ];
-        let r = compiler.compile("t1", &msgs);
-        assert!(r.knowledge.len() <= 1);
+        let result = compiler.compile("t1", &msgs);
+        assert!(
+            result.knowledge.len() <= 1,
+            "Equivalent knowledge should be emitted at most once"
+        );
+    }
+
+    /// Objective: Verify conversation input crosses the unified Observation IR.
+    /// Invariants: Assistant text is ignored and user goals retain source evidence.
+    #[test]
+    fn user_observations_only_compile_user_authored_cognition() {
+        let messages = vec![
+            Message::new("user", "我准备找一份 Rust 工作"),
+            Message::new("assistant", "我喜欢 Go"),
+        ];
+
+        let observations = compile_user_observations(&messages, 42);
+
+        assert_eq!(
+            observations.len(),
+            1,
+            "Only the user's goal should become an observation"
+        );
+        assert_eq!(
+            observations[0].subject.entity_id,
+            Some(42),
+            "Observation should target the configured User entity"
+        );
+        assert_eq!(
+            observations[0].action, "准备",
+            "The goal marker should retain its semantic action"
+        );
+        assert!(
+            observations[0].evidence.is_some(),
+            "Every conversation observation should retain source evidence"
+        );
+    }
+
+    /// Objective: Verify user observations become typed immutable facts.
+    /// Invariants: Goal and emotion facts share the User id and supplied logical time.
+    #[test]
+    fn user_facts_preserve_type_entity_and_time() {
+        let messages = vec![Message::new("user", "我计划学 Rust，但最近压力很大")];
+
+        let facts = compile_user_facts(&messages, 99, 20260730);
+
+        assert_eq!(
+            facts.len(),
+            2,
+            "Both goal and emotion signals should produce facts"
+        );
+        assert!(
+            facts.iter().any(|fact| fact.fact_type == FactType::Goal),
+            "Plan signal should compile to a Goal fact"
+        );
+        assert!(
+            facts.iter().any(|fact| fact.fact_type == FactType::Emotion),
+            "Stress signal should compile to an Emotion fact"
+        );
+        assert!(
+            facts.iter().all(|fact| fact.entity_id == 99),
+            "All facts should belong to the configured User entity"
+        );
+        assert!(
+            facts.iter().all(|fact| fact.time == 20260730),
+            "All facts should retain the supplied logical time"
+        );
     }
 }
 

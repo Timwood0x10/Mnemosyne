@@ -19,7 +19,10 @@ async fn fengshen_mcp_query() {
 
     // 1. Compile
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
-    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "封神演义".into(),
+        ..Default::default()
+    };
 
     let mut registry = EntityRegistry::new();
     let provider =

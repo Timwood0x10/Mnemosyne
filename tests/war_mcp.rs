@@ -23,7 +23,10 @@ async fn war_mcp() {
     let text = &doc.text;
     println!("Text: {} chars\n", text.len());
 
-    let mut ctx = CompileContext { document_title: "War and Peace".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "War and Peace".into(),
+        ..Default::default()
+    };
 
     let mut registry = EntityRegistry::new();
     let provider =

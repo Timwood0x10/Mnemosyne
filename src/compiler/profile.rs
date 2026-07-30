@@ -132,7 +132,38 @@ pub fn extract_profiles(
             }
         }
 
-        // Pattern source 2: hardcoded Chinese defaults
+        // Pattern source 2: language frontend definitions.
+        for definition in lang.profile_patterns() {
+            if line.contains(definition.pattern) {
+                let value = if definition.key == "title" {
+                    Some(definition.pattern.to_string())
+                } else {
+                    match definition.mode {
+                        "After" => extract_after(line, definition.pattern),
+                        "Before" => extract_before(line, definition.pattern),
+                        "Between" => definition
+                            .suffix
+                            .and_then(|suffix| extract_between(line, definition.pattern, suffix)),
+                        "Until" => definition
+                            .suffix
+                            .and_then(|stop| extract_until(line, definition.pattern, stop)),
+                        "BeforeWithFallback" => {
+                            extract_before(line, definition.pattern).or_else(|| {
+                                definition
+                                    .suffix
+                                    .and_then(|fallback| extract_before(line, fallback))
+                            })
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(value) = value {
+                    profiles.push((definition.key, value));
+                }
+            }
+        }
+
+        // Pattern source 3: legacy defaults retained for Chinese compatibility.
         for &(pattern, key, ref mode) in DEFAULT_PROFILE_PATTERNS {
             if line.contains(pattern) {
                 let val = match mode {
@@ -265,6 +296,10 @@ fn find_entity_in_text(text: &str, dict: &EntityDictionary) -> Option<(String, O
 /// Chinese markers: "字", "者也", "身长", "面如", ...
 /// English markers: "Prince", "Count", "Mr.", ...
 fn discover_entity_name(line: &str, markers: &[&str]) -> Option<String> {
+    if let Some(name) = discover_english_title_name(line, markers) {
+        return Some(name);
+    }
+
     // Explicit noise words — function words that are never entity names.
     const NOISE: &[&str] = &[
         "不", "来", "一", "而", "有", "乃", "二", "后", "自", "可", "皆", "之", "以", "其", "此",
@@ -358,6 +393,39 @@ fn discover_entity_name(line: &str, markers: &[&str]) -> Option<String> {
             {
                 return Some(result);
             }
+        }
+    }
+    None
+}
+
+/// Discover an English personal name beginning with a configured title.
+fn discover_english_title_name(line: &str, markers: &[&str]) -> Option<String> {
+    for marker in markers {
+        let Some(position) = line.find(marker) else {
+            continue;
+        };
+        let after = &line[position..];
+        let words: Vec<&str> = after
+            .split_whitespace()
+            .take(4)
+            .take_while(|word| {
+                word.trim_matches(|character: char| !character.is_alphabetic())
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_uppercase)
+            })
+            .collect();
+        if words.len() < 2 {
+            continue;
+        }
+        let name = words
+            .into_iter()
+            .map(|word| word.trim_matches(|character: char| !character.is_alphabetic()))
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        if name.split_whitespace().count() >= 2 {
+            return Some(name);
         }
     }
     None
@@ -499,18 +567,40 @@ mod tests {
             &[],
             &crate::language::ChineseLanguageProvider::new(),
         );
-        // At minimum, the function should not panic and should find at least
-        // a profile pattern if the text contains one. If no profile pattern
-        // is present (just narrative), no entities/profiles are created.
-        // This is expected — the Profile Extractor only extracts from text
-        // that has recognizable profile patterns near entity names.
-        // Verify the alias resolution works: if entities exist, they use
-        // canonical names.
-        for e in &ctx.entities {
+        for entity in &ctx.entities {
             assert_ne!(
-                e.name, "玄德",
-                "entity names should be canonical, not aliases"
+                entity.name, "玄德",
+                "Entity names should be canonical rather than aliases"
             );
         }
+    }
+
+    /// Objective: Verify the English frontend discovers titled personal names.
+    /// Invariants: The entity retains title plus name and a title profile.
+    #[test]
+    fn english_title_discovers_person_entity() {
+        let mut context = CompileContext::default();
+        extract_profiles(
+            "Prince Andrei Bolkonsky was the son of Prince Nikolai Bolkonsky.",
+            &mut context,
+            None,
+            &[],
+            &crate::language::EnglishLanguageProvider::new(),
+        );
+
+        assert!(
+            context
+                .entities
+                .iter()
+                .any(|entity| entity.name == "Prince Andrei Bolkonsky"),
+            "English title discovery should preserve the titled personal name"
+        );
+        assert!(
+            context
+                .profiles
+                .iter()
+                .any(|profile| profile.key == "title" && profile.value == "Prince"),
+            "English title discovery should emit a title profile"
+        );
     }
 }

@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use lore_scope::compiler::document::Document;
 use lore_scope::compiler::CompileContext;
+use lore_scope::compiler::document::Document;
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 
@@ -15,7 +15,10 @@ async fn fengshen_main_story() {
     let doc = Document::from_file("corpus/封神演义.txt").expect("load 封神演义.txt");
     println!("全文: {} 字符\n", doc.text.len());
 
-    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
+    let mut ctx = CompileContext {
+        document_title: "封神演义".into(),
+        ..Default::default()
+    };
 
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(

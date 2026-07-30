@@ -177,41 +177,44 @@ impl StateEngine {
     }
 
     /// Aggregate all facts for an entity into a structured state.
+    ///
+    /// Built-in state is always available. Optional aggregators only extend the
+    /// result and therefore cannot accidentally make the core state empty.
     pub fn aggregate(&self, facts: &[Fact]) -> EntityState {
-        if self.aggregators.is_empty() {
-            return EntityState::default();
+        let mut chronological = facts.to_vec();
+        chronological.sort_by_key(|fact| (fact.time, fact.created_at, fact.id.unwrap_or(0)));
+
+        let goals = latest_by_payload_key(&chronological, FactType::Goal, &["goal", "content"]);
+        let preferences = latest_by_payload_key(
+            &chronological,
+            FactType::Preference,
+            &["topic", "preference", "content"],
+        );
+        let emotion_trend = chronological
+            .iter()
+            .filter(|fact| fact.fact_type == FactType::Emotion)
+            .cloned()
+            .collect();
+        let recent_events = chronological
+            .iter()
+            .rev()
+            .filter(|fact| fact.fact_type == FactType::Event)
+            .take(20)
+            .cloned()
+            .collect();
+        let extensions = self
+            .aggregators
+            .iter()
+            .map(|aggregator| aggregator.aggregate(facts))
+            .collect();
+
+        EntityState {
+            goals,
+            preferences,
+            emotion_trend,
+            recent_events,
+            extensions,
         }
-        let mut state = EntityState::default();
-        for agg in &self.aggregators {
-            let _value = agg.aggregate(facts);
-            // Dispatch by aggregator type — this will be typed later
-            // For V1 we collect all facts into the state
-            state.recent_events.extend(
-                facts
-                    .iter()
-                    .filter(|f| f.fact_type == FactType::Event)
-                    .cloned(),
-            );
-            state.preferences.extend(
-                facts
-                    .iter()
-                    .filter(|f| f.fact_type == FactType::Preference)
-                    .cloned(),
-            );
-            state.goals.extend(
-                facts
-                    .iter()
-                    .filter(|f| f.fact_type == FactType::Goal)
-                    .cloned(),
-            );
-            state.emotion_trend.extend(
-                facts
-                    .iter()
-                    .filter(|f| f.fact_type == FactType::Emotion)
-                    .cloned(),
-            );
-        }
-        state
     }
 }
 
@@ -219,6 +222,20 @@ impl Default for StateEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Keep only the newest fact for each semantic payload key.
+fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> Vec<Fact> {
+    let mut latest = std::collections::BTreeMap::new();
+    for fact in facts.iter().filter(|fact| fact.fact_type == fact_type) {
+        let semantic_key = keys
+            .iter()
+            .find_map(|key| fact.payload.get(*key).and_then(|value| value.as_str()))
+            .unwrap_or("default")
+            .to_owned();
+        latest.insert(semantic_key, fact.clone());
+    }
+    latest.into_values().collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -252,19 +269,57 @@ pub struct EntitySnapshot {
 }
 
 impl EntitySnapshot {
+    /// Format the snapshot for human inspection.
     pub fn format_markdown(&self) -> String {
         let mut out = format!("# {}\n\n", self.entity_name);
         out.push_str(&format!("- Type: {}\n\n", self.entity_type));
+        out.push_str("## Current State\n\n");
+        out.push_str(&format!("- Goals: {}\n", self.state.goals.len()));
+        out.push_str(&format!(
+            "- Preferences: {}\n",
+            self.state.preferences.len()
+        ));
+        out.push_str(&format!(
+            "- Recent events: {}\n\n",
+            self.state.recent_events.len()
+        ));
         out.push_str("## Timeline\n\n");
         for fact in &self.timeline {
-            let ft = format!("{:?}", fact.fact_type);
-            out.push_str(&format!("- {} [{}] {}\n", fact.time, ft, fact.payload));
+            let fact_type = format!("{:?}", fact.fact_type);
+            out.push_str(&format!(
+                "- {} [{}] {}\n",
+                fact.time, fact_type, fact.payload
+            ));
         }
         out
     }
 
+    /// Format the complete structured snapshot.
     pub fn format_json(&self) -> serde_json::Value {
         serde_json::json!(self)
+    }
+
+    /// Format stable, compact text for an embedding provider.
+    pub fn format_embedding(&self) -> String {
+        let mut parts = vec![
+            format!("Name: {}", self.entity_name),
+            format!("Type: {}", self.entity_type),
+        ];
+        parts.extend(
+            self.timeline
+                .iter()
+                .take(20)
+                .map(|fact| format!("{:?}: {}", fact.fact_type, fact.payload)),
+        );
+        parts.join("\n")
+    }
+
+    /// Format a bounded prompt fragment for an AI consumer.
+    pub fn format_prompt(&self) -> String {
+        format!(
+            "Use the following evidence-backed entity state. Do not invent facts not present here.\n\n{}",
+            self.format_markdown()
+        )
     }
 }
 
@@ -332,5 +387,110 @@ pub fn build_context(
         related_entities: related,
         facts: all_facts,
         timeline_window: window,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fact(fact_type: FactType, time: i32, payload: serde_json::Value) -> Fact {
+        Fact {
+            id: Some(i64::from(time)),
+            entity_id: 7,
+            fact_type,
+            time,
+            payload,
+            evidence_id: None,
+            created_at: i64::from(time),
+        }
+    }
+
+    /// Objective: Verify core state is rebuilt without optional aggregators.
+    /// Invariants: Latest goal wins per semantic key and events are newest first.
+    #[test]
+    fn state_engine_rebuilds_core_state_without_extensions() {
+        let facts = vec![
+            fact(
+                FactType::Goal,
+                2024,
+                serde_json::json!({"goal": "learn Rust"}),
+            ),
+            fact(
+                FactType::Goal,
+                2026,
+                serde_json::json!({"goal": "learn Rust", "status": "active"}),
+            ),
+            fact(
+                FactType::Event,
+                2025,
+                serde_json::json!({"action": "started"}),
+            ),
+            fact(
+                FactType::Event,
+                2026,
+                serde_json::json!({"action": "shipped"}),
+            ),
+        ];
+
+        let state = StateEngine::new().aggregate(&facts);
+
+        assert_eq!(
+            state.goals.len(),
+            1,
+            "State should keep one current fact per goal"
+        );
+        assert_eq!(
+            state.goals[0].time, 2026,
+            "The newest goal fact should define current state"
+        );
+        assert_eq!(
+            state.recent_events.len(),
+            2,
+            "All available recent events should be preserved"
+        );
+        assert_eq!(
+            state.recent_events[0].time, 2026,
+            "Recent events should be ordered newest first"
+        );
+        assert!(
+            state.extensions.is_empty(),
+            "No extension values should exist without custom aggregators"
+        );
+    }
+
+    /// Objective: Verify snapshot formatters preserve identity and fact evidence.
+    /// Invariants: Markdown, embedding text, prompt, and JSON contain stable entity data.
+    #[test]
+    fn snapshot_formatters_preserve_evidence_backed_content() {
+        let snapshot = build_snapshot(
+            7,
+            "Alice".to_string(),
+            "User".to_string(),
+            vec![fact(
+                FactType::Preference,
+                2026,
+                serde_json::json!({"topic": "Rust", "score": 0.9}),
+            )],
+            &StateEngine::new(),
+        );
+
+        assert!(
+            snapshot.format_markdown().contains("Alice"),
+            "Markdown should contain the entity name"
+        );
+        assert!(
+            snapshot.format_embedding().contains("Rust"),
+            "Embedding text should contain fact payloads"
+        );
+        assert!(
+            snapshot.format_prompt().contains("Do not invent facts"),
+            "Prompt should enforce evidence grounding"
+        );
+        assert_eq!(
+            snapshot.format_json()["entity_id"],
+            7,
+            "JSON should preserve the entity id"
+        );
     }
 }
