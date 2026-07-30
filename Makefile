@@ -1,32 +1,39 @@
-.PHONY: all build dev check test fmt clean run
+.PHONY: all build dist dev check test fmt clean run
+
+SCCACHE := $(shell command -v sccache 2>/dev/null)
+CARGO_CACHE := $(if $(SCCACHE),RUSTC_WRAPPER=$(SCCACHE),)
 
 all: build
 
-# Release build (optimized)
+# Balanced release build with remote embedding support.
 build:
-	cargo build --release
+	$(CARGO_CACHE) cargo build --release --bin lore-scope
 
-# Fast dev build
+# Smallest offline distribution binary. Fat LTO trades build time for size.
+dist:
+	$(CARGO_CACHE) cargo build --profile dist --no-default-features --bin lore-scope
+
+# Fast incremental development build.
 dev:
-	cargo build
+	$(CARGO_CACHE) cargo build --bin lore-scope
 
-# Lint + compile check
+# Lint and compile every supported feature combination.
 check:
-	cargo clippy --all-targets --all-features
-	cargo check --all-targets --all-features
+	$(CARGO_CACHE) cargo clippy --all-targets --all-features
+	$(CARGO_CACHE) cargo check --all-targets --all-features
 
-# Run tests (requires cargo-nextest: cargo install cargo-nextest)
+# Run tests (requires cargo-nextest: cargo install cargo-nextest).
 test:
-	cargo nextest run --all-features
+	$(CARGO_CACHE) cargo nextest run --all-features
 
-# Format code
+# Format code.
 fmt:
 	cargo fmt --all
 
-# Clean artifacts
+# Clean artifacts.
 clean:
 	cargo clean
 
-# Run the MCP server
+# Run the MCP server with the default lightweight feature set.
 run:
-	cargo run --bin memory-mcp -- serve
+	$(CARGO_CACHE) cargo run --bin lore-scope -- serve

@@ -100,11 +100,15 @@ pub fn extract_profiles(
             continue;
         }
 
-        // Try dictionary-based entity lookup first, then heuristic discovery
-        let entity_name = dict
-            .and_then(|d| find_entity_in_text(line, d))
-            .map(|(name, _)| name)
-            .or_else(|| discover_entity_name(line, lang.discovery_markers()));
+        // Try dictionary-based entity lookup first, then heuristic discovery.
+        let dictionary_entity = dict
+            .and_then(|dictionary| find_entity_in_text(line, dictionary))
+            .map(|(name, _)| name);
+        let discovered_entity = dictionary_entity
+            .is_none()
+            .then(|| discover_entity_name(line, lang.discovery_markers()))
+            .flatten();
+        let entity_name = dictionary_entity.or_else(|| discovered_entity.clone());
 
         let Some(entity_name) = entity_name else {
             continue;
@@ -112,6 +116,12 @@ pub fn extract_profiles(
 
         // Extract profile attributes using configured or default patterns.
         let mut profiles: Vec<(&str, String)> = Vec::new();
+        if let Some(title) = discovered_entity
+            .as_deref()
+            .and_then(|name| discover_title(name, lang.discovery_markers()))
+        {
+            profiles.push(("title", title.to_string()));
+        }
 
         // Pattern source 1: JSON-configured patterns
         for pp in extra_patterns {
@@ -400,35 +410,88 @@ fn discover_entity_name(line: &str, markers: &[&str]) -> Option<String> {
 
 /// Discover an English personal name beginning with a configured title.
 fn discover_english_title_name(line: &str, markers: &[&str]) -> Option<String> {
+    if is_gutenberg_metadata(line) {
+        return None;
+    }
+
     for marker in markers {
-        let Some(position) = line.find(marker) else {
+        let Some(position) = find_title_boundary(line, marker) else {
             continue;
         };
         let after = &line[position..];
-        let words: Vec<&str> = after
+        let words: Vec<String> = after
             .split_whitespace()
             .take(4)
+            .map(normalize_english_name_word)
             .take_while(|word| {
-                word.trim_matches(|character: char| !character.is_alphabetic())
-                    .chars()
-                    .next()
-                    .is_some_and(char::is_uppercase)
+                word.chars().next().is_some_and(char::is_uppercase)
+                    && !crate::dictionary::is_english_stop_name(word)
             })
             .collect();
         if words.len() < 2 {
             continue;
         }
-        let name = words
-            .into_iter()
-            .map(|word| word.trim_matches(|character: char| !character.is_alphabetic()))
-            .filter(|word| !word.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let name = words.join(" ");
         if name.split_whitespace().count() >= 2 {
             return Some(name);
         }
     }
     None
+}
+
+/// Preserve a configured title while trimming punctuation from name words.
+fn normalize_english_name_word(word: &str) -> String {
+    // Strip surrounding non-alphabetic characters (quotes, commas, etc.).
+    let word = word.trim_matches(|character: char| !character.is_alphabetic());
+    match word {
+        "Mr" => "Mr.".to_string(),
+        "Mrs" => "Mrs.".to_string(),
+        "Dr" => "Dr.".to_string(),
+        _ => {
+            // Take only the leading alphabetic segment, stopping at any
+            // interior punctuation (dash, comma, quote, etc.) so that
+            // "Andrew—and" → "Andrew" and "Well," → "Well".
+            word.chars()
+                .take_while(|&c| c.is_alphabetic() || c == '.')
+                .collect::<String>()
+        }
+    }
+}
+
+/// Require title markers to start at a word boundary.
+fn find_title_boundary(line: &str, marker: &str) -> Option<usize> {
+    line.match_indices(marker).find_map(|(position, _)| {
+        let before_is_boundary = line[..position]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !character.is_alphabetic());
+        let after_position = position + marker.len();
+        let after_is_boundary = line[after_position..]
+            .chars()
+            .next()
+            .is_none_or(|character| !character.is_alphabetic());
+        (before_is_boundary && after_is_boundary).then_some(position)
+    })
+}
+
+/// Return the title prefix from a normalized discovered entity name.
+fn discover_title<'a>(name: &str, markers: &'a [&str]) -> Option<&'a str> {
+    markers.iter().copied().find(|marker| {
+        name.strip_prefix(marker)
+            .is_some_and(|suffix| suffix.starts_with(char::is_whitespace))
+    })
+}
+
+/// Exclude Project Gutenberg administrative text from literary entity discovery.
+fn is_gutenberg_metadata(line: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "Project Gutenberg",
+        "Gutenberg-tm",
+        "Full Project Gutenberg",
+        "General Terms of Use",
+        "General Information About Project Gutenberg",
+    ];
+    MARKERS.iter().any(|marker| line.contains(marker))
 }
 
 /// Extract text after a prefix pattern, stopping at the first stop character.
@@ -601,6 +664,68 @@ mod tests {
                 .iter()
                 .any(|profile| profile.key == "title" && profile.value == "Prince"),
             "English title discovery should emit a title profile"
+        );
+    }
+
+    /// Objective: Verify dotted English honorifics survive normalization.
+    /// Invariants: Each discovered entity preserves its canonical dotted title and profile.
+    #[test]
+    fn dotted_english_titles_are_preserved() {
+        let mut context = CompileContext::default();
+        extract_profiles(
+            "Mr. Bennet greeted Mrs. Bennet, while Mr. Darcy waited.",
+            &mut context,
+            None,
+            &[],
+            &crate::language::EnglishLanguageProvider::new(),
+        );
+
+        assert!(
+            context
+                .entities
+                .iter()
+                .any(|entity| entity.name == "Mr. Bennet"),
+            "Dotted honorific normalization must preserve `Mr. Bennet`; found {:?}",
+            context
+                .entities
+                .iter()
+                .map(|entity| entity.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            context
+                .profiles
+                .iter()
+                .any(|profile| profile.key == "title" && profile.value == "Mr."),
+            "A discovered dotted honorific must create the matching title profile"
+        );
+    }
+
+    /// Objective: Verify Project Gutenberg administrative text is not literary evidence.
+    /// Invariants: License headings produce neither entities nor title profiles.
+    #[test]
+    fn gutenberg_metadata_is_not_a_person() {
+        let mut context = CompileContext::default();
+        extract_profiles(
+            "General Terms of Use and Redistributing Project Gutenberg-tm electronic works\nGeneral Information About Project Gutenberg-tm electronic works",
+            &mut context,
+            None,
+            &[],
+            &crate::language::EnglishLanguageProvider::new(),
+        );
+
+        assert!(
+            context.entities.is_empty(),
+            "Gutenberg administrative headings must not create people; found {:?}",
+            context
+                .entities
+                .iter()
+                .map(|entity| entity.name.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            context.profiles.is_empty(),
+            "Gutenberg administrative headings must not create title profiles"
         );
     }
 }

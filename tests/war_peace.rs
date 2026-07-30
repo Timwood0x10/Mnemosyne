@@ -53,8 +53,9 @@ async fn war_peace() {
     let sentences = sentence::split_all(&chunks);
     let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
 
-    // Use default verbs — these are Chinese, but let's see what happens
-    let config = extract::Config::default();
+    // Use English verbs for event extraction
+    use lore_scope::language::EnglishLanguageProvider;
+    let config = extract::Config::from_language(&EnglishLanguageProvider::new());
     extract::compile(
         &mut ctx,
         &sent_texts,

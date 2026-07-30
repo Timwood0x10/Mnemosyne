@@ -71,6 +71,16 @@ impl Default for TimelineConfig {
     }
 }
 
+impl TimelineConfig {
+    /// Build a timeline config from a language provider's verb definitions.
+    pub fn from_language(lang: &dyn crate::language::LanguageProvider) -> Self {
+        TimelineConfig {
+            hostile_verbs: lang.hostile_verbs(),
+            friendly_verbs: lang.friendly_verbs(),
+        }
+    }
+}
+
 /// Extract personality markers from events AND from raw text.
 ///
 /// Scans event descriptions for personality keywords.

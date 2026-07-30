@@ -1,0 +1,78 @@
+{
+  "english_stop_names": [
+    "I", "me", "my", "mine", "myself", "you", "your", "yours", "yourself",
+    "he", "him", "his", "himself", "she", "her", "hers", "herself",
+    "it", "its", "itself", "we", "us", "our", "ours", "ourselves",
+    "they", "them", "their", "theirs", "themselves", "who", "whom", "whose",
+    "this", "that", "these", "those",
+    "Well", "Yes", "No", "Indeed", "Surely", "Certainly", "Absolutely", "Perhaps", "Maybe",
+    "Oh", "Ah", "Alas", "Why",
+    "The", "A", "An", "Another", "Some", "Any", "Every", "Each", "All", "Both", "Few", "Many", "Several",
+    "For", "To", "In", "On", "At", "By", "With", "From", "Of", "About", "Into", "Through",
+    "During", "Before", "After", "Above", "Below", "Between",
+    "And", "But", "Or", "Nor", "Yet", "So", "Because",
+    "Do", "Does", "Did", "Will", "Would", "Can", "Could", "Shall", "Should", "May", "Might", "Must",
+    "Have", "Has", "Had", "Be", "Am", "Is", "Are", "Was", "Were", "Been", "Being",
+    "Say", "Says", "Said", "Know", "Knows", "Knew", "Think", "Thinks", "Thought",
+    "Go", "Goes", "Went", "Come", "Came", "Take", "Takes", "Took", "Make", "Makes", "Made",
+    "See", "Sees", "Saw", "Look", "Looks", "Looked", "Tell", "Tells", "Told"
+  ],
+  "chinese_stop_names": [
+    "之", "其", "何", "谁", "哪", "这", "那",
+    "我", "你", "他", "她", "它", "我们", "你们", "他们",
+    "是", "在", "有", "为", "以", "不", "也", "都", "就", "又", "很",
+    "的", "了", "着", "过", "吗", "呢", "吧", "呀", "啊", "嘛",
+    "什么", "怎么", "为什么"
+  ],
+  "english_strong_verbs": [
+    "killed", "captured", "saved", "rescued", "fought", "defeated",
+    "fled", "died", "wounded", "struck", "attacked", "shot",
+    "destroyed", "escaped", "pursued", "surrendered", "betrayed",
+    "ordered", "commanded", "forced", "executed", "bound"
+  ],
+  "english_action_verbs": [
+    "said", "asked", "replied", "answered", "cried", "exclaimed",
+    "shouted", "whispered", "murmured", "called", "added",
+    "continued", "repeated", "began",
+    "entered", "turned", "returned", "rose", "rode", "went",
+    "came", "left", "ran", "walked", "moved", "followed",
+    "sat", "stood", "knelt", "lay",
+    "looked", "saw", "watched", "heard", "felt", "seemed",
+    "smiled", "frowned", "laughed", "wept", "trembled", "blushed",
+    "thought", "knew", "wished", "wanted", "tried",
+    "took", "gave", "made", "held", "put", "brought", "sent",
+    "found", "told", "spoke"
+  ],
+  "english_hostile_verbs": [
+    "killed", "wounded", "attacked", "struck", "defeated",
+    "captured", "pursued", "executed", "betrayed", "destroyed",
+    "shot", "fled", "fought"
+  ],
+  "english_friendly_verbs": [
+    "saved", "rescued", "blessed", "rewarded", "pardoned",
+    "healed", "embraced", "married", "loved", "kissed"
+  ],
+  "chinese_strong_verbs": [
+    "杀", "战", "打", "攻", "破", "擒", "斩", "绑", "缚",
+    "死", "逃", "降", "败", "胜", "报", "取", "进", "入",
+    "领", "追", "赶", "逐", "奔", "驰"
+  ],
+  "chinese_action_verbs": [
+    "来", "去", "回", "出", "上", "下", "起", "到", "过",
+    "走", "行", "从", "随", "入", "出", "开", "分", "定",
+    "立", "坐", "住", "安", "作", "化", "合", "放", "举",
+    "曰", "言", "道", "说", "问", "答", "听", "闻", "知",
+    "见", "看", "望", "观", "请", "报", "传", "叫", "呼",
+    "笑", "哭", "怒", "喜", "惊", "急", "忙", "怕",
+    "想", "念", "知", "晓", "等", "待", "候", "吃", "饮",
+    "变", "化", "改"
+  ],
+  "chinese_hostile_verbs": [
+    "杀", "斩", "攻", "破", "擒", "绑", "缚", "打", "骂",
+    "刺", "射", "围", "追", "赶"
+  ],
+  "chinese_friendly_verbs": [
+    "救", "拜", "封", "赐", "赏", "赦", "嫁", "娶", "抚",
+    "助", "援"
+  ]
+}

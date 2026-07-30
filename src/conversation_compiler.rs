@@ -319,10 +319,10 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
         .collect()
 }
 
-/// Convert unified user observations into immutable facts.
-pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i32) -> Vec<Fact> {
+/// Convert precompiled user observations into immutable facts.
+pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> Vec<Fact> {
     let rule = DefaultRule;
-    compile_user_observations(messages, user_entity_id)
+    observations
         .iter()
         .flat_map(|observation| {
             let mut facts = rule.apply(observation);
@@ -338,18 +338,24 @@ pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i32) 
                 }
                 // Propagate observation evidence into the fact payload so
                 // provenance (source message offset, length, text) is not lost.
-                if let Some(ref ev) = observation.evidence {
+                if let Some(ref evidence) = observation.evidence {
                     fact.payload["evidence"] = serde_json::json!({
-                        "doc_id": ev.doc_id,
-                        "offset": ev.offset,
-                        "length": ev.length,
-                        "text": ev.text,
+                        "doc_id": evidence.doc_id,
+                        "offset": evidence.offset,
+                        "length": evidence.length,
+                        "text": evidence.text,
                     });
                 }
             }
             facts
         })
         .collect()
+}
+
+/// Compile user messages through the Observation IR into immutable facts.
+pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i32) -> Vec<Fact> {
+    let observations = compile_user_observations(messages, user_entity_id);
+    user_facts_from_observations(&observations, time)
 }
 
 #[cfg(test)]

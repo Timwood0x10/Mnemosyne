@@ -22,7 +22,7 @@ use std::sync::Arc;
 use crate::compiler::CompileContext;
 use crate::entity_resolver::Embedder;
 use crate::error::Error;
-use crate::vector::VectorIndex;
+use crate::vector::{HnswIndex, VectorIndex};
 
 /// Builder that takes compiler output and produces a queryable vector index.
 ///
@@ -104,6 +104,14 @@ impl VectorBuilder {
         parts.join("\n")
     }
 
+    /// Build the production HNSW feature index from compiler output.
+    ///
+    /// This is the preferred entry point. Callers only choose another index
+    /// implementation when validating HNSW against the brute-force reference.
+    pub fn build_hnsw(&self, ctx: &CompileContext) -> Result<Arc<dyn VectorIndex>, Error> {
+        self.build::<HnswIndex>(ctx)
+    }
+
     /// Build the vector index from compiler output.
     ///
     /// Iterates over all discovered entities, builds their text
@@ -163,5 +171,77 @@ impl VectorBuilder {
         let mut index = T::default();
         index.build(&items)?;
         Ok(Arc::new(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compiler::{CompileContext, Entity};
+    use crate::entity_resolver::Embedder;
+
+    struct DeterministicEmbedder;
+
+    impl Embedder for DeterministicEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, Error> {
+            let lower = text.to_ascii_lowercase();
+            Ok(vec![
+                lower.matches("alice").count() as f32,
+                lower.matches("bob").count() as f32,
+                lower.matches("rust").count() as f32,
+            ])
+        }
+    }
+
+    /// Objective: Verify compiler entities flow through the production HNSW entry point.
+    /// Invariants: The generated index is HNSW and resolves an entity representation by id.
+    #[test]
+    fn production_builder_creates_queryable_hnsw_index() {
+        let context = CompileContext {
+            entities: vec![
+                Entity {
+                    id: Some(11),
+                    name: "Alice".to_string(),
+                    entity_type: "person".to_string(),
+                    status: "active".to_string(),
+                    importance: 1.0,
+                },
+                Entity {
+                    id: Some(12),
+                    name: "Bob".to_string(),
+                    entity_type: "person".to_string(),
+                    status: "active".to_string(),
+                    importance: 1.0,
+                },
+            ],
+            ..Default::default()
+        };
+        let embedder: Arc<dyn Embedder> = Arc::new(DeterministicEmbedder);
+        let query = embedder.embed("Alice").expect("embed entity query");
+        let index = VectorBuilder::new(embedder)
+            .build_hnsw(&context)
+            .expect("build production HNSW index");
+        let results = index
+            .search(&query, 1)
+            .expect("search production HNSW index");
+
+        assert_eq!(
+            index.name(),
+            "hnsw",
+            "Production builder must select the real HNSW implementation"
+        );
+        assert_eq!(
+            results.len(),
+            1,
+            "HNSW query must return the requested nearest entity"
+        );
+        assert_eq!(
+            results[0].0, 11,
+            "The Alice representation must resolve to Alice's entity id"
+        );
+        assert!(
+            results[0].1 > 0.99,
+            "An identical representation must have near-perfect cosine similarity"
+        );
     }
 }

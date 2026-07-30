@@ -47,6 +47,18 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// Build an extract config from a language provider's verb definitions.
+    pub fn from_language(lang: &dyn crate::language::LanguageProvider) -> Self {
+        Config {
+            strong_verbs: lang.strong_verbs(),
+            action_verbs: lang.action_verbs(),
+            dialog_markers: Vec::new(),
+            proximity_chars: 50,
+        }
+    }
+}
+
 /// Scan sentences for entity mentions, extract events, and populate the context.
 ///
 /// When `resolver` is `Some`, it is used in addition to the dictionary for
@@ -146,13 +158,13 @@ pub fn compile(
             });
 
             if let Some(s) = subject {
-                let mut title = format!("{}{}", s.canonical_name, verb);
+                let mut title = format!("{} {}", s.canonical_name, verb);
                 let mut participants = vec![EventParticipant {
                     entity_name: s.canonical_name.clone(),
                     role: "subject".into(),
                 }];
                 if let Some(o) = object {
-                    title = format!("{}{}{}", s.canonical_name, verb, o.canonical_name);
+                    title = format!("{} {} {}", s.canonical_name, verb, o.canonical_name);
                     participants.push(EventParticipant {
                         entity_name: o.canonical_name.clone(),
                         role: "object".into(),

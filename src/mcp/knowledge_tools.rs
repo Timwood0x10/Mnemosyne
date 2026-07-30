@@ -330,7 +330,9 @@ pub async fn register_knowledge_tools(
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Entity name (e.g. 赵云, Pierre)"},
+                        "name": {"type": "string", "description": "Entity name (e.g. User, 赵云, Pierre)"},
+                        "tenant_id": {"type": "string", "default": "default", "description": "Tenant scope for cognition entities"},
+                        "user_id": {"type": "string", "description": "External user id when querying the User entity"}
                     },
                     "required": ["name"]
                 }),
@@ -358,12 +360,24 @@ impl ToolHandler for CognitiveContextHandler {
         use crate::cognition::{FactStore as CognitionFactStore, StateEngine, build_snapshot};
 
         let name = req_str(args, "name")?;
+        let tenant_id = args
+            .get("tenant_id")
+            .and_then(Value::as_str)
+            .unwrap_or("default");
+        let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
         let store = &self.store;
 
-        // 1. Resolve persisted knowledge entities. The local User root is a
-        // first-class cognition entity even before it has a legacy object row.
+        // 1. Resolve persisted knowledge entities. User identities are scoped
+        // by tenant and external user id; legacy callers still resolve the
+        // default User root through the compatible empty-id mapping.
         let (entity_id, entity_name, entity_type) = if name.eq_ignore_ascii_case("user") {
-            (1, "User".to_string(), "User".to_string())
+            let entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
+            let entity_name = if user_id.is_empty() {
+                "User".to_string()
+            } else {
+                format!("User:{user_id}")
+            };
+            (entity_id, entity_name, "User".to_string())
         } else {
             let object = store
                 .find_object_by_name(&name, None)
@@ -374,7 +388,7 @@ impl ToolHandler for CognitiveContextHandler {
 
         // 2. Read Facts from the same SQLite database as the knowledge store.
         // This keeps entity resolution and cognition state on one durable path.
-        let facts = self.fact_store.get_facts(entity_id);
+        let facts = self.fact_store.get_facts(entity_id)?;
 
         // 4. Build snapshot
         let state_engine = StateEngine::new();

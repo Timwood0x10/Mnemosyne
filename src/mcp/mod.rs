@@ -11,6 +11,7 @@
 //! [`StdioTransport`] implementation is provided for the common case.
 
 pub mod knowledge_tools;
+pub mod memory_compile;
 pub mod server;
 pub mod transport;
 pub mod types;

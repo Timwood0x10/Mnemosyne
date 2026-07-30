@@ -36,8 +36,8 @@ serde_json = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
-# Async runtime
-tokio = { version = "1.45", features = ["full"] }
+# Async runtime: keep only the features used by the server.
+tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync"] }
 
 # ID generation
 uuid = { version = "1.17", features = ["v4", "serde"] }
@@ -67,8 +67,10 @@ aho-corasick = "1.1"
 # HNSW vector index for entity resolution
 instant-distance = "0.6"
 
-# Entity embedding for fuzzy resolution (ONNX local, no API key)
-fastembed = "4"
+# Entity embedding for fuzzy resolution (ONNX local, no API key).
+# This dependency is intentionally opt-in because ONNX and tokenizers dominate
+# clean-build time and binary size.
+fastembed = { version = "4", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
@@ -77,8 +79,33 @@ tempfile = "3.20"
 [features]
 default = ["remote-embed"]
 remote-embed = ["dep:reqwest"]
+local-embed = ["dep:fastembed"]
 
+# Fast edit-build-run cycles. Dependencies receive light optimization so debug
+# builds remain usable without sacrificing incremental compilation.
+[profile.dev]
+opt-level = 0
+debug = 1
+incremental = true
+codegen-units = 256
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
+# Balanced production build: small enough to ship, much faster than fat LTO.
 [profile.release]
-opt-level = 3
+opt-level = "s"
 lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = "symbols"
+debug = false
+incremental = false
+
+# Distribution build: prioritize the smallest executable over build latency.
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
 codegen-units = 1

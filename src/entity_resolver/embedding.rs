@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use crate::entity_resolver::cache::EmbeddingCache;
 use crate::entity_resolver::pipeline::{ResolveContext, ResolverStage};
 use crate::entity_resolver::{RESOLVE_THRESHOLD, ResolveResult};
+#[cfg(feature = "local-embed")]
 use crate::error::EmbeddingError;
 use crate::error::Error;
 use crate::vector::VectorIndex;
@@ -37,12 +38,12 @@ pub trait Embedder: Send + Sync {
 ///
 /// Uses the `all-MiniLM-L6-v2` model (384-dim). The model is downloaded
 /// automatically on first use and cached locally.
-#[cfg(feature = "remote-embed")]
+#[cfg(feature = "local-embed")]
 pub struct FastEmbedProvider {
     model: fastembed::TextEmbedding,
 }
 
-#[cfg(feature = "remote-embed")]
+#[cfg(feature = "local-embed")]
 impl FastEmbedProvider {
     /// Create a new `FastEmbedProvider`, loading the default ONNX model.
     pub fn new() -> Result<Self, Error> {
@@ -53,7 +54,7 @@ impl FastEmbedProvider {
     }
 }
 
-#[cfg(feature = "remote-embed")]
+#[cfg(feature = "local-embed")]
 impl Embedder for FastEmbedProvider {
     fn embed(&self, text: &str) -> Result<Vec<f32>, Error> {
         let mut results = self
@@ -132,7 +133,7 @@ impl ResolverStage for EmbeddingStage {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "local-embed"))]
 mod tests {
     use super::*;
 
@@ -140,7 +141,7 @@ mod tests {
     /// ONNX model is not available (no model cached, no network in test env).
     /// Invariants: The error variant is Error::Config.
     #[test]
-    #[cfg(feature = "remote-embed")]
+    #[cfg(feature = "local-embed")]
     fn fastembed_construction_fails_without_model() {
         // In CI / sandbox the model is never available, so new() must Err.
         match FastEmbedProvider::new() {

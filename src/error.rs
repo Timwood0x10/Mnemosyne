@@ -86,6 +86,14 @@ pub enum StorageError {
     /// Vector dimensionality mismatch on insert/search.
     #[error("vector dimension mismatch: expected {expected}, got {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
+
+    /// A storage mutex was poisoned by a panic in another thread.
+    #[error("storage lock poisoned: {0}")]
+    LockPoisoned(String),
+
+    /// Persisted data could not be decoded into the domain model.
+    #[error("invalid stored data: {0}")]
+    InvalidData(String),
 }
 
 impl From<rusqlite::Error> for Error {

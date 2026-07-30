@@ -14,6 +14,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::Result;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Observation (Compiler IR)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -247,11 +249,11 @@ fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> 
 /// V1 implementation wraps SQLite with batch inserts (reusing EvidenceWriter's
 /// transaction pattern). Future implementations can switch to LanceDB.
 pub trait FactStore: Send + Sync {
-    fn insert_fact(&self, fact: &Fact) -> i64;
-    fn insert_batch(&self, facts: &[Fact]) -> usize;
-    fn get_facts(&self, entity_id: i64) -> Vec<Fact>;
-    fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Vec<Fact>;
-    fn get_timeline(&self, entity_id: i64) -> Vec<Fact>;
+    fn insert_fact(&self, fact: &Fact) -> Result<i64>;
+    fn insert_batch(&self, facts: &[Fact]) -> Result<usize>;
+    fn get_facts(&self, entity_id: i64) -> Result<Vec<Fact>>;
+    fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Result<Vec<Fact>>;
+    fn get_timeline(&self, entity_id: i64) -> Result<Vec<Fact>>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

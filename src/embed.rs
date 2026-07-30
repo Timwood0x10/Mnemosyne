@@ -8,9 +8,12 @@
 //! to run concurrently (e.g. via `futures::join_all`) or sequentially.
 
 use async_trait::async_trait;
+#[cfg(feature = "remote-embed")]
 use serde::{Deserialize, Serialize};
 
-use crate::error::{EmbeddingError, Result};
+#[cfg(feature = "remote-embed")]
+use crate::error::EmbeddingError;
+use crate::error::Result;
 
 /// Async embedding service contract.
 ///
@@ -102,6 +105,7 @@ impl EmbeddingService for NullEmbedder {
 }
 
 /// Request body for the upstream `/embed` endpoint.
+#[cfg(feature = "remote-embed")]
 #[derive(Debug, Serialize)]
 struct EmbedRequest<'a> {
     text: &'a str,
@@ -110,6 +114,7 @@ struct EmbedRequest<'a> {
 }
 
 /// Response body from the upstream `/embed` endpoint.
+#[cfg(feature = "remote-embed")]
 #[derive(Debug, Deserialize)]
 struct EmbedResponse {
     embedding: Vec<f32>,
@@ -120,6 +125,7 @@ struct EmbedResponse {
 /// Talks to an upstream embedding-mcp server with a `POST /embed` endpoint
 /// accepting JSON `{"text": "...", "prefix": "..."}` and returning
 /// `{"embedding": [f32, ...]}`.
+#[cfg(feature = "remote-embed")]
 pub struct RemoteEmbedder {
     client: reqwest::Client,
     base_url: String,
@@ -127,6 +133,7 @@ pub struct RemoteEmbedder {
     timeout: std::time::Duration,
 }
 
+#[cfg(feature = "remote-embed")]
 impl RemoteEmbedder {
     /// Build a new remote embedder.
     ///
@@ -191,6 +198,7 @@ impl RemoteEmbedder {
     }
 }
 
+#[cfg(feature = "remote-embed")]
 #[async_trait]
 impl EmbeddingService for RemoteEmbedder {
     async fn embed(&self, text: &str) -> Result<Vec<f32>> {
@@ -236,13 +244,14 @@ impl EmbeddingService for RemoteEmbedder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "remote-embed"))]
 mod tests {
     use super::*;
 
     /// Objective: Verify RemoteEmbedder construction succeeds with valid inputs.
     /// Invariants: new() returns Ok and preserves model id.
     #[test]
+    #[cfg(feature = "remote-embed")]
     fn remote_embedder_constructs() {
         let e = RemoteEmbedder::new(
             "http://localhost:8000",
@@ -257,6 +266,7 @@ mod tests {
     /// Objective: Verify construction with empty model id still succeeds.
     /// Invariants: Empty model is allowed (caller's responsibility).
     #[test]
+    #[cfg(feature = "remote-embed")]
     fn remote_embedder_empty_model() {
         let e = RemoteEmbedder::new(
             "http://localhost:8000",

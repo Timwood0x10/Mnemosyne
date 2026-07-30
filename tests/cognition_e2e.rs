@@ -80,12 +80,16 @@ async fn full_pipeline() {
     // 5. FactStore
     let store = SqliteFactStore::open_in_memory().unwrap();
     let context_facts = facts.clone();
-    let stored = store.insert_batch(&facts);
+    let stored = store
+        .insert_batch(&facts)
+        .expect("The cognition fact batch should persist atomically");
     println!("\nStored: {} facts", stored);
 
     // 6. Verify stored facts
     for entity_id in &[10001i64, 10004, 10005] {
-        let efacts = store.get_facts(*entity_id);
+        let efacts = store
+            .get_facts(*entity_id)
+            .expect("Stored entity facts should remain readable");
         println!("Entity {}: {} facts", entity_id, efacts.len());
         for f in &efacts {
             println!("  {:?} [{}]", f.fact_type, f.time);
@@ -95,7 +99,9 @@ async fn full_pipeline() {
     // 7. State Engine + Snapshot
     let state_engine = StateEngine::new();
     // Test with 刘备's facts
-    let liubei_facts = store.get_facts(10001);
+    let liubei_facts = store
+        .get_facts(10001)
+        .expect("Liu Bei facts should remain readable for snapshot reconstruction");
     if !liubei_facts.is_empty() {
         let state = state_engine.aggregate(&liubei_facts);
         println!("\n刘备 State: {:?}", state);

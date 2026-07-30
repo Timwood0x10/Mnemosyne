@@ -1,9 +1,152 @@
-# Cognitive Memory MCP Server
+# HCC — Human Cognition Compiler（人类认知编译器）
 
-**让你的 AI 编程助手拥有长期记忆。** 跨会话持久化的记忆系统 — 从对话中蒸馏知识，跨会话检索，零成本关键词模式可用。
+让 AI **「读过就记住」，记住的不是 raw text，而是结构化的认知状态** ——谁做了什么事、有什么性格、和谁什么关系。专为陪伴型 AI 打造，维护人设不崩。
 
+> **事实来自编译，不来自猜测；状态来自事件，不来自 Prompt。**
+> 
+> **长期认知来自模型，不来自上下文窗口。**
 
-事实来自编译，不来自猜测；状态来自事件，不来自 Prompt；长期认知来自模型，不来自上下文窗口。
+---
+
+### 核心架构
+
+```
+                Language Frontend
+                     │
+                     ▼
+            Observation Compiler
+                     │
+                     ▼
+            Knowledge Compiler
+                     │
+                     ▼
+             Snapshot Builder
+                     │
+                     ▼
+              Cognitive Context
+```
+
+### 编译管线
+
+| 阶段 | 说明 |
+|------|------|
+| **Language Frontend** | 中英文自然语言解析，提取 Mention、Action、Evidence |
+| **Observation Compiler** | 统一 IR（Subject + Action + Object + Evidence），Aho-Corasick 动词匹配 |
+| **Knowledge Compiler** | Observation → Fact（不可变，落库）。FactType: Identity, Preference, Goal, Event, Relationship, Emotion, ... |
+| **Snapshot Builder** | Facts → StateEngine → EntitySnapshot（Markdown/JSON） |
+| **Cognitive Context** | 向 Agent 提供结构化的认知上下文快照 |
+
+### 核心理念
+
+- **事实来自编译**：所有 Fact 由编译器从原始文本中提取，有证据链（EvidenceRef）可追溯，不依赖 LLM 猜测
+- **状态来自事件**：Entity 的当前状态由 Facts 的时间线聚合而来，而非 Prompt 中临时拼凑
+- **长期认知来自模型**：认知状态持久化在 SQLite 中，跨会话可演化，不依赖上下文窗口长度
+
+---
+
+## MCP 工具一览
+
+### 认知状态工具
+
+| 工具 | 功能 | 必填参数 |
+|------|------|---------|
+| `memory_compile` | 编译对话为结构化 Facts + 认知状态，可选同时蒸馏 | `messages[]` |
+| `cognitive_context` | 查询实体的认知快照：身份、偏好、目标、事件、关系 | `name` |
+
+### 记忆蒸馏工具（Memory Distillation）
+
+| 工具 | 功能 | 必填参数 |
+|------|------|---------|
+| `lore_scope` | 8 阶段蒸馏：抽取→分类→打分→过滤→压缩→向量化→冲突解决→持久化 | `conversation_id`, `messages[]` |
+| `memory_search` | 关键词 / 向量 / 混合检索 | `query` |
+| `memory_store` | 手动写入记忆 | `content` |
+| `memory_feedback` | 记录 Agent 对记忆的反馈（用于自我进化） | `memory_id` |
+| `memory_stats` | 租户维度记忆统计 | — |
+
+### 知识查询工具（LoreScope）
+
+| 工具 | 功能 | 必填参数 |
+|------|------|---------|
+| `inspect_entity` | 查询人物完整画像：属性 + 关系 + 事件 + 证据 | `name` |
+| `timeline` | 事件时间线（按章节排序） | `entity` |
+| `relation_graph` | 关系图 BFS 遍历 (depth 1-5) | `entity` |
+| `evidence` | 原文证据搜索（关键字匹配） | `query` |
+| `correct_relation` | 校正知识图中的错误关系 | `source, predicate, old_target, new_target` |
+
+---
+
+### 使用示例：编译一段对话
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "如何改进工具调用链的追踪？"},
+    {"role": "assistant", "content": "使用结构化 Message 字段 tool_invocation，不走正则 / JSON 解析 content。"}
+  ],
+  "conversation_id": "session-1"
+}
+```
+
+下次再问工具调用链追踪的问题 — **零 token 成本，即时召回**。
+
+---
+
+## 快速启动
+
+```bash
+# 零配置启动：只要 SQLite，不需要 API key，不需要 embedding
+cargo run --bin lore-scope \
+  --embedding-provider none \
+  --retrieval-mode keyword \
+  --db-path ./knowledge.db
+
+# 或者使用 OpenAI embedding
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin lore-scope -- \
+  --embedding-provider openai \
+  --vector-dim 768
+```
+
+---
+
+## 开发
+
+```bash
+make check      # clippy + check (0 error 0 warning)
+make test       # 260+ 单元测试 + 集成测试
+make run        # MCP stdio 服务器启动
+```
+
+---
+
+## 项目结构
+
+```
+src/
+├── main.rs                    # 入口 + 15 个 MCP 工具注册
+├── conversation_compiler.rs   # Agent 对话编译器
+├── compiler/                  # LoreScope 编译器
+│   ├── mod.rs               # CompileContext + IR 类型
+│   ├── document.rs          # Document Parser
+│   ├── sentence.rs          # Sentence Compiler
+│   ├── chunk.rs             # Chunk Planner
+│   └── ...
+├── knowledge/               # 存储层
+│   ├── store.rs             # SQLiteKnowledgeStore
+│   └── migration.rs         # V1 → 通用模型迁移
+├── mcp/                     # MCP 框架
+│   ├── server.rs            # JSON-RPC 2.0 服务器
+│   └── knowledge_tools.rs   # 知识查询工具
+├── distiller.rs             # Memory Distillation 流水线
+├── store.rs                 # SQLiteVecStore
+├── retrieval.rs             # 检索引擎
+└── config/entity_profiles/  # 实体配置文件
+```
+
+---
+
+## 许可
+
+Apache-2.0
 
 
 ## 和上下文压缩有什么不同

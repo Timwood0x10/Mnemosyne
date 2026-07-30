@@ -159,7 +159,6 @@ impl JsonEntityProvider {
     }
 
     /// Return profile extraction patterns as deserialized [`ProfilePattern`]s.
-    #[cfg(feature = "remote-embed")]
     pub fn profile_patterns(&self) -> Vec<crate::compiler::profile::ProfilePattern> {
         self.profile_patterns
             .iter()

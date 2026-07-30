@@ -119,7 +119,9 @@ async fn run() {
 
     // 5. Store facts
     let store = SqliteFactStore::open_in_memory().unwrap();
-    let stored = store.insert_batch(&facts);
+    let stored = store
+        .insert_batch(&facts)
+        .expect("The cognition fact batch should persist atomically");
     println!("\nStored: {} facts", stored);
 
     // 6. Entity snapshots

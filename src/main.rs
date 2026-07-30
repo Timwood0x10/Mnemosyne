@@ -15,19 +15,19 @@ use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
 use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use lore_scope::cognition::FactStore;
 use lore_scope::config::{CliArgs, Command, EmbeddingProvider};
-use lore_scope::conversation_compiler::{ConversationCompiler, compile_user_facts};
 use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
-use lore_scope::embed::{EmbeddingService, NullEmbedder, RemoteEmbedder};
+#[cfg(feature = "remote-embed")]
+use lore_scope::embed::RemoteEmbedder;
+use lore_scope::embed::{EmbeddingService, NullEmbedder};
 use lore_scope::error::Error;
 use lore_scope::fact_store::SqliteFactStore;
 use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
+use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
-use lore_scope::prompt::PromptBuilder;
 use lore_scope::retrieval::RetrievalEngine;
 use lore_scope::store::{ExperienceRepository, SQLiteVecStore};
 use lore_scope::types::{Experience, MemoryType, Message};
@@ -132,10 +132,7 @@ impl ToolHandler for MemoryStoreTool {
 }
 
 /// Tool: record agent feedback on a memory (`memory_feedback`).
-#[allow(dead_code)]
-struct MemoryFeedbackTool {
-    store: Arc<dyn ExperienceRepository>,
-}
+struct MemoryFeedbackTool;
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryFeedbackTool {
@@ -216,16 +213,28 @@ fn parse_messages(arr: &[Value]) -> Result<Vec<Message>, Error> {
 fn build_embedder(cfg: &lore_scope::config::Config) -> AnyhowResult<Arc<dyn EmbeddingService>> {
     match cfg.embedding_provider {
         EmbeddingProvider::None => Ok(Arc::new(NullEmbedder::new())),
-        EmbeddingProvider::Openai | EmbeddingProvider::Ollama => {
-            let embedder = RemoteEmbedder::new(
-                cfg.embedding_url.clone(),
-                cfg.embedding_model.clone(),
-                cfg.embedding_timeout,
-            )
-            .context("build remote embedder")?;
-            Ok(Arc::new(embedder))
-        }
+        EmbeddingProvider::Openai | EmbeddingProvider::Ollama => build_remote_embedder(cfg),
     }
+}
+
+#[cfg(feature = "remote-embed")]
+fn build_remote_embedder(
+    cfg: &lore_scope::config::Config,
+) -> AnyhowResult<Arc<dyn EmbeddingService>> {
+    let embedder = RemoteEmbedder::new(
+        cfg.embedding_url.clone(),
+        cfg.embedding_model.clone(),
+        cfg.embedding_timeout,
+    )
+    .context("build remote embedder")?;
+    Ok(Arc::new(embedder))
+}
+
+#[cfg(not(feature = "remote-embed"))]
+fn build_remote_embedder(
+    _cfg: &lore_scope::config::Config,
+) -> AnyhowResult<Arc<dyn EmbeddingService>> {
+    anyhow::bail!("remote embedding support is disabled at compile time")
 }
 
 /// Build the storage backend.
@@ -246,122 +255,6 @@ fn build_retrieval_engine(
 ) -> Arc<RetrievalEngine> {
     let mode = cfg.retrieval_mode;
     Arc::new(RetrievalEngine::new(embedder, store, mode))
-}
-
-/// Tool: compile conversation into structured state (`memory_compile`).
-/// Optionally distills and builds a reconstruction prompt.
-struct MemoryCompileTool {
-    distiller: Option<Arc<PipelineDistiller>>,
-    fact_store: Arc<SqliteFactStore>,
-}
-
-#[async_trait::async_trait]
-impl ToolHandler for MemoryCompileTool {
-    async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let messages_raw = args
-            .get("messages")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
-        let messages = parse_messages(messages_raw)?;
-
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let compiler = ConversationCompiler::new();
-        let compiled = compiler.compile(tenant_id, &messages);
-
-        // Compile the same user input through the unified Observation → Fact
-        // path. Entity id 1 is the stable local User root until identity
-        // resolution assigns per-user ids.
-        let logical_time = chrono::Utc::now().timestamp() as i32;
-        let user_facts = compile_user_facts(&messages, 1, logical_time);
-        let stored_facts = self.fact_store.insert_batch(&user_facts);
-
-        // Build reconstruction prompt
-        let builder = PromptBuilder;
-        let recent_count = std::cmp::min(messages.len(), 6);
-        let prompt = builder.build(&messages[messages.len() - recent_count..], &compiled);
-
-        // Optionally run distillation. Default is false, matching the MCP
-        // tool schema's declared default — callers must opt in explicitly.
-        let distill = args
-            .get("distill")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let memories = if distill {
-            match &self.distiller {
-                Some(d) => {
-                    let conv_id = args
-                        .get("conversation_id")
-                        .and_then(Value::as_str)
-                        .unwrap_or("compile");
-                    let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
-
-                    // Run distillation pipeline — persists knowledge memories
-                    let memories = d.distill(conv_id, &messages, tenant_id, user_id).await?;
-
-                    // Also persist decisions as Knowledge-type memories.
-                    // Each decision goes through the same security gate as
-                    // the distiller (Phase 2) and is deduplicated against
-                    // existing knowledge memories by content hash, so that
-                    // re-stated decisions don't stack up unbounded.
-                    let noise_filter = lore_scope::filter::NoiseFilter::new();
-                    let security_filter = lore_scope::filter::SecurityFilter::new();
-                    let existing = d
-                        .store()
-                        .get_by_memory_type(tenant_id, MemoryType::Knowledge)
-                        .await?;
-                    for dec in &compiled.decisions {
-                        let content =
-                            format!("Decision: {} — Rationale: {}", dec.decision, dec.rationale);
-                        let probe = Message::new("user", &content);
-                        if security_filter.is_sensitive(&probe) {
-                            // Skip decisions that look like secrets.
-                            continue;
-                        }
-                        if noise_filter.is_noise(&probe) {
-                            // Skip decisions that are pure chatter.
-                            continue;
-                        }
-                        // Deduplicate: if a knowledge memory with identical
-                        // content already exists, skip the insert.
-                        let dup = existing.iter().any(|e| e.content == content);
-                        if dup {
-                            continue;
-                        }
-                        let mut exp = Experience::new(
-                            tenant_id,
-                            MemoryType::Knowledge,
-                            content,
-                            dec.importance,
-                        );
-                        exp.source = "compile".to_string();
-                        d.store().create(&exp).await?;
-                    }
-
-                    Some(memories)
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
-
-        let payload = serde_json::json!({
-            "knowledge": compiled.knowledge,
-            "decisions": compiled.decisions,
-            "session": compiled.session,
-            "prompt": prompt,
-            "cognition": {
-                "user_entity_id": 1,
-                "facts_compiled": user_facts.len(),
-                "facts_stored": stored_facts,
-            },
-            "distilled_memories": memories,
-        });
-        Ok(ToolCallResult::text(payload.to_string()))
-    }
 }
 
 /// Tool: search character knowledge graph (`character_search`).
@@ -753,9 +646,7 @@ async fn build_server(
                     "required": ["memory_id"]
                 }),
             },
-            Arc::new(MemoryFeedbackTool {
-                store: store.clone(),
-            }),
+            Arc::new(MemoryFeedbackTool),
         )
         .await;
 
@@ -779,40 +670,15 @@ async fn build_server(
         .await;
 
     // memory_compile
+    let compile_fact_store =
+        Arc::new(SqliteFactStore::open(&cfg.db_path).context("open fact store for compile tool")?);
     builder = builder
         .tool(
-            ToolDefinition {
-                name: "memory_compile".into(),
-                description: "Compile conversation into structured knowledge + decisions + session state. Optionally distill memories.".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "messages": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "role": {"type": "string", "enum": ["user", "assistant", "system"]},
-                                    "content": {"type": "string"}
-                                },
-                                "required": ["role", "content"]
-                            }
-                        },
-                        "distill": {"type": "boolean", "default": false, "description": "Also run distillation pipeline"},
-                        "conversation_id": {"type": "string", "description": "Required when distill=true"},
-                        "tenant_id": {"type": "string", "default": "default"},
-                        "user_id": {"type": "string"}
-                    },
-                    "required": ["messages"]
-                }),
-            },
-            Arc::new(MemoryCompileTool {
-                distiller: Some(distiller.clone()),
-                fact_store: Arc::new(
-                    SqliteFactStore::open(&cfg.db_path)
-                        .expect("open fact store for compile tool"),
-                ),
-            }),
+            memory_compile_definition(),
+            Arc::new(MemoryCompileTool::new(
+                Some(distiller.clone()),
+                compile_fact_store,
+            )),
         )
         .await;
 

@@ -34,10 +34,12 @@
 pub mod character;
 pub mod classifier;
 pub mod cognition;
+pub mod cognition_compiler;
 pub mod compiler;
 pub mod config;
 pub mod conversation_compiler;
 pub mod detector;
+pub mod dictionary;
 pub mod distiller;
 pub mod embed;
 pub mod entity_resolver;

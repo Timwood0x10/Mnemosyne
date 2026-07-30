@@ -1,32 +1,28 @@
-//! FactStore — SQLite persistence layer for Facts.
+//! FactStore — SQLite persistence layer for immutable cognition facts.
 //!
-//! Implements the [`FactStore`] trait using SQLite. Facts are stored in a
-//! single `facts` table with a JSON `payload` column for flexible schemas.
-//!
-//! ## Schema
-//!
-//! ```sql
-//! CREATE TABLE IF NOT EXISTS facts (
-//!     id           INTEGER PRIMARY KEY AUTOINCREMENT,
-//!     entity_id    INTEGER NOT NULL,
-//!     fact_type    TEXT NOT NULL,
-//!     time         INTEGER NOT NULL,
-//!     payload      TEXT NOT NULL,   -- JSON
-//!     evidence_id  INTEGER,
-//!     created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-//! );
-//! CREATE INDEX idx_facts_entity ON facts(entity_id);
-//! CREATE INDEX idx_facts_type ON facts(entity_id, fact_type);
-//! CREATE INDEX idx_facts_time ON facts(entity_id, time);
-//! ```
+//! The implementation uses explicit transactions, strict decoding, and the
+//! crate-wide storage error type. No database or serialization failure is
+//! converted into a successful-looking zero or empty result.
 
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cognition::{Fact, FactStore, FactType};
+use crate::error::{Error, Result, StorageError};
 
-const SCHEMA: &str = "
+const CORE_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS entities (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id    TEXT NOT NULL DEFAULT 'default',
+    external_key TEXT,
+    name         TEXT NOT NULL,
+    entity_type  TEXT NOT NULL DEFAULT 'person',
+    status       TEXT NOT NULL DEFAULT 'active',
+    importance   REAL DEFAULT 0.5,
+    created_at   INTEGER DEFAULT (strftime('%s','now')),
+    updated_at   INTEGER DEFAULT (strftime('%s','now'))
+);
 CREATE TABLE IF NOT EXISTS facts (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     entity_id    INTEGER NOT NULL,
@@ -36,9 +32,29 @@ CREATE TABLE IF NOT EXISTS facts (
     evidence_id  INTEGER,
     created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
 );
+CREATE TABLE IF NOT EXISTS evidence (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id    TEXT NOT NULL DEFAULT 'default',
+    doc_id       INTEGER,
+    chapter_id   INTEGER,
+    start_offset INTEGER,
+    end_offset   INTEGER,
+    content      TEXT,
+    created_at   INTEGER DEFAULT (strftime('%s','now'))
+);
+CREATE TABLE IF NOT EXISTS aliases (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id   INTEGER NOT NULL,
+    alias       TEXT NOT NULL,
+    alias_type  TEXT NOT NULL DEFAULT 'known_as',
+    confidence  REAL DEFAULT 1.0,
+    UNIQUE(entity_id, alias)
+);
 CREATE INDEX IF NOT EXISTS idx_facts_entity ON facts(entity_id);
 CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(entity_id, fact_type);
 CREATE INDEX IF NOT EXISTS idx_facts_time ON facts(entity_id, time);
+CREATE INDEX IF NOT EXISTS idx_aliases_core_entity ON aliases(entity_id);
+CREATE INDEX IF NOT EXISTS idx_aliases_core_alias ON aliases(alias);
 ";
 
 /// SQLite-backed fact store.
@@ -47,44 +63,252 @@ pub struct SqliteFactStore {
 }
 
 impl SqliteFactStore {
-    /// Open (or create) a fact store at the given path.
-    pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
+    /// Open or create a fact store at `path`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if SQLite cannot open or initialize the schema.
+    pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(SqliteFactStore {
+        Self::initialize_schema(&conn)?;
+        Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Open an in-memory fact store (for testing).
-    pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
+    /// Open an isolated in-memory fact store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if SQLite cannot initialize the schema.
+    pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(SCHEMA)?;
-        Ok(SqliteFactStore {
+        Self::initialize_schema(&conn)?;
+        Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Convert a database row to a Fact.
-    fn row_to_fact(row: &rusqlite::Row) -> rusqlite::Result<Fact> {
-        let type_str: String = row.get("fact_type")?;
-        let fact_type = match type_str.as_str() {
-            "identity" => FactType::Identity,
-            "preference" => FactType::Preference,
-            "goal" => FactType::Goal,
-            "event" => FactType::Event,
-            "relationship" => FactType::Relationship,
-            "emotion" => FactType::Emotion,
-            "location" => FactType::Location,
-            "occupation" => FactType::Occupation,
-            "interest" => FactType::Interest,
-            "habit" => FactType::Habit,
-            _ => FactType::Event,
-        };
-        let payload_str: String = row.get("payload")?;
-        let payload: serde_json::Value =
-            serde_json::from_str(&payload_str).unwrap_or(serde_json::Value::Null);
+    /// Initialize the four-table cognition schema and upgrade compatible legacy tables.
+    fn initialize_schema(conn: &Connection) -> Result<()> {
+        conn.execute_batch(CORE_SCHEMA)?;
+        Self::ensure_column(
+            conn,
+            "entities",
+            "tenant_id",
+            "TEXT NOT NULL DEFAULT 'default'",
+        )?;
+        Self::ensure_column(conn, "entities", "external_key", "TEXT")?;
+        Self::ensure_column(
+            conn,
+            "evidence",
+            "tenant_id",
+            "TEXT NOT NULL DEFAULT 'default'",
+        )?;
+        conn.execute_batch(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_tenant_external
+                 ON entities(tenant_id, external_key) WHERE external_key IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS idx_entities_tenant_name
+                 ON entities(tenant_id, name);",
+        )?;
+        Ok(())
+    }
 
+    fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if row.get::<_, String>(1)? == column {
+                return Ok(());
+            }
+        }
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))?;
+        Ok(())
+    }
+
+    /// Resolve or create a tenant-scoped entity with an optional external key.
+    ///
+    /// The `(tenant_id, external_key)` pair is the stable identity boundary for
+    /// users. Non-user entities can omit `external_key` and remain name based.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the entity cannot be read or created.
+    pub fn resolve_entity(
+        &self,
+        tenant_id: &str,
+        external_key: Option<&str>,
+        name: &str,
+        entity_type: &str,
+    ) -> Result<i64> {
+        let conn = self.lock_conn()?;
+        let existing = if let Some(key) = external_key {
+            conn.query_row(
+                "SELECT id FROM entities WHERE tenant_id = ?1 AND external_key = ?2",
+                params![tenant_id, key],
+                |row| row.get(0),
+            )
+            .optional()?
+        } else {
+            conn.query_row(
+                "SELECT id FROM entities WHERE tenant_id = ?1 AND external_key IS NULL AND name = ?2 AND entity_type = ?3",
+                params![tenant_id, name, entity_type],
+                |row| row.get(0),
+            )
+            .optional()?
+        };
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        if tenant_id == "default" && external_key == Some("default") && entity_type == "user" {
+            let root = conn
+                .query_row(
+                    "SELECT name, entity_type, external_key FROM entities WHERE id = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            match root {
+                None => {
+                    conn.execute(
+                        "INSERT INTO entities (id, tenant_id, external_key, name, entity_type) VALUES (1, ?1, ?2, ?3, ?4)",
+                        params![tenant_id, external_key, name, entity_type],
+                    )?;
+                    return Ok(1);
+                }
+                Some((root_name, root_type, None))
+                    if root_name.eq_ignore_ascii_case("user") && root_type == "user" =>
+                {
+                    conn.execute(
+                        "UPDATE entities SET tenant_id = ?1, external_key = ?2 WHERE id = 1",
+                        params![tenant_id, external_key],
+                    )?;
+                    return Ok(1);
+                }
+                Some(_) => {}
+            }
+        }
+
+        conn.execute(
+            "INSERT INTO entities (tenant_id, external_key, name, entity_type) VALUES (?1, ?2, ?3, ?4)",
+            params![tenant_id, external_key, name, entity_type],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Resolve or create a tenant-scoped user entity.
+    ///
+    /// Empty user ids map to `default` for backward compatibility. The returned
+    /// id is stable for the same tenant/user pair and isolated from every other
+    /// pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when identity resolution fails.
+    pub fn resolve_user(&self, tenant_id: &str, user_id: &str) -> Result<i64> {
+        let tenant_id = if tenant_id.trim().is_empty() {
+            "default"
+        } else {
+            tenant_id.trim()
+        };
+        let user_id = if user_id.trim().is_empty() {
+            "default"
+        } else {
+            user_id.trim()
+        };
+        let name = if user_id == "default" {
+            "User".to_string()
+        } else {
+            format!("User:{user_id}")
+        };
+        self.resolve_entity(tenant_id, Some(user_id), &name, "user")
+    }
+
+    /// Resolve an existing tenant-scoped entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the lookup fails.
+    pub fn find_entity(
+        &self,
+        tenant_id: &str,
+        external_key: Option<&str>,
+        name: &str,
+    ) -> Result<Option<(i64, String, String)>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = if external_key.is_some() {
+            conn.prepare(
+                "SELECT id, name, entity_type FROM entities WHERE tenant_id = ?1 AND external_key = ?2",
+            )?
+        } else {
+            conn.prepare(
+                "SELECT id, name, entity_type FROM entities WHERE tenant_id = ?1 AND name = ?2 ORDER BY id LIMIT 1",
+            )?
+        };
+        let key = external_key.unwrap_or(name);
+        stmt.query_row(params![tenant_id, key], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .optional()
+        .map_err(Error::from)
+    }
+
+    fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|error| Error::Storage(StorageError::LockPoisoned(error.to_string())))
+    }
+
+    fn fact_type_name(fact_type: FactType) -> &'static str {
+        match fact_type {
+            FactType::Identity => "identity",
+            FactType::Preference => "preference",
+            FactType::Goal => "goal",
+            FactType::Event => "event",
+            FactType::Relationship => "relationship",
+            FactType::Emotion => "emotion",
+            FactType::Location => "location",
+            FactType::Occupation => "occupation",
+            FactType::Interest => "interest",
+            FactType::Habit => "habit",
+        }
+    }
+
+    fn parse_fact_type(value: &str) -> Result<FactType> {
+        match value {
+            "identity" => Ok(FactType::Identity),
+            "preference" => Ok(FactType::Preference),
+            "goal" => Ok(FactType::Goal),
+            "event" => Ok(FactType::Event),
+            "relationship" => Ok(FactType::Relationship),
+            "emotion" => Ok(FactType::Emotion),
+            "location" => Ok(FactType::Location),
+            "occupation" => Ok(FactType::Occupation),
+            "interest" => Ok(FactType::Interest),
+            "habit" => Ok(FactType::Habit),
+            other => Err(Error::Storage(StorageError::InvalidData(format!(
+                "unknown fact type `{other}`"
+            )))),
+        }
+    }
+
+    fn row_to_fact(row: &rusqlite::Row<'_>) -> Result<Fact> {
+        let fact_type = Self::parse_fact_type(&row.get::<_, String>("fact_type")?)?;
+        let payload_text: String = row.get("payload")?;
+        let payload = serde_json::from_str(&payload_text).map_err(|error| {
+            Error::Storage(StorageError::InvalidData(format!(
+                "fact payload is not valid JSON: {error}"
+            )))
+        })?;
         Ok(Fact {
             id: Some(row.get("id")?),
             entity_id: row.get("entity_id")?,
@@ -95,80 +319,98 @@ impl SqliteFactStore {
             created_at: row.get("created_at")?,
         })
     }
+
+    fn read_facts(
+        &self,
+        sql: &str,
+        entity_id: i64,
+        fact_type: Option<FactType>,
+    ) -> Result<Vec<Fact>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(sql)?;
+        let mut rows = match fact_type {
+            Some(value) => stmt.query(params![entity_id, Self::fact_type_name(value)])?,
+            None => stmt.query(params![entity_id])?,
+        };
+        let mut facts = Vec::new();
+        while let Some(row) = rows.next()? {
+            facts.push(Self::row_to_fact(row)?);
+        }
+        Ok(facts)
+    }
 }
 
 impl FactStore for SqliteFactStore {
-    fn insert_fact(&self, fact: &Fact) -> i64 {
-        let type_str = format!("{:?}", fact.fact_type).to_lowercase();
-        let payload_str = serde_json::to_string(&fact.payload).unwrap_or_default();
-        self.conn
-            .lock()
-            .unwrap()
-            .execute(
-                "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at)
+    fn insert_fact(&self, fact: &Fact) -> Result<i64> {
+        let payload = serde_json::to_string(&fact.payload)?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![
+            params![
+                fact.entity_id,
+                Self::fact_type_name(fact.fact_type),
+                fact.time,
+                payload,
+                fact.evidence_id,
+                fact.created_at,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn insert_batch(&self, facts: &[Fact]) -> Result<usize> {
+        if facts.is_empty() {
+            return Ok(0);
+        }
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        {
+            let mut stmt = transaction.prepare(
+                "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for fact in facts {
+                let payload = serde_json::to_string(&fact.payload)?;
+                stmt.execute(params![
                     fact.entity_id,
-                    type_str,
+                    Self::fact_type_name(fact.fact_type),
                     fact.time,
-                    payload_str,
+                    payload,
                     fact.evidence_id,
                     fact.created_at,
-                ],
-            )
-            .unwrap_or(0);
-        self.conn.lock().unwrap().last_insert_rowid()
-    }
-
-    fn insert_batch(&self, facts: &[Fact]) -> usize {
-        if facts.is_empty() {
-            return 0;
-        }
-        // Use a transaction for batch inserts
-        self.conn.lock().unwrap().execute_batch("BEGIN;").ok();
-        let mut count = 0usize;
-        for fact in facts {
-            if self.insert_fact(fact) > 0 {
-                count += 1;
+                ])?;
             }
         }
-        self.conn.lock().unwrap().execute_batch("COMMIT;").ok();
-        count
+        transaction.commit()?;
+        Ok(facts.len())
     }
 
-    fn get_facts(&self, entity_id: i64) -> Vec<Fact> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at FROM facts WHERE entity_id = ?1 ORDER BY time")
-            .unwrap();
-        let rows = stmt
-            .query_map(params![entity_id], Self::row_to_fact)
-            .unwrap();
-        rows.filter_map(|r| r.ok()).collect()
+    fn get_facts(&self, entity_id: i64) -> Result<Vec<Fact>> {
+        self.read_facts(
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+             FROM facts WHERE entity_id = ?1 ORDER BY time, created_at, id",
+            entity_id,
+            None,
+        )
     }
 
-    fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Vec<Fact> {
-        let conn = self.conn.lock().unwrap();
-        let type_str = format!("{:?}", fact_type).to_lowercase();
-        let mut stmt = conn
-            .prepare("SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at FROM facts WHERE entity_id = ?1 AND fact_type = ?2 ORDER BY time")
-            .unwrap();
-        let rows = stmt
-            .query_map(params![entity_id, type_str], Self::row_to_fact)
-            .unwrap();
-        rows.filter_map(|r| r.ok()).collect()
+    fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Result<Vec<Fact>> {
+        self.read_facts(
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+             FROM facts WHERE entity_id = ?1 AND fact_type = ?2 ORDER BY time, created_at, id",
+            entity_id,
+            Some(fact_type),
+        )
     }
 
-    fn get_timeline(&self, entity_id: i64) -> Vec<Fact> {
-        // Timeline is just facts sorted by time (newest first for display)
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at FROM facts WHERE entity_id = ?1 ORDER BY time DESC")
-            .unwrap();
-        let rows = stmt
-            .query_map(params![entity_id], Self::row_to_fact)
-            .unwrap();
-        rows.filter_map(|r| r.ok()).collect()
+    fn get_timeline(&self, entity_id: i64) -> Result<Vec<Fact>> {
+        self.read_facts(
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+             FROM facts WHERE entity_id = ?1 ORDER BY time DESC, created_at DESC, id DESC",
+            entity_id,
+            None,
+        )
     }
 }
 
@@ -176,11 +418,11 @@ impl FactStore for SqliteFactStore {
 mod tests {
     use super::*;
 
-    fn sample_fact(entity_id: i64, ft: FactType) -> Fact {
+    fn sample_fact(entity_id: i64, fact_type: FactType) -> Fact {
         Fact {
             id: None,
             entity_id,
-            fact_type: ft,
+            fact_type,
             time: 2026,
             payload: serde_json::json!({"test": true}),
             evidence_id: None,
@@ -188,87 +430,196 @@ mod tests {
         }
     }
 
-    /// Objective: Verify that a fact inserted via insert_fact can be retrieved.
-    /// Invariants: After inserting and getting, the payload matches.
+    /// Objective: Verify single and batch writes preserve every fact.
+    /// Invariants: Every successful write returns an id/count and all rows are readable.
     #[test]
-    fn insert_and_retrieve() {
-        let store = SqliteFactStore::open_in_memory().unwrap();
-        let fact = sample_fact(10001, FactType::Event);
-        let id = store.insert_fact(&fact);
-        assert!(id > 0, "insert should return a positive id");
+    fn writes_are_atomic_and_retrievable() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let id = store
+            .insert_fact(&sample_fact(100, FactType::Event))
+            .expect("insert one fact");
+        assert!(id > 0, "A successful insert must return a positive row id");
 
-        let facts = store.get_facts(10001);
-        assert_eq!(facts.len(), 1, "should retrieve exactly one fact");
-        assert_eq!(facts[0].entity_id, 10001);
-        assert_eq!(facts[0].fact_type, FactType::Event);
+        let batch = vec![
+            sample_fact(101, FactType::Goal),
+            sample_fact(102, FactType::Preference),
+        ];
+        let count = store.insert_batch(&batch).expect("insert fact batch");
+        assert_eq!(
+            count, 2,
+            "The transaction must commit every fact in the batch"
+        );
+        assert_eq!(
+            store.get_facts(100).expect("read facts").len(),
+            1,
+            "The single inserted fact must remain readable"
+        );
     }
 
-    /// Objective: Verify that batch insert inserts all facts in a single
-    /// transaction.
-    /// Invariants: All 5 facts are retrievable after batch insert.
+    /// Objective: Verify fact filters and timelines preserve type and order.
+    /// Invariants: Type filtering excludes other facts and timeline is newest first.
     #[test]
-    fn batch_insert_commits_all() {
-        let store = SqliteFactStore::open_in_memory().unwrap();
-        let facts: Vec<Fact> = (0..5)
-            .map(|i| sample_fact(10001 + i, FactType::Preference))
-            .collect();
-        let n = store.insert_batch(&facts);
-        assert_eq!(n, 5, "batch insert should return count of inserted rows");
+    fn queries_preserve_type_and_timeline_order() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        for (year, fact_type) in [
+            (2024, FactType::Event),
+            (2025, FactType::Preference),
+            (2026, FactType::Event),
+        ] {
+            let mut fact = sample_fact(7, fact_type);
+            fact.time = year;
+            store.insert_fact(&fact).expect("insert ordered fact");
+        }
 
-        for i in 0..5 {
-            let f = store.get_facts(10001 + i);
-            assert_eq!(f.len(), 1, "entity {} should have one fact", 10001 + i);
+        let events = store
+            .get_facts_by_type(7, FactType::Event)
+            .expect("filter event facts");
+        assert_eq!(
+            events.len(),
+            2,
+            "Only Event facts should match the type filter"
+        );
+        let timeline = store.get_timeline(7).expect("read timeline");
+        assert_eq!(
+            timeline.len(),
+            3,
+            "The timeline must include every entity fact"
+        );
+        assert_eq!(timeline[0].time, 2026, "The newest fact must be first");
+        assert_eq!(timeline[2].time, 2024, "The oldest fact must be last");
+    }
+
+    /// Objective: Verify the final cognition schema is complete and idempotent.
+    /// Invariants: Re-initialization preserves rows and all four core tables remain available.
+    #[test]
+    fn core_schema_is_complete_and_idempotent() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            SqliteFactStore::initialize_schema(&conn).expect("reinitialize cognition schema");
+            for table in ["entities", "facts", "evidence", "aliases"] {
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                        params![table],
+                        |row| row.get(0),
+                    )
+                    .expect("query cognition table existence");
+                assert_eq!(
+                    count, 1,
+                    "Core cognition table `{table}` must exist exactly once"
+                );
+            }
         }
     }
 
-    /// Objective: Verify get_facts_by_type returns only matching facts.
-    /// Invariants: Entity with 1 Event + 1 Preference returns 1 each.
+    /// Objective: Verify user identities are stable and tenant isolated.
+    /// Invariants: Same tenant/user resolves once; changing either component changes the entity id.
     #[test]
-    fn filter_by_type() {
-        let store = SqliteFactStore::open_in_memory().unwrap();
-        store.insert_fact(&sample_fact(42, FactType::Event));
-        store.insert_fact(&sample_fact(42, FactType::Preference));
+    fn user_identity_is_stable_and_tenant_isolated() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let default_id = store
+            .resolve_user("default", "")
+            .expect("resolve backward-compatible root user");
+        let default_again = store
+            .resolve_user("default", "default")
+            .expect("resolve the same root user again");
+        let tenant_a_user = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve tenant A user");
+        let tenant_b_user = store
+            .resolve_user("tenant-b", "alice")
+            .expect("resolve tenant B user");
+        let tenant_a_other = store
+            .resolve_user("tenant-a", "bob")
+            .expect("resolve second tenant A user");
 
-        let events = store.get_facts_by_type(42, FactType::Event);
-        assert_eq!(events.len(), 1, "should find exactly 1 event fact");
-        assert_eq!(events[0].fact_type, FactType::Event);
-
-        let prefs = store.get_facts_by_type(42, FactType::Preference);
-        assert_eq!(prefs.len(), 1, "should find exactly 1 preference fact");
+        assert_eq!(
+            default_id, 1,
+            "The compatible default User root must retain id 1"
+        );
+        assert_eq!(
+            default_again, default_id,
+            "Repeated identity resolution must be stable"
+        );
+        assert_ne!(
+            tenant_a_user, tenant_b_user,
+            "The same user id in different tenants must not collide"
+        );
+        assert_ne!(
+            tenant_a_user, tenant_a_other,
+            "Different users in one tenant must not collide"
+        );
     }
 
-    /// Objective: Verify timeline is sorted by time descending.
-    /// Invariants: Facts from 2024, 2025, 2026 come back in reverse order.
+    /// Objective: Verify a legacy entities/evidence schema upgrades without data loss.
+    /// Invariants: Existing rows survive and tenant identity columns become queryable.
     #[test]
-    fn timeline_is_sorted_descending() {
-        let store = SqliteFactStore::open_in_memory().unwrap();
-        for year in &[2024i32, 2025, 2026] {
-            let mut f = sample_fact(1, FactType::Event);
-            f.time = *year;
-            store.insert_fact(&f);
+    fn legacy_schema_upgrade_preserves_existing_rows() {
+        let conn = Connection::open_in_memory().expect("open legacy database");
+        conn.execute_batch(
+            "CREATE TABLE entities (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL,
+                 entity_type TEXT NOT NULL DEFAULT 'person'
+             );
+             CREATE TABLE evidence (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 doc_id INTEGER NOT NULL,
+                 chapter_id INTEGER NOT NULL,
+                 content TEXT
+             );
+             INSERT INTO entities (name) VALUES ('Legacy Person');
+             INSERT INTO evidence (doc_id, chapter_id, content) VALUES (1, 1, 'legacy');",
+        )
+        .expect("create legacy schema fixture");
+        SqliteFactStore::initialize_schema(&conn).expect("upgrade legacy cognition schema");
+
+        let identity: (String, String) = conn
+            .query_row(
+                "SELECT tenant_id, name FROM entities WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read upgraded legacy entity");
+        assert_eq!(
+            identity.0, "default",
+            "Legacy entities must receive the default tenant"
+        );
+        assert_eq!(
+            identity.1, "Legacy Person",
+            "Schema migration must preserve entity names"
+        );
+        let evidence: String = conn
+            .query_row("SELECT content FROM evidence WHERE id = 1", [], |row| {
+                row.get(0)
+            })
+            .expect("read upgraded evidence row");
+        assert_eq!(
+            evidence, "legacy",
+            "Schema migration must preserve evidence content"
+        );
+    }
+
+    /// Objective: Verify malformed persisted rows surface typed errors.
+    /// Invariants: Unknown fact types and invalid JSON never degrade into Event/null facts.
+    #[test]
+    fn malformed_rows_return_invalid_data_errors() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            conn.execute(
+                "INSERT INTO facts (entity_id, fact_type, time, payload, created_at) VALUES (1, 'unknown', 1, '{bad', 1)",
+                [],
+            )
+            .expect("insert deliberately malformed row");
         }
-        let tl = store.get_timeline(1);
-        assert_eq!(tl.len(), 3, "timeline should have 3 entries");
-        assert!(tl[0].time >= tl[1].time, "timeline should be descending");
-        assert!(tl[1].time >= tl[2].time, "timeline should be descending");
-    }
-
-    /// Objective: Verify that inserting a fact with unknown field recovers.
-    /// Invariants: A fact with extra JSON fields is stored and retrieved intact.
-    #[test]
-    fn fact_with_extra_fields() {
-        let store = SqliteFactStore::open_in_memory().unwrap();
-        let mut fact = sample_fact(7, FactType::Goal);
-        fact.payload = serde_json::json!({
-            "goal": "finish LoreScope",
-            "deadline": "2026-08",
-            "priority": "high",
-        });
-        store.insert_fact(&fact);
-
-        let facts = store.get_facts(7);
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].payload["goal"], "finish LoreScope");
-        assert_eq!(facts[0].payload["priority"], "high");
+        let error = store
+            .get_facts(1)
+            .expect_err("malformed rows must fail decoding");
+        assert!(
+            matches!(error, Error::Storage(StorageError::InvalidData(_))),
+            "Malformed persisted data must return StorageError::InvalidData, got {error:?}"
+        );
     }
 }

@@ -46,6 +46,26 @@ pub trait LanguageProvider: Send + Sync {
     fn chapter_pattern(&self) -> &str {
         "第"
     }
+
+    /// Strong action verbs for event extraction (e.g. 杀, killed, captured).
+    fn strong_verbs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Weaker action / motion / emotion verbs (e.g. 大怒, exclaimed, wept).
+    fn action_verbs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Verbs that indicate hostile relationship changes (杀, attacked, killed).
+    fn hostile_verbs(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    /// Verbs that indicate friendly relationship changes (救, saved, blessed).
+    fn friendly_verbs(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// A single profile extraction pattern definition.
@@ -169,6 +189,38 @@ impl LanguageProvider for ChineseLanguageProvider {
     fn chapter_pattern(&self) -> &str {
         "第"
     }
+
+    fn strong_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .chinese_strong_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn action_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .chinese_action_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn hostile_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .chinese_hostile_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn friendly_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .chinese_friendly_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 // ── English Language Provider ───────────────────────────────────────────────
@@ -265,5 +317,37 @@ impl LanguageProvider for EnglishLanguageProvider {
 
     fn chapter_pattern(&self) -> &str {
         "BOOK|CHAPTER|EPILOGUE|PART"
+    }
+
+    fn strong_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .english_strong_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn action_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .english_action_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn hostile_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .english_hostile_verbs()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn friendly_verbs(&self) -> Vec<String> {
+        crate::dictionary::global()
+            .english_friendly_verbs()
+            .iter()
+            .cloned()
+            .collect()
     }
 }
