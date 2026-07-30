@@ -17,8 +17,7 @@ async fn fengshen_run() {
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
     println!("全文: {} 字符\n", doc.text.len());
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "封神演义".into();
+    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
 
     // Load JSON config profile
     let mut registry = EntityRegistry::new();

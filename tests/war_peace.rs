@@ -2,11 +2,9 @@
 //! Run: cargo test --test war_peace -- --nocapture
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use lore_scope::compiler::CompileContext;
 use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 
@@ -18,8 +16,7 @@ async fn war_peace() {
     let text = &doc.text;
     println!("Text: {} chars\n", text.len());
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "War and Peace".into();
+    let mut ctx = CompileContext { document_title: "War and Peace".into(), ..Default::default() };
 
     // Try with empty dict — English text won't match Chinese patterns
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();

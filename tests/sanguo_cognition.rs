@@ -1,13 +1,8 @@
 //! Full 三国演义 cognitive pipeline: Observation → Fact → Store → Snapshot.
 //! Run: cargo test --test sanguo_cognition run -- --nocapture
 
-use std::sync::Arc;
-
-use lore_scope::cognition::{
-    FactStore, FactType, Rule, StateEngine, build_context, build_snapshot,
-};
+use lore_scope::cognition::{FactStore, Rule, StateEngine};
 use lore_scope::fact_store::SqliteFactStore;
-use lore_scope::language::{ChineseLanguageProvider, LanguageProvider};
 use lore_scope::observation_compiler::{DefaultRule, compile_observations};
 
 #[tokio::test]
@@ -19,7 +14,7 @@ async fn run() {
 
     // 1. Sentence splitting (by Chinese period and other separators)
     let sentences: Vec<&str> = text
-        .split(|c: char| c == '。' || c == '！' || c == '？' || c == '\n')
+        .split(['。', '！', '？', '\n'])
         .filter(|s| s.len() >= 4)
         .collect();
     println!("Sentences: {}\n", sentences.len());
@@ -128,14 +123,14 @@ async fn run() {
     println!("\nStored: {} facts", stored);
 
     // 6. Entity snapshots
-    let state_engine = StateEngine::new();
+    let _state_engine = StateEngine::new();
     // Find entities with the most facts
     let mut by_entity: HashMap<i64, Vec<&lore_scope::cognition::Fact>> = HashMap::new();
     for f in &facts {
         by_entity.entry(f.entity_id).or_default().push(f);
     }
     let mut ranked: Vec<(&i64, &Vec<&lore_scope::cognition::Fact>)> = by_entity.iter().collect();
-    ranked.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     println!("\n━━━ Top entities by fact count ━━━━━━━━━\n");
     for (eid, efacts) in ranked.iter().take(10) {
@@ -150,6 +145,6 @@ async fn run() {
     println!("  Stored: {}", stored);
     println!("  Unique entities: {}", by_entity.len());
 
-    assert!(facts.len() > 0, "should generate facts");
+    assert!(!facts.is_empty(), "should generate facts");
     println!("\n========== COMPLETE ==========");
 }

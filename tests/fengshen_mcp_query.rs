@@ -1,7 +1,6 @@
 //! Ingest 封神演义 into MCP store, then query 孔宣 via MCP tools.
 //! Run: cargo test --test fengshen_mcp_query -- --nocapture
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use lore_scope::compiler::CompileContext;
@@ -20,8 +19,7 @@ async fn fengshen_mcp_query() {
 
     // 1. Compile
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "封神演义".into();
+    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
 
     let mut registry = EntityRegistry::new();
     let provider =
@@ -99,7 +97,7 @@ async fn fengshen_mcp_query() {
                 "chapter": ev.timestamp,
                 "participants": ev.participants.iter().map(|p| &p.entity_name).collect::<Vec<_>>(),
             }),
-            confidence: ev.importance as f64,
+            confidence: ev.importance,
             created_at: 0,
         };
         let _ = k.create_object(&obj).await;

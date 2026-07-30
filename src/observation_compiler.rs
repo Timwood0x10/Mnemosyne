@@ -28,7 +28,7 @@ use crate::cognition::{Fact, FactType, Mention, Observation, Rule};
 /// # Returns
 ///
 /// A list of Observations extracted from the text.
-pub fn compile_observations<'a>(
+pub fn compile_observations(
     sentences: &[&str],
     verbs: &[String],
     resolve_mention: &dyn Fn(&str) -> Option<Mention>,

@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::classifier::MemoryClassifier;
+use crate::cognition::{Fact, FactType};
 use crate::extractor::{ExperienceExtractor, ExtractorConfig};
 use crate::filter::NoiseFilter;
 use crate::scorer::ImportanceScorer;
@@ -336,6 +337,47 @@ mod tests {
         let r = compiler.compile("t1", &msgs);
         assert!(r.knowledge.len() <= 1);
     }
+}
+
+/// Convert conversation memories into User Model Facts.
+///
+/// Bridges the Memory Distillation pipeline (memories) with the Cognition
+/// Engine's User model (Facts). Each memory becomes a User Fact typed
+/// according to its MemoryType.
+pub fn user_facts_from_memories(memories: &[Memory]) -> Vec<Fact> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    memories
+        .iter()
+        .filter(|m| m.importance > 0.3)
+        .enumerate()
+        .map(|(i, m)| {
+            let fact_type = match m.memory_type {
+                MemoryType::Preference => FactType::Preference,
+                MemoryType::Skill => FactType::Interest,
+                MemoryType::Experience => FactType::Event,
+                MemoryType::Profile => FactType::Identity,
+                MemoryType::Knowledge => FactType::Interest,
+                _ => FactType::Event,
+            };
+            Fact {
+                id: None,
+                entity_id: 0,
+                fact_type,
+                time: (now - i as i64) as i32,
+                payload: serde_json::json!({
+                    "content": m.content,
+                    "summary": m.summary,
+                    "confidence": m.importance,
+                }),
+                evidence_id: None,
+                created_at: now,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

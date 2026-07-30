@@ -112,7 +112,6 @@ impl Default for EvidenceWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::params;
 
     fn create_evidence_table(conn: &Connection) {
         conn.execute_batch(

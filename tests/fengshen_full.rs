@@ -6,7 +6,7 @@ use lore_scope::compiler::document::Document;
 use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
-use lore_scope::knowledge::{KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
+use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 const DB: &str = "/tmp/fengshen_mcp.db";
@@ -18,8 +18,7 @@ async fn fengshen_full() {
     // 1. Compile 封神演义
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
     let text = &doc.text;
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "封神演义".into();
+    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
     let mut registry = EntityRegistry::new();
     let provider =
         Arc::new(JsonEntityProvider::from_file("config/entity_profiles/fengshen.json").unwrap());
@@ -139,11 +138,11 @@ async fn fengshen_full() {
         } else {
             i as i32 / 100
         };
-        if !chapter_ids.contains_key(&ch) {
+        if let std::collections::hash_map::Entry::Vacant(e) = chapter_ids.entry(ch) {
             let cid = (ch * 100 + 1) as i64;
-            chapter_ids.insert(ch, cid);
+            e.insert(cid);
             // Create chapters table entry
-            conn.execute(
+            let _ = conn.execute(
                 "INSERT OR IGNORE INTO chapters (id, doc_id, chapter_no, title, content, start_offset, end_offset)
                  VALUES (?1, ?2, ?3, '', '', 0, 0)",
                 rusqlite::params![cid, doc_id, ch],

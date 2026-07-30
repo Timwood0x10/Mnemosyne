@@ -9,7 +9,7 @@ use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::writer::{EvidenceBatch, EvidenceWriter};
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
-use lore_scope::knowledge::{KnowledgeObject, KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
+use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 
 const DB: &str = "/tmp/warpeace_mcp.db";
 
@@ -23,8 +23,7 @@ async fn war_mcp() {
     let text = &doc.text;
     println!("Text: {} chars\n", text.len());
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "War and Peace".into();
+    let mut ctx = CompileContext { document_title: "War and Peace".into(), ..Default::default() };
 
     let mut registry = EntityRegistry::new();
     let provider =

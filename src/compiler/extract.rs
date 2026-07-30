@@ -367,7 +367,7 @@ fn scan_mentions(
                 continue;
             }
             // Only consider CJK characters as potential mention starts
-            if ch < '\u{4e00}' || ch > '\u{9fff}' {
+            if !('\u{4e00}'..='\u{9fff}').contains(&ch) {
                 ci += 1;
                 continue;
             }
@@ -381,7 +381,7 @@ fn scan_mentions(
                 // Check all chars in candidate are CJK
                 if !candidate
                     .chars()
-                    .all(|c| c >= '\u{4e00}' && c <= '\u{9fff}')
+                    .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
                 {
                     continue;
                 }

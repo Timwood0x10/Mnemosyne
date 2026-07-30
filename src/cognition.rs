@@ -109,13 +109,50 @@ pub trait StateAggregator: Send + Sync {
     fn aggregate(&self, facts: &[Fact]) -> serde_json::Value;
 }
 
-/// Typed current state (replace serde_json::Value eventually).
+/// Aggregates Emotion facts into trend state.
+///
+/// Scans Emotion-type facts for `trend` and `dimension` fields,
+/// then summarizes into Rising / Stable / Falling for each dimension.
+pub struct EmotionAggregator;
+
+impl StateAggregator for EmotionAggregator {
+    fn aggregate(&self, facts: &[Fact]) -> serde_json::Value {
+        let mut result = std::collections::HashMap::new();
+        for fact in facts.iter().filter(|f| f.fact_type == FactType::Emotion) {
+            let dimension = fact
+                .payload
+                .get("dimension")
+                .and_then(|v| v.as_str())
+                .unwrap_or("general")
+                .to_string();
+            let trend = fact
+                .payload
+                .get("trend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("stable")
+                .to_string();
+            result.insert(dimension, trend);
+        }
+        if result.is_empty() {
+            result.insert("general".to_string(), "stable".to_string());
+        }
+        serde_json::json!(result)
+    }
+}
+
+/// Current state rebuilt deterministically from immutable facts.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EntityState {
+    /// The most recent fact for each distinct goal.
     pub goals: Vec<Fact>,
+    /// The most recent fact for each preference topic.
     pub preferences: Vec<Fact>,
+    /// Emotion facts in chronological order for trend reconstruction.
     pub emotion_trend: Vec<Fact>,
+    /// The most recent events, newest first.
     pub recent_events: Vec<Fact>,
+    /// Values emitted by application-specific aggregators.
+    pub extensions: Vec<serde_json::Value>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

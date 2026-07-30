@@ -316,7 +316,70 @@ pub async fn register_knowledge_tools(
                     "required": ["source", "predicate", "old_target", "new_target"]
                 }),
             },
-            Arc::new(CorrectRelationHandler { store: kstore }),
+            Arc::new(CorrectRelationHandler { store: kstore.clone() }),
         )
         .await
+        .tool(
+            ToolDefinition {
+                name: "cognitive_context".into(),
+                description: "Return a structured cognitive snapshot for an entity: identity, preferences, goals, events, relationships, and timeline. Replaces the older inspect_entity for new cognition pipeline data.".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string", "description": "Entity name (e.g. 赵云, Pierre)"},
+                    },
+                    "required": ["name"]
+                }),
+            },
+            Arc::new(CognitiveContextHandler { store: kstore }),
+        )
+        .await
+}
+
+/// Handler for the `cognitive_context` tool.
+///
+/// Builds an EntitySnapshot from the knowledge store using the cognition
+/// pipeline: Facts → StateEngine → Snapshot → CognitiveContext.
+struct CognitiveContextHandler {
+    store: Arc<SQLiteKnowledgeStore>,
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CognitiveContextHandler {
+    async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
+        use crate::cognition::{FactStore as CognitionFactStore, StateEngine, build_snapshot};
+        use crate::fact_store::SqliteFactStore;
+
+        let name = req_str(args, "name")?;
+        let store = &self.store;
+
+        // 1. Resolve entity via the knowledge store
+        let object = store
+            .find_object_by_name(&name, None)
+            .await?
+            .ok_or_else(|| Error::NotFound(format!("entity `{name}` not found")))?;
+
+        // 2. Open a FactStore (reusing the same DB path, or in-memory)
+        let db_path = std::env::temp_dir().join("cognition_facts.db");
+        let db_str = db_path.to_str().unwrap_or("/tmp/cognition_facts.db");
+        let fact_store = SqliteFactStore::open(db_str)
+            .map_err(|e| Error::Config(format!("failed to open fact store: {e}")))?;
+
+        // 3. Query facts for this entity
+        let facts = fact_store.get_facts(object.id);
+
+        // 4. Build snapshot
+        let state_engine = StateEngine::new();
+        let snapshot = build_snapshot(
+            object.id,
+            object.name.clone(),
+            format!("{:?}", object.object_type),
+            facts,
+            &state_engine,
+        );
+
+        // 5. Return as JSON
+        let json = snapshot.format_json();
+        json_ok(&json)
+    }
 }

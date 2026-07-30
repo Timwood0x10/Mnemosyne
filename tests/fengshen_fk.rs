@@ -44,8 +44,7 @@ async fn fengshen_fk() {
 
     // 1. Compile
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "封神演义".into();
+    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
 
     let mut registry = EntityRegistry::new();
     let provider =
@@ -111,7 +110,7 @@ async fn fengshen_fk() {
                 "chapter": ev.timestamp,
                 "participants": ev.participants.iter().map(|p| &p.entity_name).collect::<Vec<_>>(),
             }),
-            confidence: ev.importance as f64,
+            confidence: ev.importance,
             created_at: 0,
         };
         if k.create_object(&obj).await.is_ok() {

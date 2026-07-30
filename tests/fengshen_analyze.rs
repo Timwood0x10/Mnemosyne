@@ -2,12 +2,10 @@
 //! Run: cargo test --test fengshen_analyze -- --nocapture
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::{CompileContext, Event};
-use lore_scope::compiler::{chunk, extract, profile, sentence, timeline};
+use lore_scope::compiler::CompileContext;
+use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 
 #[tokio::test]
@@ -17,8 +15,7 @@ async fn fengshen_main_story() {
     let doc = Document::from_file("corpus/封神演义.txt").expect("load 封神演义.txt");
     println!("全文: {} 字符\n", doc.text.len());
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "封神演义".into();
+    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
 
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(
@@ -30,7 +27,6 @@ async fn fengshen_main_story() {
     );
 
     // Build EntityResolver from discovered entities
-    let mut entity_resolver = EntityResolver::new(AliasResolver::empty());
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx
             .profiles
@@ -52,7 +48,7 @@ async fn fengshen_main_story() {
                 .map(|id| (alias.clone(), *id))
         })
         .collect();
-    entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
+    let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
 
     let chunks = chunk::plan(&doc.text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);

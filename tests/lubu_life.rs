@@ -7,7 +7,7 @@ use std::sync::Arc;
 use lore_scope::compiler::document::Document;
 use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::{CompileContext, Event, Relation};
-use lore_scope::compiler::{chunk, extract, faction, profile, sentence, timeline};
+use lore_scope::compiler::{chunk, extract, profile, sentence, timeline};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 
 #[tokio::test]
@@ -19,8 +19,7 @@ async fn lubu_life() {
     let doc = Document::from_file("corpus/三国演义.txt").unwrap();
     let text = &doc.text;
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "Romance of Three Kingdoms".into();
+    let mut ctx = CompileContext { document_title: "Romance of Three Kingdoms".into(), ..Default::default() };
 
     let mut registry = EntityRegistry::new();
     let provider =
@@ -194,7 +193,7 @@ async fn lubu_life() {
         tss.last().unwrap_or(&0)
     );
     println!("  Total events:    {}", lubu_events.len());
-    let mut stats = entity_resolver.stats().clone();
+    let stats = entity_resolver.stats().clone();
     println!("  Resolver stats:");
     stats.print_report();
     println!("\n========== COMPLETE ==========");

@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use lore_scope::compiler::CompileContext;
 use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::{chunk, extract, profile, sentence};
 use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
@@ -19,8 +18,7 @@ async fn fengshen_ingest() {
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
     let text = &doc.text;
 
-    let mut ctx = CompileContext::default();
-    ctx.document_title = "封神演义".into();
+    let mut ctx = CompileContext { document_title: "封神演义".into(), ..Default::default() };
 
     let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(
@@ -30,7 +28,6 @@ async fn fengshen_ingest() {
         &[],
         &lore_scope::language::ChineseLanguageProvider::new(),
     );
-    let mut entity_resolver = EntityResolver::new(AliasResolver::empty());
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx
             .profiles
@@ -47,7 +44,7 @@ async fn fengshen_ingest() {
         .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
-    entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
+    let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
 
     let chunks = chunk::plan(text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);
@@ -82,7 +79,7 @@ async fn fengshen_ingest() {
         .unwrap();
 
     for ev in &ctx.events {
-        let event_id = k
+        let _event_id = k
             .create_object(&lore_scope::knowledge::KnowledgeObject {
                 id: 0,
                 doc_id,
@@ -92,7 +89,7 @@ async fn fengshen_ingest() {
                     "chapter": ev.timestamp,
                     "description": ev.description,
                 }),
-                confidence: ev.importance as f64,
+                confidence: ev.importance,
                 created_at: 0,
             })
             .await

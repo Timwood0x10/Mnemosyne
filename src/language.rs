@@ -68,6 +68,12 @@ impl ChineseLanguageProvider {
     }
 }
 
+impl Default for ChineseLanguageProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageProvider for ChineseLanguageProvider {
     fn name(&self) -> &str {
         "chinese"
@@ -176,6 +182,12 @@ impl EnglishLanguageProvider {
     }
 }
 
+impl Default for EnglishLanguageProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LanguageProvider for EnglishLanguageProvider {
     fn name(&self) -> &str {
         "english"
@@ -246,7 +258,8 @@ impl LanguageProvider for EnglishLanguageProvider {
 
     fn discovery_markers(&self) -> &[&str] {
         &[
-            "Prince", "Princess", "Count", "General", "Mr.", "Mrs.", "Dr.", "Sir", "Lord", "Lady",
+            "Prince", "Princess", "Count", "Countess", "General", "Mr.", "Mrs.", "Miss", "Dr.",
+            "Sir", "Lord", "Lady", "Captain", "Colonel", "Major", "Doctor", "Father",
         ]
     }
 
