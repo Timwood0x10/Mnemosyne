@@ -1,0 +1,235 @@
+{
+  "lexemes": [
+    {
+      "id": "en.conversation.preference.like",
+      "language": "en", "lemma": "like", "forms": ["likes", "liked", "liking"],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.preference.love",
+      "language": "en", "lemma": "love", "forms": ["loves", "loved", "loving"],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.preference.prefer",
+      "language": "en", "lemma": "prefer", "forms": ["prefers", "preferred", "preferring"],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.goal.want",
+      "language": "en", "lemma": "want", "forms": ["wants", "wanted", "wanting"],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.goal.plan",
+      "language": "en", "lemma": "plan", "forms": ["plans", "planned", "planning"],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.goal.decide",
+      "language": "en", "lemma": "decide", "forms": ["decides", "decided", "deciding"],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.emotion.stress",
+      "language": "en", "lemma": "stress", "forms": ["stresses", "stressed", "stressing"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.emotion.tired",
+      "language": "en", "lemma": "tired", "forms": [],
+      "pos": "adjective", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.emotion.worry",
+      "language": "en", "lemma": "worry", "forms": ["worries", "worried", "worrying"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.emotion.anxious",
+      "language": "en", "lemma": "anxious", "forms": [],
+      "pos": "adjective", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.state.hate",
+      "language": "en", "lemma": "hate", "forms": ["hates", "hated", "hating"],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "en.conversation.speech.mention",
+      "language": "en", "lemma": "mention", "forms": ["mentions", "mentioned", "mentioning"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+
+    {
+      "id": "zh.conversation.preference.xihuan",
+      "language": "zh", "lemma": "喜欢", "forms": [],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.preference.pianhao",
+      "language": "zh", "lemma": "偏好", "forms": [],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.preference.taoyan",
+      "language": "zh", "lemma": "讨厌", "forms": [],
+      "pos": "verb", "semantic_class": "preference",
+      "effects": [{"type": "fact", "value": "preference"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.goal.zhunbei",
+      "language": "zh", "lemma": "准备", "forms": [],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.goal.dasuan",
+      "language": "zh", "lemma": "打算", "forms": [],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.goal.jihua",
+      "language": "zh", "lemma": "计划", "forms": [],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.emotion.yali",
+      "language": "zh", "lemma": "压力", "forms": [],
+      "pos": "noun", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.emotion.jiaolv",
+      "language": "zh", "lemma": "焦虑", "forms": [],
+      "pos": "noun", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.emotion.danxin",
+      "language": "zh", "lemma": "担心", "forms": [],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.state.you",
+      "language": "zh", "lemma": "有", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "fact", "value": "identity"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    },
+    {
+      "id": "zh.conversation.state.xihuan2",
+      "language": "zh", "lemma": "希望", "forms": [],
+      "pos": "verb", "semantic_class": "intention",
+      "effects": [{"type": "fact", "value": "goal"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "conversation_memory"},
+      "status": "core"
+    }
+  ]
+}

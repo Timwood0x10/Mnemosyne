@@ -51,6 +51,7 @@ pub mod filter;
 pub mod ingest;
 pub mod knowledge;
 pub mod language;
+pub mod lexicon;
 pub mod mcp;
 pub mod observation_compiler;
 pub mod personality;

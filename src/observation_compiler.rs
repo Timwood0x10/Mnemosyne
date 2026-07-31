@@ -76,15 +76,24 @@ pub fn compile_observations(
             found = true;
         }
 
-        // If no verb matched, try dialog markers
+        // If no verb matched, try dialog markers (speech-class lexemes from
+        // the lexicon registry — single source of truth, P3).
         if !found {
-            for marker in &["说", "曰", "said", "replied", "asked"] {
-                if let Some(pos) = sentence.find(marker) {
+            let speech_markers: Vec<String> = {
+                let guard = crate::lexicon::global();
+                guard
+                    .by_class("speech")
+                    .iter()
+                    .map(|lex| lex.lemma.clone())
+                    .collect()
+            };
+            for marker in &speech_markers {
+                if let Some(pos) = sentence.find(marker.as_str()) {
                     let speaker = find_subject(sentence, pos, resolve_mention);
                     if let Some(s) = speaker {
                         observations.push(Observation {
                             subject: s,
-                            action: marker.to_string(),
+                            action: marker.clone(),
                             object: None,
                             modifiers: Vec::new(),
                             timestamp: None,
@@ -161,18 +170,10 @@ impl Rule for DefaultRule {
     fn apply(&self, observation: &Observation) -> Vec<Fact> {
         let verb = &observation.action;
 
-        // Determine fact type from verb
-        let fact_type = match verb.as_str() {
-            v if ["杀", "斩", "kill", "murder", "attack"].contains(&v) => FactType::Event,
-            v if ["喜欢", "love", "like", "prefer"].contains(&v) => FactType::Preference,
-            v if ["想", "要", "打算", "准备", "want", "plan", "prepare"].contains(&v) => {
-                FactType::Goal
-            }
-            v if ["觉得", "感觉", "feel", "stress", "tired"].contains(&v) => FactType::Emotion,
-            v if ["在", "是", "be", "work", "live"].contains(&v) => FactType::Occupation,
-            v if ["有", "have", "own", "belong"].contains(&v) => FactType::Identity,
-            _ => FactType::Event,
-        };
+        // Determine fact type from verb using the lexicon registry.
+        // Look up the verb's lemma in the registry to find its semantic class
+        // and cognitive effects, then map those to a FactType.
+        let fact_type = verb_to_fact_type(verb);
 
         let subject_id = observation.subject.entity_id.unwrap_or(0);
         if subject_id == 0 {
@@ -194,6 +195,55 @@ impl Rule for DefaultRule {
             evidence_id: None,
             created_at: 0,
         }]
+    }
+}
+
+/// Map a verb to a `FactType` by consulting the global lexicon registry.
+///
+/// Falls back to the hardcoded heuristic mapping when the registry has no
+/// entry for the verb — this ensures backward compatibility during migration.
+fn verb_to_fact_type(verb: &str) -> FactType {
+    // Check the registry first.
+    let lexemes: Vec<crate::dictionary::Lexeme> = {
+        let guard = crate::lexicon::global();
+        guard.lookup(verb).into_iter().cloned().collect()
+    };
+    if let Some(lex) = lexemes.first() {
+        for effect in &lex.effects {
+            if effect.effect_type == "fact" {
+                return match effect.value.as_str() {
+                    "preference" => FactType::Preference,
+                    "goal" => FactType::Goal,
+                    "emotion" => FactType::Emotion,
+                    "knowledge" => FactType::Interest,
+                    "identity" | "occupation" => FactType::Identity,
+                    _ => FactType::Event,
+                };
+            }
+        }
+        // No fact effect found; fall back to semantic class.
+        match lex.semantic_class.as_str() {
+            "attack" | "rescue" | "movement" | "creation" | "transfer" => FactType::Event,
+            "speech" => FactType::Event,
+            "cognition" => FactType::Interest,
+            "emotion" => FactType::Emotion,
+            "intention" => FactType::Goal,
+            "state" => FactType::Identity,
+            _ => FactType::Event,
+        }
+    } else {
+        // Fallback: hardcoded heuristic (legacy compatibility).
+        match verb {
+            v if ["杀", "斩", "kill", "murder", "attack"].contains(&v) => FactType::Event,
+            v if ["喜欢", "love", "like", "prefer"].contains(&v) => FactType::Preference,
+            v if ["想", "要", "打算", "准备", "want", "plan", "prepare"].contains(&v) => {
+                FactType::Goal
+            }
+            v if ["觉得", "感觉", "feel", "stress", "tired"].contains(&v) => FactType::Emotion,
+            v if ["在", "是", "be", "work", "live"].contains(&v) => FactType::Occupation,
+            v if ["有", "have", "own", "belong"].contains(&v) => FactType::Identity,
+            _ => FactType::Event,
+        }
     }
 }
 

@@ -191,32 +191,32 @@ impl LanguageProvider for ChineseLanguageProvider {
     }
 
     fn strong_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .chinese_strong_verbs()
+        crate::lexicon::global()
+            .zh_strong()
             .iter()
             .cloned()
             .collect()
     }
 
     fn action_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .chinese_action_verbs()
+        crate::lexicon::global()
+            .zh_action()
             .iter()
             .cloned()
             .collect()
     }
 
     fn hostile_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .chinese_hostile_verbs()
+        crate::lexicon::global()
+            .zh_hostile()
             .iter()
             .cloned()
             .collect()
     }
 
     fn friendly_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .chinese_friendly_verbs()
+        crate::lexicon::global()
+            .zh_friendly()
             .iter()
             .cloned()
             .collect()
@@ -320,32 +320,32 @@ impl LanguageProvider for EnglishLanguageProvider {
     }
 
     fn strong_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .english_strong_verbs()
+        crate::lexicon::global()
+            .en_strong()
             .iter()
             .cloned()
             .collect()
     }
 
     fn action_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .english_action_verbs()
+        crate::lexicon::global()
+            .en_action()
             .iter()
             .cloned()
             .collect()
     }
 
     fn hostile_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .english_hostile_verbs()
+        crate::lexicon::global()
+            .en_hostile()
             .iter()
             .cloned()
             .collect()
     }
 
     fn friendly_verbs(&self) -> Vec<String> {
-        crate::dictionary::global()
-            .english_friendly_verbs()
+        crate::lexicon::global()
+            .en_friendly()
             .iter()
             .cloned()
             .collect()

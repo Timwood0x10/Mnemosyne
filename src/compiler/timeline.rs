@@ -45,28 +45,9 @@ pub struct TimelineConfig {
 impl Default for TimelineConfig {
     fn default() -> Self {
         TimelineConfig {
-            hostile_verbs: vec![
-                "杀".into(),
-                "斩".into(),
-                "攻".into(),
-                "围".into(),
-                "擒".into(),
-                "缚".into(),
-                "绑".into(),
-                "骂".into(),
-                "怒".into(),
-                "打".into(),
-                "刺".into(),
-                "射".into(),
-            ],
-            friendly_verbs: vec![
-                "救".into(),
-                "拜".into(),
-                "封".into(),
-                "赏".into(),
-                "嫁".into(),
-                "娶".into(),
-            ],
+            // Verbs come from the lexicon registry (single source of truth).
+            hostile_verbs: crate::lexicon::global().zh_hostile().iter().cloned().collect(),
+            friendly_verbs: crate::lexicon::global().zh_friendly().iter().cloned().collect(),
         }
     }
 }

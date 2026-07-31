@@ -260,6 +260,89 @@ pub fn chinese_action_verbs() -> &'static [&'static str] {{
 }}
 """)
 
+    # ── Elite Score ────────────────────────────────────────────────────
+    print("\n\n")
+    print("=" * 70)
+    print("  ELITE SCORE — candidate verb ranking")
+    print("=" * 70)
+    print("""
+elite_score =
+    0.25 × semantic_impact   (number of cognitive effects / fact types)
+  + 0.20 × cross_domain      (appears in ≥2 texts = 1.0, 1 text = 0.5)
+  + 0.20 × corpus_frequency  (normalized log-frequency rank)
+  + 0.15 × precision         (verb length / specificity heuristic)
+  + 0.10 × test_coverage     (has existing test coverage — currently 0 for all)
+  + 0.10 × maintenance       (core vocabulary stability, default 0.8)
+""")
+
+    n_files = {"en": len(english_files), "zh": len(chinese_files)}
+
+    for lang, combined, top_n in [
+        ("en", combined_en, 40),
+        ("zh", combined_zh, 60),
+    ]:
+        total_count = sum(combined.values())
+        max_count = combined.most_common(1)[0][1] if combined else 1
+        domain_count = n_files[lang]
+
+        print(f"\n  ── Top {top_n} {lang.upper()} verbs by elite_score ──\n")
+        print(f"  {'Rank':>4}  {'Verb':<24}  {'Score':>6}  {'Impact':>6}  {'Domain':>6}  {'Freq':>6}")
+        print(f"  {'----':>4}  {'----':<24}  {'-----':>6}  {'------':>6}  {'------':>6}  {'----':>6}")
+
+        scored = []
+        for i, (word, count) in enumerate(combined.most_common(top_n)):
+            freq = count / max_count
+            freq_norm = min(freq, 1.0)
+
+            # semantic_impact: heuristic based on word type
+            is_attack = any(w in word.lower() for w in ["kill", "attack", "strike", "murder", "kill"])
+            is_emotion = any(w in word.lower() for w in ["cry", "laugh", "smile", "frown", "weep", "fear"])
+            is_speech = any(w in word.lower() for w in ["say", "ask", "reply", "shout", "whisper"])
+            is_movement = any(w in word.lower() for w in ["go", "come", "enter", "leave", "ride", "walk"])
+            if lang == "zh":
+                semantic_impact = 0.7  # Chinese single chars generally have multiple meanings
+            elif is_attack or is_emotion or is_speech or is_movement:
+                semantic_impact = 0.9
+            elif len(word) >= 5:
+                semantic_impact = 0.8
+            elif len(word) >= 3:
+                semantic_impact = 0.6
+            else:
+                semantic_impact = 0.4
+
+            # cross_domain_value: how many texts the word appears in
+            # (approximation using the word's total count distribution)
+            if count > total_count * 0.01:
+                cross_domain = 0.9
+            elif count > total_count * 0.001:
+                cross_domain = 0.7
+            else:
+                cross_domain = 0.4
+
+            # precision: longer words are less ambiguous
+            if lang == "zh":
+                precision = 0.5  # single Chinese chars have high ambiguity
+            else:
+                precision = min(len(word) / 8, 1.0) * 0.8 + 0.2
+
+            # test_coverage: 0 for all candidates
+            test_cov = 0.0
+            maintenance = 0.8
+
+            elite = (
+                0.25 * semantic_impact
+                + 0.20 * cross_domain
+                + 0.20 * freq_norm
+                + 0.15 * precision
+                + 0.10 * test_cov
+                + 0.10 * maintenance
+            )
+            scored.append((elite, word, semantic_impact, cross_domain, freq_norm))
+
+        scored.sort(reverse=True)
+        for rank, (score, word, impact, domain, freq) in enumerate(scored[:top_n], 1):
+            print(f"  {rank:>4}  {word:<24}  {score:.3f}  {impact:.3f}  {domain:.3f}  {freq:.3f}")
+
 
 if __name__ == "__main__":
     main()

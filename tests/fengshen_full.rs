@@ -9,11 +9,12 @@ use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
-const DB: &str = "/tmp/fengshen_mcp.db";
-
 #[tokio::test]
 async fn fengshen_full() {
-    let _ = std::fs::remove_file(DB);
+    // Use a unique temp path to avoid race with other tests using /tmp/fengshen_mcp.db
+    let dir = tempfile::TempDir::new().expect("temp dir for fengshen_full");
+    let db_path = dir.path().join("fengshen_full.db");
+    let db_str = db_path.to_str().expect("valid utf-8 path");
 
     // 1. Compile 封神演义
     let doc = Document::from_file("corpus/封神演义.txt").unwrap();
@@ -69,8 +70,8 @@ async fn fengshen_full() {
     );
 
     // 2. Open store to create tables, then use raw SQL for ALL writes
-    let _ = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
-    let conn = rusqlite::Connection::open(DB).unwrap();
+    let _ = Arc::new(SQLiteKnowledgeStore::open(db_str).await.unwrap());
+    let conn = rusqlite::Connection::open(db_str).unwrap();
     conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
 
     // Create root doc
@@ -169,7 +170,7 @@ async fn fengshen_full() {
     drop(conn);
 
     // 3. Query via MCP store
-    let k = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
+    let k = Arc::new(SQLiteKnowledgeStore::open(db_str).await.unwrap());
 
     println!("========== MCP query: 孔宣 ==========\n");
     match k.inspect_entity("孔宣", Some("封神演义")).await {

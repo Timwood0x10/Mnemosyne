@@ -27,20 +27,11 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            strong_verbs: vec![
-                "杀", "斩", "擒", "救", "打", "战", "斗", "败", "胜", "攻", "破", "逃", "死", "绑",
-                "缚", "骂", "哭", "笑", "怒", "拜", "封", "赐", "赏",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
-            action_verbs: vec![
-                "大怒", "大喜", "领兵", "引军", "挺枪", "纵马", "大呼", "拔剑", "出马", "上前",
-                "大惊",
-            ]
-            .into_iter()
-            .map(String::from)
-            .collect(),
+            // Chinese verbs come from the lexicon registry (single source of
+            // truth, corpus-frequency derived). English callers should use
+            // `Config::from_language(&EnglishLanguageProvider::new())`.
+            strong_verbs: crate::lexicon::global().zh_strong().iter().cloned().collect(),
+            action_verbs: crate::lexicon::global().zh_action().iter().cloned().collect(),
             dialog_markers: vec!["曰：".into(), "道：".into(), "言：".into()],
             proximity_chars: 50,
         }
@@ -75,6 +66,19 @@ pub fn compile(
 
     // Build the alias index once for all sentences (ChunkCompiler optimisation)
     let alias_index = AliasIndex::build(dict);
+
+    // Strong verb / action verb patterns → Event(action).
+    // Build the Aho-Corasick automaton ONCE per compile call (P3: never
+    // rebuild inside the per-sentence loop). Single-pass scan instead of
+    // O(N×V) repeated match_indices calls — orders of magnitude faster when
+    // V (verb count) × N (sentence count) is large, especially for English.
+    let all_verbs: Vec<&str> = config
+        .strong_verbs
+        .iter()
+        .chain(config.action_verbs.iter())
+        .map(|s| s.as_str())
+        .collect();
+    let verb_ac = AhoCorasick::new(&all_verbs).unwrap();
 
     for text in sentences.iter() {
         if text.len() < 2 {
@@ -131,21 +135,7 @@ pub fn compile(
             }
         }
 
-        // Strong verb / action verb patterns → Event(action)
-        let all_verbs: Vec<&str> = config
-            .strong_verbs
-            .iter()
-            .chain(config.action_verbs.iter())
-            .map(|s| s.as_str())
-            .collect();
-
-        // Build Aho-Corasick automaton for all verbs — single-pass scan
-        // instead of O(N×V) repeated match_indices calls. This is orders of
-        // magnitude faster when V (verb count) × N (sentence count) is large,
-        // which is especially important for English text processing.
-        let ac = AhoCorasick::new(&all_verbs).unwrap();
-
-        for m in ac.find_iter(text) {
+        for m in verb_ac.find_iter(text) {
             let verb = &all_verbs[m.pattern()];
             let pos = m.start();
             let subject = local_mentions.iter().rfind(|mention| {
