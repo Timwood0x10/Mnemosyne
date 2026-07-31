@@ -414,10 +414,31 @@ fn discover_english_title_name(line: &str, markers: &[&str]) -> Option<String> {
         return None;
     }
 
+    // P3: prefer the lexicon-driven title matcher (single-pass Aho-Corasick
+    // over the `title` semantic class) when it has patterns; fall back to the
+    // language provider's marker list for titles not yet in the lexicon.
+    static TITLE_MATCHER: std::sync::LazyLock<crate::lexicon::LexiconMatcher> =
+        std::sync::LazyLock::new(|| {
+            crate::lexicon::LexiconMatcher::from_global_registry_class("title")
+        });
+
+    let mut marker_hits: Vec<(usize, &str)> = Vec::new();
+    for m in TITLE_MATCHER.find_iter(line) {
+        marker_hits.push((m.start, &line[m.start..m.end]));
+    }
+    // Fall back to provider markers (dedup by position).
     for marker in markers {
-        let Some(position) = find_title_boundary(line, marker) else {
-            continue;
-        };
+        if let Some(position) = find_title_boundary(line, marker) {
+            if !marker_hits.iter().any(|(p, _)| *p == position) {
+                marker_hits.push((position, marker));
+            }
+        }
+    }
+    marker_hits.sort_by_key(|(p, _)| *p);
+
+    for (position, _marker) in marker_hits {
+        // Slice from the marker START so the title itself ("Mr.") is the first
+        // token counted toward the ≥2 word requirement for a full name.
         let after = &line[position..];
         let words: Vec<String> = after
             .split_whitespace()

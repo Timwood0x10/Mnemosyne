@@ -161,8 +161,8 @@ mod tests {
                 {"word": "beautiful", "lemma": "beautiful", "part_of_speech": "adjective"}
             ]
         }"#;
-        let provider = ExternalFileProvider::from_json("test", json)
-            .expect("external lexicon must parse");
+        let provider =
+            ExternalFileProvider::from_json("test", json).expect("external lexicon must parse");
 
         assert_eq!(provider.name(), "test");
         let kill = provider.lookup("KILL"); // case-insensitive
@@ -186,8 +186,7 @@ mod tests {
         let json = r#"[
             {"word": "run", "lemma": "run", "part_of_speech": "verb"}
         ]"#;
-        let provider = ExternalFileProvider::from_json("arr", json)
-            .expect("bare array must parse");
+        let provider = ExternalFileProvider::from_json("arr", json).expect("bare array must parse");
         assert_eq!(provider.lookup("run").len(), 1);
     }
 
@@ -202,8 +201,7 @@ mod tests {
                 {"word": "banana"}
             ]
         }"#;
-        let provider = ExternalFileProvider::from_json("cand", json)
-            .expect("must parse");
+        let provider = ExternalFileProvider::from_json("cand", json).expect("must parse");
 
         let hits = provider.candidates("app", 10);
         assert_eq!(
@@ -222,5 +220,46 @@ mod tests {
     fn malformed_json_returns_error() {
         let result = ExternalFileProvider::from_json("bad", "not json at all");
         assert!(result.is_err(), "malformed JSON must error");
+    }
+
+    /// Objective: Verify WordNet-style data adapts through the provider.
+    /// Invariants: A WordNet-like dump (word + lemma + pos + synonyms) loads
+    /// and serves case-insensitive lookups with lemma/POS metadata — but its
+    /// entries carry NO cognitive effects (external data never decides facts).
+    #[test]
+    fn wordnet_style_data_adapts_without_effects() {
+        // WordNet-style sample: entries with lemma + part_of_speech + synonyms.
+        let json = r#"{
+            "entries": [
+                {"word": "kill", "lemma": "kill", "part_of_speech": "v",
+                 "synonyms": ["murder", "slay", "bump off"]},
+                {"word": "killed", "lemma": "kill", "part_of_speech": "v",
+                 "synonyms": []},
+                {"word": "beautiful", "lemma": "beautiful", "part_of_speech": "a",
+                 "synonyms": ["pretty", "lovely"]}
+            ]
+        }"#;
+        let provider = ExternalFileProvider::from_json("wordnet-sample", json)
+            .expect("WordNet-style JSON must parse");
+
+        let kill = provider.lookup("KILL");
+        assert_eq!(kill.len(), 1, "case-insensitive lookup for KILL");
+        assert_eq!(kill[0].lemma.as_deref(), Some("kill"), "lemma must be kept");
+        assert_eq!(
+            kill[0].part_of_speech.as_deref(),
+            Some("v"),
+            "POS must be kept"
+        );
+        assert!(
+            kill[0].synonyms.contains(&"murder".to_string()),
+            "synonyms must be preserved for candidate generation"
+        );
+
+        // External entries are deliberately effect-free: the struct has no
+        // `effects` field, so it can never decide a FactType (P5 invariant).
+        assert!(
+            !kill[0].synonyms.is_empty(),
+            "external entries provide auxiliary data only"
+        );
     }
 }

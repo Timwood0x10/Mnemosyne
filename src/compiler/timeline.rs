@@ -46,8 +46,16 @@ impl Default for TimelineConfig {
     fn default() -> Self {
         TimelineConfig {
             // Verbs come from the lexicon registry (single source of truth).
-            hostile_verbs: crate::lexicon::global().zh_hostile().iter().cloned().collect(),
-            friendly_verbs: crate::lexicon::global().zh_friendly().iter().cloned().collect(),
+            hostile_verbs: crate::lexicon::global()
+                .zh_hostile()
+                .iter()
+                .cloned()
+                .collect(),
+            friendly_verbs: crate::lexicon::global()
+                .zh_friendly()
+                .iter()
+                .cloned()
+                .collect(),
         }
     }
 }

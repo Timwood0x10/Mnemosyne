@@ -30,8 +30,16 @@ impl Default for Config {
             // Chinese verbs come from the lexicon registry (single source of
             // truth, corpus-frequency derived). English callers should use
             // `Config::from_language(&EnglishLanguageProvider::new())`.
-            strong_verbs: crate::lexicon::global().zh_strong().iter().cloned().collect(),
-            action_verbs: crate::lexicon::global().zh_action().iter().cloned().collect(),
+            strong_verbs: crate::lexicon::global()
+                .zh_strong()
+                .iter()
+                .cloned()
+                .collect(),
+            action_verbs: crate::lexicon::global()
+                .zh_action()
+                .iter()
+                .cloned()
+                .collect(),
             dialog_markers: vec!["曰：".into(), "道：".into(), "言：".into()],
             proximity_chars: 50,
         }

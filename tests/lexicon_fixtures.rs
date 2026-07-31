@@ -50,13 +50,7 @@ fn chinese_fixture_compiles_expected_entities_and_events() {
     let sentences = sentence::split_all(&chunks);
     let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
     let config = extract::Config::from_language(&lang);
-    extract::compile(
-        &mut context,
-        &sent_texts,
-        &dict,
-        &config,
-        Some(&resolver),
-    );
+    extract::compile(&mut context, &sent_texts, &dict, &config, Some(&resolver));
 
     let names: Vec<&str> = context.entities.iter().map(|e| e.name.as_str()).collect();
     for expected in ["刘备", "关羽", "张飞", "曹操"] {
@@ -86,13 +80,7 @@ fn english_fixture_compiles_expected_entities() {
         ..Default::default()
     };
     let lang = EnglishLanguageProvider::new();
-    profile::extract_profiles(
-        text,
-        &mut context,
-        None,
-        &[],
-        &lang,
-    );
+    profile::extract_profiles(text, &mut context, None, &[], &lang);
 
     let names: Vec<&str> = context.entities.iter().map(|e| e.name.as_str()).collect();
     for expected in ["Mr. Bennet", "Mr. Darcy"] {

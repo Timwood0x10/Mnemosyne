@@ -10,3 +10,5 @@ docs/
 .workbuddy/
 
 .fastembed_cache/
+
+**/*.pyc

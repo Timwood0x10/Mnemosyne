@@ -1,0 +1,64 @@
+{
+  "lexemes": [
+    {
+      "id": "zh.sanguo.weapon.qinglong",
+      "language": "zh", "lemma": "青龙偃月刀", "forms": ["偃月刀"],
+      "pos": "noun", "semantic_class": "artifact",
+      "effects": [{"type": "entity", "value": "artifact"}],
+      "polarity": "neutral", "priority": 750,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "sanguo"},
+      "status": "core"
+    },
+    {
+      "id": "zh.sanguo.weapon.zhangba",
+      "language": "zh", "lemma": "丈八蛇矛", "forms": ["蛇矛"],
+      "pos": "noun", "semantic_class": "artifact",
+      "effects": [{"type": "entity", "value": "artifact"}],
+      "polarity": "neutral", "priority": 750,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "sanguo"},
+      "status": "core"
+    },
+    {
+      "id": "zh.sanguo.event.jieyi",
+      "language": "zh", "lemma": "结义", "forms": ["桃园结义"],
+      "pos": "verb", "semantic_class": "rescue",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "sanguo"},
+      "status": "core"
+    },
+    {
+      "id": "zh.sanguo.event.maolu",
+      "language": "zh", "lemma": "出茅庐", "forms": ["茅庐"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "sanguo"},
+      "status": "core"
+    },
+    {
+      "id": "zh.sanguo.role.jianxiong",
+      "language": "zh", "lemma": "奸雄", "forms": [],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "sanguo"},
+      "status": "core"
+    },
+    {
+      "id": "zh.sanguo.role.nengchen",
+      "language": "zh", "lemma": "能臣", "forms": [],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "positive", "priority": 650,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "domain", "name": "sanguo"},
+      "status": "core"
+    }
+  ]
+}

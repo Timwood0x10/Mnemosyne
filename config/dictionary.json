@@ -1149,6 +1149,127 @@
       "constraints": {"allow_single": false},
       "source": {"kind": "builtin", "name": "corpus frequency"},
       "status": "core"
+    },
+
+    {
+      "id": "en.title.honorific.mr",
+      "language": "en", "lemma": "Mr.", "forms": ["Mr"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 900,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.honorific.mrs",
+      "language": "en", "lemma": "Mrs.", "forms": ["Mrs"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 900,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.honorific.dr",
+      "language": "en", "lemma": "Dr.", "forms": ["Dr"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 900,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.noble.prince",
+      "language": "en", "lemma": "Prince", "forms": ["Princess"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.noble.count",
+      "language": "en", "lemma": "Count", "forms": ["Countess"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.military.general",
+      "language": "en", "lemma": "General", "forms": [],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.noble.duke",
+      "language": "en", "lemma": "Duke", "forms": ["Duchess"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.title.military.captain",
+      "language": "en", "lemma": "Captain", "forms": ["Colonel", "Major"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.title.military.jiangjun",
+      "language": "zh", "lemma": "将军", "forms": [],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.title.military.yuanshuai",
+      "language": "zh", "lemma": "元帅", "forms": [],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.title.royal.huangdi",
+      "language": "zh", "lemma": "皇帝", "forms": [],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.title.royal.wang",
+      "language": "zh", "lemma": "王", "forms": ["大王", "国王"],
+      "pos": "noun", "semantic_class": "title",
+      "effects": [{"type": "entity", "value": "person"}],
+      "polarity": "neutral", "priority": 850,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
     }
   ],
 

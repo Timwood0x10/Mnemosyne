@@ -10,12 +10,14 @@
 //! The server is transport-agnostic at the trait level; the concrete
 //! [`StdioTransport`] implementation is provided for the common case.
 
+pub mod context_aware;
 pub mod knowledge_tools;
 pub mod memory_compile;
 pub mod server;
 pub mod transport;
 pub mod types;
 
+pub use context_aware::{ContextCheckTool, context_check_definition};
 pub use knowledge_tools::register_knowledge_tools;
 pub use server::{MCPServer, ServerBuilder, ToolRegistry};
 pub use transport::{StdioTransport, Transport};

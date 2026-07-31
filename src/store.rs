@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS memories (
     source      TEXT NOT NULL DEFAULT '',
     extraction_method TEXT NOT NULL DEFAULT 'direct',
     created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL DEFAULT '',
     metadata    TEXT NOT NULL DEFAULT '{}',
     vector      TEXT NOT NULL DEFAULT '[]'
 );
@@ -138,6 +139,9 @@ pub trait ExperienceRepository: Send + Sync {
     async fn update(&self, exp: &Experience) -> Result<()>;
     async fn delete(&self, id: &str) -> Result<()>;
     async fn delete_batch(&self, ids: &[String]) -> Result<()>;
+    /// Delete all memories for a tenant whose `expires_at` is in the past.
+    /// Returns the number of forgotten memories.
+    async fn forget_expired(&self, tenant_id: &str, now: DateTime<Utc>) -> Result<usize>;
     async fn search_by_vector(
         &self,
         query_embedding: &[f32],
@@ -233,6 +237,30 @@ impl SQLiteVecStore {
             )
             .map_err(|e| StorageError::Schema(format!("migrate vector col: {e}")))?;
         }
+        // Migrate older databases that lack the expires_at column (added for
+        // the TTL forget-expired lifecycle phase). Mirrors the vector column
+        // migration above so pre-existing DB files keep opening.
+        let has_expires_col = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'expires_at'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap_or(0)
+            > 0;
+        if !has_expires_col {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''",
+                [],
+            )
+            .map_err(|e| StorageError::Schema(format!("migrate expires_at col: {e}")))?;
+        }
+        // Recreate the index in case the column was just added (CREATE INDEX
+        // in SCHEMA may have failed on old tables missing the column).
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)",
+            [],
+        );
         if self.dim > 0 {
             let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
             conn.execute_batch(&vec_sql)
@@ -275,6 +303,14 @@ fn row_to_experience(row: &rusqlite::Row) -> rusqlite::Result<Experience> {
             row.get::<_, String>("extraction_method")?.as_str(),
         ),
         created_at,
+        expires_at: {
+            let s: String = row.get("expires_at").unwrap_or_default();
+            if s.is_empty() {
+                None
+            } else {
+                s.parse::<DateTime<Utc>>().ok()
+            }
+        },
         metadata,
         distance,
     })
@@ -286,8 +322,8 @@ impl ExperienceRepository for SQLiteVecStore {
         let conn = self.conn.lock().await;
         let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
         conn.execute(
-            "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, metadata, vector)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, expires_at, metadata, vector)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 exp.id, exp.tenant_id, exp.user_id,
                 memory_type_to_str(exp.memory_type),
@@ -295,6 +331,7 @@ impl ExperienceRepository for SQLiteVecStore {
                 exp.confidence, exp.source,
                 extraction_method_to_str(exp.extraction_method),
                 exp.created_at.to_rfc3339(),
+                exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
                 serde_json::to_string(&exp.metadata).unwrap_or_default(),
                 vector_json,
             ],
@@ -373,6 +410,32 @@ impl ExperienceRepository for SQLiteVecStore {
             let _ = conn.execute("DELETE FROM vec_memories WHERE id = ?1", params![id]);
         }
         Ok(())
+    }
+
+    async fn forget_expired(&self, tenant_id: &str, now: DateTime<Utc>) -> Result<usize> {
+        let now_str = now.to_rfc3339();
+        let conn = self.conn.lock().await;
+        // Select expired rows, then delete them from both the main table and
+        // the vec index. FTS5 cleanup is handled by the DELETE trigger on
+        // `memories`. Delete errors propagate so a failed purge never reports
+        // a false success count or leaves the indexes inconsistent.
+        let ids: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM memories WHERE tenant_id = ?1 AND expires_at <> '' AND expires_at < ?2",
+            )?;
+            let rows =
+                stmt.query_map(params![tenant_id, now_str], |row| row.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let mut count = 0usize;
+        for id in &ids {
+            let deleted = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+            conn.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+            if deleted > 0 {
+                count += 1;
+            }
+        }
+        Ok(count)
     }
 
     async fn search_by_vector(
@@ -634,6 +697,52 @@ mod tests {
         assert_eq!(got.tenant_id, "t1");
     }
 
+    /// Objective: Verify pre-existing databases without the `expires_at`
+    /// column still open and migrate correctly (P1 upgrade safety).
+    /// Invariants: An old-schema DB file opens without error; writes succeed;
+    /// the new column defaults to empty (never-expire).
+    #[tokio::test]
+    async fn legacy_db_without_expires_at_migrates_on_open() {
+        let dir = tempfile::TempDir::new().expect("temp dir for legacy db");
+        let db_path = dir.path().join("legacy.db");
+        // Create an OLD-schema database (no expires_at column).
+        {
+            let conn = rusqlite::Connection::open(&db_path).expect("open legacy db");
+            conn.execute_batch(
+                "CREATE TABLE memories (
+                    id          TEXT PRIMARY KEY,
+                    tenant_id   TEXT NOT NULL,
+                    user_id     TEXT NOT NULL DEFAULT '',
+                    memory_type TEXT NOT NULL,
+                    problem     TEXT NOT NULL DEFAULT '',
+                    solution    TEXT NOT NULL DEFAULT '',
+                    content     TEXT NOT NULL,
+                    confidence  REAL NOT NULL DEFAULT 0.5,
+                    source      TEXT NOT NULL DEFAULT '',
+                    extraction_method TEXT NOT NULL DEFAULT 'direct',
+                    created_at  TEXT NOT NULL,
+                    metadata    TEXT NOT NULL DEFAULT '{}',
+                    vector      TEXT NOT NULL DEFAULT '[]'
+                );",
+            )
+            .expect("create legacy schema");
+        }
+
+        // Opening the legacy DB must succeed (migration adds expires_at).
+        let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 4)
+            .await
+            .expect("legacy DB must open and migrate");
+
+        // Writes must work and the row must read back as never-expiring.
+        let exp = sample_exp("t1", MemoryType::Knowledge, "after-upgrade");
+        store.create(&exp).await.expect("create after migration");
+        let got = store.get(&exp.id).await.expect("get").expect("exists");
+        assert!(
+            got.expires_at.is_none(),
+            "legacy rows default to never-expire (expires_at empty)"
+        );
+    }
+
     #[tokio::test]
     async fn get_missing_returns_none() {
         let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -717,6 +826,60 @@ mod tests {
             .delete_batch(&[])
             .await
             .expect("empty batch should not error");
+    }
+
+    /// Objective: Verify forget_expired removes only expired tenant memories.
+    /// Invariants: Expired rows are deleted; non-expired and other-tenant rows
+    /// survive; the count matches the number of expired rows.
+    #[tokio::test]
+    async fn forget_expired_deletes_only_expired_tenant_rows() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+
+        // Expired memory (TTL elapsed).
+        let mut expired = sample_exp("t1", MemoryType::Knowledge, "stale");
+        expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
+        store.create(&expired).await.expect("create expired");
+
+        // Live memory (not yet expired).
+        let mut live = sample_exp("t1", MemoryType::Knowledge, "fresh");
+        live.expires_at = Some(Utc::now() + chrono::Duration::seconds(3600));
+        store.create(&live).await.expect("create live");
+
+        // Never-expiring memory (no expires_at).
+        let never = sample_exp("t1", MemoryType::Knowledge, "permanent");
+        store.create(&never).await.expect("create never");
+
+        // Other tenant's expired memory — must NOT be touched.
+        let mut other_tenant = sample_exp("t2", MemoryType::Knowledge, "other-stale");
+        other_tenant.expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
+        store.create(&other_tenant).await.expect("create other");
+
+        let now = Utc::now();
+        let forgotten = store
+            .forget_expired("t1", now)
+            .await
+            .expect("forget_expired must not error");
+        assert_eq!(
+            forgotten, 1,
+            "exactly one expired row for t1 must be forgotten"
+        );
+
+        assert!(
+            store.get(&expired.id).await.expect("get").is_none(),
+            "expired memory must be deleted"
+        );
+        assert!(
+            store.get(&live.id).await.expect("get").is_some(),
+            "live memory must survive"
+        );
+        assert!(
+            store.get(&never.id).await.expect("get").is_some(),
+            "never-expiring memory must survive"
+        );
+        assert!(
+            store.get(&other_tenant.id).await.expect("get").is_some(),
+            "other tenant's expired memory must survive (tenant isolation)"
+        );
     }
 
     #[tokio::test]

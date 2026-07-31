@@ -24,6 +24,7 @@ use lore_scope::error::Error;
 use lore_scope::fact_store::SqliteFactStore;
 use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
+use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
@@ -676,6 +677,18 @@ async fn build_server(
         .tool(
             memory_compile_definition(),
             Arc::new(MemoryCompileTool::new(
+                Some(distiller.clone()),
+                compile_fact_store.clone(),
+            )),
+        )
+        .await;
+
+    // memory_context_check — proactive context-aware memory (40% threshold
+    // auto-distill + user profile). Shares the same fact store + distiller.
+    builder = builder
+        .tool(
+            context_check_definition(),
+            Arc::new(ContextCheckTool::new(
                 Some(distiller.clone()),
                 compile_fact_store,
             )),

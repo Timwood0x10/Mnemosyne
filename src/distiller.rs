@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use async_trait::async_trait;
+use chrono::Utc;
 use tokio::sync::Mutex;
 
 use crate::classifier::MemoryClassifier;
@@ -77,6 +78,7 @@ pub struct DistillationMetrics {
     embed_calls: AtomicU64,
     embed_errors: AtomicU64,
     capacity_evictions: AtomicI64,
+    memories_forgotten: AtomicU64,
 }
 
 impl DistillationMetrics {
@@ -106,6 +108,7 @@ impl DistillationMetrics {
             embed_calls: self.embed_calls.load(Ordering::Relaxed),
             embed_errors: self.embed_errors.load(Ordering::Relaxed),
             capacity_evictions: self.capacity_evictions.load(Ordering::Relaxed),
+            memories_forgotten: self.memories_forgotten.load(Ordering::Relaxed),
         }
     }
 }
@@ -137,6 +140,8 @@ pub struct MetricsSnapshot {
     pub embed_errors: u64,
     /// Net capacity-control evictions (negative = evictions).
     pub capacity_evictions: i64,
+    /// Memories purged because their TTL expired (forget phase).
+    pub memories_forgotten: u64,
 }
 
 /// Trait surface used by the MCP handlers; allows mocking in tests.
@@ -595,6 +600,7 @@ impl PipelineDistiller {
             exp.source = mem.source.clone();
             exp.vector = mem.vector.clone();
             exp.extraction_method = extraction_method;
+            exp.expires_at = Some(mem.expires_at);
             exp.metadata = mem.metadata.clone();
             self.store.create(&exp).await?;
             self.metrics
@@ -602,6 +608,21 @@ impl PipelineDistiller {
                 .fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
+    }
+
+    /// Phase 0 (maintenance): forget memories whose TTL has elapsed.
+    ///
+    /// This closes the memory lifecycle loop: extract → compress → conflict
+    /// resolution → persist → **forget expired**. It runs as a tenant-level
+    /// maintenance invariant — even when a distillation produces nothing.
+    async fn phase_forget_expired(&self, tenant_id: &str) -> Result<usize> {
+        let forgotten = self.store.forget_expired(tenant_id, Utc::now()).await?;
+        if forgotten > 0 {
+            self.metrics
+                .memories_forgotten
+                .fetch_add(forgotten as u64, Ordering::Relaxed);
+        }
+        Ok(forgotten)
     }
 }
 
@@ -627,9 +648,13 @@ impl Distiller for PipelineDistiller {
         let memories = self.phase_classify_score_filter(raws, tenant_id, user_id, conversation_id);
 
         if memories.is_empty() {
-            // Even with no new memories, capacity control must still fire:
-            // it is a tenant-level maintenance invariant, independent of
-            // whether this call produced anything.
+            // Even with no new memories, maintenance must still fire: expiry
+            // forgetting and capacity control are tenant-level invariants,
+            // independent of whether this call produced anything.
+            if let Err(e) = self.phase_forget_expired(tenant_id).await {
+                self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+                return Err(e);
+            }
             if let Err(e) = self.phase_enforce_capacity(tenant_id).await {
                 self.metrics.failures.fetch_add(1, Ordering::Relaxed);
                 return Err(e);
@@ -664,6 +689,15 @@ impl Distiller for PipelineDistiller {
 
         // Phase 8: sync to store.
         if let Err(e) = self.phase_sync_to_store(&memories).await {
+            self.metrics.failures.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        // Maintenance: forget TTL-expired memories for this tenant. Runs in
+        // the normal path too (not just the empty-messages branch) so active
+        // tenants whose distillations keep producing memories still get their
+        // expired rows purged instead of serving stale data indefinitely.
+        if let Err(e) = self.phase_forget_expired(tenant_id).await {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }
@@ -1386,6 +1420,53 @@ mod tests {
         assert!(
             k_count <= 3,
             "Knowledge count should be <= cap of 3, got {k_count}"
+        );
+    }
+
+    /// Objective: Verify the forget-expired maintenance phase purges expired
+    /// memories even when distillation produces nothing.
+    /// Invariants: An expired memory for the tenant is deleted; a live memory
+    /// survives; the `memories_forgotten` metric reflects the purge.
+    #[tokio::test]
+    async fn forget_expired_phase_purges_ttl_expired_memories() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+        let cfg = DistillationConfig {
+            min_importance: 0.0,
+            conflict_threshold: 0.99,
+            max_memories_per_distillation: 100,
+            max_solutions_per_tenant: 100,
+            enable_cross_turn: true,
+        };
+        let d = PipelineDistiller::new(cfg, embedder, store.clone());
+
+        // Expired memory (TTL elapsed).
+        let mut expired = Experience::new("t1", MemoryType::Knowledge, "stale", 0.5);
+        expired.id = "expired-1".to_string();
+        expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
+        store.create(&expired).await.expect("create expired");
+
+        // Live memory (still valid).
+        let mut live = Experience::new("t1", MemoryType::Knowledge, "fresh", 0.5);
+        live.id = "live-1".to_string();
+        live.expires_at = Some(Utc::now() + chrono::Duration::seconds(3600));
+        store.create(&live).await.expect("create live");
+
+        // Run distill with empty messages — forget-expired maintenance fires.
+        let _ = d.distill("c1", &[], "t1", "u1").await;
+        let m = d.metrics();
+        assert!(
+            m.memories_forgotten >= 1,
+            "forget phase must purge the expired memory, got {}",
+            m.memories_forgotten
+        );
+        assert!(
+            store.get("expired-1").await.expect("get").is_none(),
+            "expired memory must be purged"
+        );
+        assert!(
+            store.get("live-1").await.expect("get").is_some(),
+            "live memory must survive the forget phase"
         );
     }
 }

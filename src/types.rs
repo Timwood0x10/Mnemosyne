@@ -178,6 +178,9 @@ pub struct Experience {
     pub extraction_method: ExtractionMethod,
     /// Creation timestamp (UTC).
     pub created_at: DateTime<Utc>,
+    /// Expiry timestamp (UTC); empty string semantics = never expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
     /// Free-form metadata bag (JSON object in storage).
     #[serde(default, skip_serializing_if = "Metadata::is_empty")]
     pub metadata: Metadata,
@@ -211,6 +214,7 @@ impl Experience {
             vector: Vec::new(),
             extraction_method: ExtractionMethod::Direct,
             created_at: Utc::now(),
+            expires_at: None,
             metadata: Metadata::default(),
             distance: 0.0,
         }

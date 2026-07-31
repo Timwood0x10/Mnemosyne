@@ -4,6 +4,7 @@ Usage: python scripts/corpus_freq.py
 Output: prints frequency tables for English and Chinese verbs found in the corpora.
 """
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -216,6 +217,9 @@ def main():
         combined_zh += vc
     print_chinese_table("TOTAL Chinese", combined_zh, top_n=70)
 
+    # ── P6: unknown high-frequency candidate report ────────────────────
+    print_candidate_report(combined_en, combined_zh)
+
     # ── Output minimal Rust source for dictionary.rs ────────────────────
     print("\n\n")
     print("=" * 70)
@@ -342,6 +346,76 @@ elite_score =
         scored.sort(reverse=True)
         for rank, (score, word, impact, domain, freq) in enumerate(scored[:top_n], 1):
             print(f"  {rank:>4}  {word:<24}  {score:.3f}  {impact:.3f}  {domain:.3f}  {freq:.3f}")
+
+
+# ── P6: unknown high-frequency candidate report ─────────────────────────────
+
+def load_lexicon_forms() -> set:
+    """Load lemma + forms from config/dictionary.json and all domain packs.
+
+    Mirrors the Rust loader (`load_lexemes_from_file`): both a bare JSON
+    array and an object with a `lexemes` key are accepted.
+    """
+    forms = set()
+    paths = [REPO / "config" / "dictionary.json"]
+    packs_dir = REPO / "lexicon" / "packs"
+    if packs_dir.is_dir():
+        paths.extend(sorted(packs_dir.glob("*.json")))
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        lexemes = data if isinstance(data, list) else data.get("lexemes", [])
+        for lex in lexemes:
+            if not isinstance(lex, dict):
+                continue
+            lemma = lex.get("lemma", "")
+            if isinstance(lemma, str):
+                forms.add(lemma.lower())
+            for f in lex.get("forms", []):
+                if isinstance(f, str):
+                    forms.add(f.lower())
+    return forms
+
+
+def print_candidate_report(combined_en: Counter, combined_zh: Counter) -> None:
+    """Report high-frequency corpus words NOT in the lexicon (P6 candidates)."""
+    print("\n\n")
+    print("=" * 70)
+    print("  P6 CANDIDATE REPORT — high-frequency words missing from lexicon")
+    print("=" * 70)
+    print("""
+Candidates are produced by automatic statistics ONLY. Per §10.1, they must
+not auto-enter Core: promote via Candidate → Experimental → Core after
+adding semantics, constraints, and positive/negative tests.
+""")
+
+    known = load_lexicon_forms()
+
+    for lang, counter, top_n in [("EN", combined_en, 30), ("ZH", combined_zh, 40)]:
+        print(f"  ── {lang} unknown high-frequency candidates ──\n")
+        print(f"  {'#':>4}  {'Word':<26}  {'Count':>8}")
+        shown = 0
+        for word, count in counter.most_common():
+            w = word.lower()
+            if w in known:
+                continue
+            # Skip stop-word-like noise for English candidates.
+            if lang == "EN" and w in {
+                "said", "mrs", "miss", "its", "yes", "always", "having",
+                "words", "anything", "others", "thing", "things", "hands",
+                "troops", "horses", "during", "towards", "indeed", "perhaps",
+                "less", "days", "news", "orders", "means", "nothing", "evening",
+            }:
+                continue
+            print(f"  {shown + 1:>4}  {word:<26}  {count:>8,}")
+            shown += 1
+            if shown >= top_n:
+                break
+        if shown == 0:
+            print("  (all high-frequency words are already in the lexicon)")
+        print()
 
 
 if __name__ == "__main__":

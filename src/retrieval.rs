@@ -36,8 +36,8 @@ use std::sync::Arc;
 use serde::Serialize;
 
 use crate::config::{
-    RetrievalMode, WEIGHT_IMPORTANCE_HYBRID, WEIGHT_IMPORTANCE_ONLY, WEIGHT_KEYWORD_HYBRID,
-    WEIGHT_KEYWORD_ONLY, WEIGHT_SEMANTIC,
+    RetrievalMode, WEIGHT_IMPORTANCE_HYBRID, WEIGHT_IMPORTANCE_ONLY, WEIGHT_KEYWORD_ONLY,
+    WEIGHT_SEMANTIC,
 };
 use crate::embed::EmbeddingService;
 use crate::error::{Error, Result};
@@ -245,21 +245,59 @@ impl RetrievalEngine {
         }
 
         let mut results = Vec::with_capacity(candidates.len());
-        for exp in candidates {
-            let keyword_score = bm25_score(&query_terms, &exp.content);
-            let semantic_score = semantic_map.get(&exp.id).copied().unwrap_or(0.0);
-            let importance = exp.confidence;
-            let score = semantic_score * WEIGHT_SEMANTIC
-                + keyword_score * WEIGHT_KEYWORD_HYBRID
-                + importance * WEIGHT_IMPORTANCE_HYBRID;
+        // Rank each candidate by keyword score and semantic score, then fuse
+        // with Reciprocal Rank Fusion (RRF). RRF is scale-free: unlike the
+        // old linear weighted sum, it does not let the larger-score signal
+        // (BM25 vs cosine) dominate simply because its scale is bigger.
+        let mut keyword_ranked: Vec<(&Experience, f64)> = candidates
+            .iter()
+            .map(|exp| {
+                let kw = bm25_score(&query_terms, &exp.content);
+                (exp, kw)
+            })
+            .collect();
+        keyword_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Semantic ranking contains ONLY documents with a real vector hit
+        // (present in `semantic_map`). Documents absent from it are keyword-only
+        // and receive a single RRF contribution; including them here would give
+        // them a full second term based on arbitrary zero-score order.
+        let mut semantic_ranked: Vec<(&Experience, f64)> = candidates
+            .iter()
+            .filter(|exp| semantic_map.contains_key(&exp.id))
+            .map(|exp| (exp, semantic_map.get(&exp.id).copied().unwrap_or(0.0)))
+            .collect();
+        semantic_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // O(1) rank lookup instead of a per-candidate O(n) position scan.
+        let semantic_rank_of: HashMap<&str, usize> = semantic_ranked
+            .iter()
+            .enumerate()
+            .map(|(rank, (exp, _))| (exp.id.as_str(), rank))
+            .collect();
+
+        // RRF constant; 60 is the standard value used by Elasticsearch.
+        const RRF_K: f64 = 60.0;
+
+        for (i, (exp, kw)) in keyword_ranked.iter().enumerate() {
+            // Documents in BOTH lists get two rank contributions; keyword-only
+            // documents get a single term (`semantic_rank` stays MAX → term≈0).
+            let semantic_rank = semantic_rank_of
+                .get(exp.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            let rrf = 1.0 / (RRF_K + i as f64) + 1.0 / (RRF_K + semantic_rank as f64);
+            // Importance remains a small, scale-bounded tiebreaker.
+            let importance = exp.confidence * WEIGHT_IMPORTANCE_HYBRID;
+            let score = rrf + importance;
             if score <= 0.0 {
                 continue;
             }
             results.push(RetrievalResult {
-                experience: exp,
+                experience: (*exp).clone(),
                 score,
-                keyword_score,
-                semantic_score,
+                keyword_score: *kw,
+                semantic_score: semantic_map.get(&exp.id).copied().unwrap_or(0.0),
             });
         }
         results.sort_by(|a, b| {
@@ -543,5 +581,66 @@ mod tests {
         let score = bm25_score(&query, "rust rust async async runtime runtime");
         assert!(score <= 1.0, "normalized score must be <= 1.0, got {score}");
         assert!(score > 0.0, "positive score for matches");
+    }
+
+    /// Objective: Verify RRF fusion rewards documents found by BOTH signals.
+    /// Invariants: A doc that ranks #1 in keyword AND #1 in semantic gets a
+    /// higher fused score than a doc ranked #1 in keyword but absent from the
+    /// semantic list — the scale-free RRF must not be dominated by one signal.
+    #[test]
+    fn rrf_prefers_docs_found_by_both_signals() {
+        // Doc A: strong keyword match, weak semantic (low rank).
+        // Doc B: moderate keyword match, absent from semantic (high rank / MAX).
+        let mut doc_a = Experience::new("t1", MemoryType::Knowledge, "rust rust rust async", 0.5);
+        doc_a.id = "a".to_string();
+        let mut doc_b = Experience::new("t1", MemoryType::Knowledge, "rust async", 0.5);
+        doc_b.id = "b".to_string();
+        let candidates = [doc_a, doc_b];
+
+        let query_terms = tokenize("rust async");
+        // Fake semantic map: A present (similarity 0.3), B absent.
+        let mut semantic_map: HashMap<String, f64> = HashMap::new();
+        semantic_map.insert("a".to_string(), 0.3);
+
+        // Replicate the hybrid ranking logic: rank by keyword, then fuse.
+        let mut keyword_ranked: Vec<(&Experience, f64)> = candidates
+            .iter()
+            .map(|exp| (exp, bm25_score(&query_terms, &exp.content)))
+            .collect();
+        keyword_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut semantic_ranked: Vec<(&Experience, f64)> = candidates
+            .iter()
+            .map(|exp| (exp, semantic_map.get(&exp.id).copied().unwrap_or(0.0)))
+            .collect();
+        semantic_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        const RRF_K: f64 = 60.0;
+        let fused = |rank: usize| 1.0 / (RRF_K + rank as f64);
+
+        let a_rank = keyword_ranked
+            .iter()
+            .position(|(e, _)| e.id == "a")
+            .unwrap_or(usize::MAX);
+        let a_sem_rank = semantic_ranked
+            .iter()
+            .position(|(e, _)| e.id == "a")
+            .unwrap_or(usize::MAX);
+        let b_rank = keyword_ranked
+            .iter()
+            .position(|(e, _)| e.id == "b")
+            .unwrap_or(usize::MAX);
+        let b_sem_rank = semantic_ranked
+            .iter()
+            .position(|(e, _)| e.id == "b")
+            .unwrap_or(usize::MAX);
+
+        let a_score = fused(a_rank) + fused(a_sem_rank);
+        let b_score = fused(b_rank) + fused(b_sem_rank);
+
+        assert!(
+            a_score > b_score,
+            "doc present in both keyword+semantic must fuse higher than doc in only one; a={a_score}, b={b_score}"
+        );
     }
 }

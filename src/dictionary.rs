@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::sync::RwLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // ── Lexeme types ────────────────────────────────────────────────────────────
 
@@ -27,7 +27,7 @@ use serde::Deserialize;
 ///
 /// Promotion path: `Candidate → Experimental → Core`.
 /// Retirement path: `Core/Experimental → Deprecated → Disabled`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum LexemeStatus {
     /// Proposed but not yet validated by regression tests.
@@ -59,17 +59,37 @@ impl LexemeStatus {
     }
 
     /// Advance one step along the retirement path.
+    ///
+    /// Only `Core` (shipped in the default core) enters `Deprecated` — the
+    /// grace state for lexemes scheduled for removal. `Experimental` lexemes
+    /// never shipped, so they retire directly to `Disabled`; this guarantees
+    /// that `Deprecated` always implies a `Core` origin, which keeps
+    /// [`Self::rollback`] exact (no silent Experimental→Core promotion).
     pub fn demote(self) -> LexemeStatus {
         match self {
-            LexemeStatus::Core | LexemeStatus::Experimental => LexemeStatus::Deprecated,
-            LexemeStatus::Deprecated => LexemeStatus::Disabled,
+            LexemeStatus::Core => LexemeStatus::Deprecated,
+            LexemeStatus::Experimental | LexemeStatus::Deprecated => LexemeStatus::Disabled,
+            other => other,
+        }
+    }
+
+    /// Roll back one step along the retirement path (P6 rollback mechanism).
+    ///
+    /// A `Deprecated` lexeme is reinstated to `Core` (its only possible
+    /// pre-deprecation state, since only Core enters Deprecated); a `Disabled`
+    /// lexeme is first restored to `Deprecated` so it stays visible in
+    /// manifests for at least one release before being fully re-activated.
+    pub fn rollback(self) -> LexemeStatus {
+        match self {
+            LexemeStatus::Deprecated => LexemeStatus::Core,
+            LexemeStatus::Disabled => LexemeStatus::Deprecated,
             other => other,
         }
     }
 }
 
 /// A single entry in the Elite Lexicon.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lexeme {
     pub id: String,
     pub language: String,
@@ -88,7 +108,7 @@ pub struct Lexeme {
 }
 
 /// What a lexeme produces when matched.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CognitiveEffect {
     #[serde(rename = "type")]
     pub effect_type: String,
@@ -96,7 +116,7 @@ pub struct CognitiveEffect {
 }
 
 /// Match-time constraints.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatchConstraints {
     #[serde(default)]
     pub word_boundary: bool,
@@ -109,7 +129,7 @@ pub struct MatchConstraints {
 }
 
 /// Provenance of a lexeme.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LexiconSource {
     pub kind: String,
     pub name: String,
@@ -436,5 +456,55 @@ mod tests {
         assert_eq!(parsed, LexemeStatus::Experimental);
         let parsed: LexemeStatus = serde_json::from_str("\"disabled\"").expect("parses");
         assert_eq!(parsed, LexemeStatus::Disabled);
+    }
+
+    /// Objective: Verify the rollback path reverses retirement (P6).
+    /// Invariants: Deprecated → Core (reinstated); Disabled → Deprecated
+    /// (one release grace); active statuses are unaffected.
+    #[test]
+    fn status_rolls_back_retirement() {
+        assert_eq!(
+            LexemeStatus::Deprecated.rollback(),
+            LexemeStatus::Core,
+            "Deprecated rolls back to Core (reinstated)"
+        );
+        assert_eq!(
+            LexemeStatus::Disabled.rollback(),
+            LexemeStatus::Deprecated,
+            "Disabled rolls back to Deprecated first (grace period)"
+        );
+        assert_eq!(
+            LexemeStatus::Core.rollback(),
+            LexemeStatus::Core,
+            "Core is unaffected by rollback"
+        );
+        assert_eq!(
+            LexemeStatus::Candidate.rollback(),
+            LexemeStatus::Candidate,
+            "Candidate is unaffected by rollback"
+        );
+
+        // demote → rollback round-trips Core back to Core.
+        let round_trip = LexemeStatus::Core.demote().rollback();
+        assert_eq!(
+            round_trip,
+            LexemeStatus::Core,
+            "demote+rollback restores Core"
+        );
+
+        // An Experimental lexeme (never shipped in core) retires directly to
+        // Disabled — it must NOT enter Deprecated, so rollback can never
+        // silently promote it to Core (regression for the P3 finding).
+        assert_eq!(
+            LexemeStatus::Experimental.demote(),
+            LexemeStatus::Disabled,
+            "Experimental retires directly to Disabled (no Core-only grace)"
+        );
+        let experimental_round_trip = LexemeStatus::Experimental.demote().rollback();
+        assert_eq!(
+            experimental_round_trip,
+            LexemeStatus::Deprecated,
+            "Experimental demote+rollback lands on Deprecated, never Core"
+        );
     }
 }
