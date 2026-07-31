@@ -64,6 +64,11 @@ petgraph = "0.6"
 # Multi-pattern string matching for alias resolution
 aho-corasick = "1.1"
 
+# zlib (de)compression for PDF FlateDecode stream extraction (already a
+# transitive dependency via miniz_oxide; declared directly here so the
+# knowledge::pdf module can use it without a feature flag).
+flate2 = "1.1"
+
 # HNSW vector index for entity resolution
 instant-distance = "0.6"
 

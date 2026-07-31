@@ -747,6 +747,11 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 event_count,
             },
             character_arc: None,
+            // The store layer is link-unaware; the MCP `inspect_entity` tool
+            // populates this field from the attached EntityLinker so the
+            // cross-source aliases ride on the same response payload
+            // (external-knowledge-plan §D3).
+            external_aliases: Vec::new(),
         }))
     }
 

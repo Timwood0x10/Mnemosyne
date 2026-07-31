@@ -41,6 +41,7 @@ use crate::config::{
 };
 use crate::embed::EmbeddingService;
 use crate::error::{Error, Result};
+use crate::knowledge::ExternalKnowledgeRegistry;
 use crate::store::ExperienceRepository;
 use crate::types::{Experience, MemoryType};
 
@@ -55,6 +56,23 @@ pub struct RetrievalResult {
     pub keyword_score: f64,
     /// Vector similarity component score (0.0 when no embedding).
     pub semantic_score: f64,
+    /// External-signal RRF contribution (0.0 for local-only results).
+    ///
+    /// Populated only for synthetic candidates produced by an external
+    /// [`ExternalKnowledgeRegistry`] signal provider. Local results that did
+    /// not come from an external source keep this at 0.0.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub external_score: f64,
+    /// `true` when this result is a synthetic external hit (not a persisted
+    /// experience). Consumers can filter these out when only local memories
+    /// are admissible.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_external: bool,
+}
+
+/// `skip_serializing_if` helper: true when the score is exactly `0.0`.
+fn is_zero_f64(v: &f64) -> bool {
+    v.abs() < f64::EPSILON
 }
 
 /// The retrieval engine.
@@ -66,6 +84,10 @@ pub struct RetrievalEngine {
     embedder: Arc<dyn EmbeddingService>,
     store: Arc<dyn ExperienceRepository>,
     mode: RetrievalMode,
+    /// Optional external-knowledge registry. When attached, hybrid search fuses
+    /// each signal provider's hits into the RRF ranking as synthetic candidates
+    /// (external-knowledge-plan §B4). `None` keeps retrieval purely local.
+    external: Option<Arc<ExternalKnowledgeRegistry>>,
 }
 
 impl RetrievalEngine {
@@ -88,7 +110,36 @@ impl RetrievalEngine {
             embedder,
             store,
             mode,
+            external: None,
         }
+    }
+
+    /// Attach an external-knowledge registry for hybrid external-signal fusion.
+    ///
+    /// When attached, [`RetrievalMode::Hybrid`] search forwards the query to
+    /// every registered signal provider and fuses the hits into RRF as
+    /// synthetic candidates (external-knowledge-plan §B4). Other modes are
+    /// unaffected. The registry is shared by `Arc`, so the same instance can
+    /// also drive `knowledge_attach`/`knowledge_ingest` from the MCP layer.
+    #[must_use]
+    pub fn with_external_registry(mut self, registry: Arc<ExternalKnowledgeRegistry>) -> Self {
+        self.external = Some(registry);
+        self
+    }
+
+    /// Replace the external-knowledge registry at runtime.
+    ///
+    /// Used by the `knowledge_attach` MCP tool so newly-attached sources are
+    /// visible to subsequent `memory_search` calls without rebuilding the
+    /// engine.
+    pub fn set_external_registry(&mut self, registry: Arc<ExternalKnowledgeRegistry>) {
+        self.external = Some(registry);
+    }
+
+    /// Read-only access to the attached external registry, if any.
+    #[must_use]
+    pub fn external_registry(&self) -> Option<&Arc<ExternalKnowledgeRegistry>> {
+        self.external.as_ref()
     }
 
     /// Returns the configured retrieval mode.
@@ -159,6 +210,8 @@ impl RetrievalEngine {
                 score,
                 keyword_score,
                 semantic_score: 0.0,
+                external_score: 0.0,
+                is_external: false,
             });
         }
         results.sort_by(|a, b| {
@@ -204,6 +257,8 @@ impl RetrievalEngine {
                 score,
                 keyword_score: 0.0,
                 semantic_score,
+                external_score: 0.0,
+                is_external: false,
             });
         }
         results.truncate(limit);
@@ -298,8 +353,49 @@ impl RetrievalEngine {
                 score,
                 keyword_score: *kw,
                 semantic_score: semantic_map.get(&exp.id).copied().unwrap_or(0.0),
+                external_score: 0.0,
+                is_external: false,
             });
         }
+
+        // External-signal fusion (external-knowledge-plan §B4). When a registry
+        // is attached, forward the query to every signal provider and merge the
+        // hits as a THIRD RRF list. Each external hit becomes a synthetic
+        // candidate: it contributes only its external RRF term (no local
+        // keyword/semantic signal, since external ids are opaque to LoreScope
+        // and cannot be reliably matched to local experiences). This keeps the
+        // fusion scale-free and never double-counts a hit across lists.
+        if let Some(registry) = &self.external {
+            let external_hits = registry.search_all(query, limit);
+            for (rank, hit) in external_hits.iter().enumerate() {
+                let external_rrf = 1.0 / (RRF_K + rank as f64);
+                // External score carries the source's own relevance as a small
+                // importance tiebreaker, mirroring the local importance weight.
+                let importance = hit.score * WEIGHT_IMPORTANCE_HYBRID;
+                let score = external_rrf + importance;
+                // Build a synthetic, non-persisted Experience so the existing
+                // RetrievalResult shape is preserved. The id is namespaced so
+                // callers can distinguish `ext:` hits from real local ids and
+                // never accidentally overwrite a stored experience.
+                let mut exp = Experience::new(
+                    tenant_id,
+                    MemoryType::Knowledge,
+                    hit.text.clone(),
+                    hit.score,
+                );
+                exp.id = format!("ext:{}:{}", hit.source, hit.id);
+                exp.source = hit.source.clone();
+                results.push(RetrievalResult {
+                    experience: exp,
+                    score,
+                    keyword_score: 0.0,
+                    semantic_score: 0.0,
+                    external_score: external_rrf,
+                    is_external: true,
+                });
+            }
+        }
+
         results.sort_by(|a, b| {
             b.score
                 .partial_cmp(&a.score)
@@ -641,6 +737,186 @@ mod tests {
         assert!(
             a_score > b_score,
             "doc present in both keyword+semantic must fuse higher than doc in only one; a={a_score}, b={b_score}"
+        );
+    }
+
+    // ── External-signal fusion (external-knowledge-plan §B4) ────────────────
+
+    /// Build a registry carrying a single Db adapter that returns `hits` for
+    /// any query, wrapped in an `Arc` ready to attach to a RetrievalEngine.
+    fn registry_with_db_hits(
+        hits: Vec<crate::knowledge::adapter::ExternalHit>,
+    ) -> Arc<ExternalKnowledgeRegistry> {
+        let reg = ExternalKnowledgeRegistry::new();
+        let captured = hits;
+        let adapter = crate::knowledge::adapter::DbAdapter::new(
+            "fake-db",
+            crate::knowledge::adapter::SchemaMapping::default(),
+            Box::new(move |_, _| captured.clone()),
+        );
+        reg.register_signal(adapter);
+        Arc::new(reg)
+    }
+
+    /// Objective: Verify hybrid search with an external registry surfaces
+    /// synthetic external hits alongside local results, each marked
+    /// `is_external=true` with a namespaced `ext:` id.
+    /// Invariants: At least one external result appears; its id starts with
+    /// `ext:`; is_external is true; external_score > 0.
+    #[tokio::test]
+    async fn hybrid_search_fuses_external_hits() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder::new());
+        let registry = registry_with_db_hits(vec![crate::knowledge::adapter::ExternalHit {
+            id: "row-9".into(),
+            text: "external knowledge from db".into(),
+            score: 0.8,
+            source: "fake-db".into(),
+        }]);
+        let engine = RetrievalEngine::new(embedder, store, RetrievalMode::Hybrid)
+            .with_external_registry(registry);
+
+        let results = engine
+            .search("anything", "t1", 5, None)
+            .await
+            .expect("search");
+        let external: Vec<_> = results.iter().filter(|r| r.is_external).collect();
+        assert!(
+            !external.is_empty(),
+            "at least one external hit must surface, got: {:?}",
+            results.iter().map(|r| &r.experience.id).collect::<Vec<_>>()
+        );
+        let r = external[0];
+        assert!(
+            r.experience.id.starts_with("ext:fake-db:"),
+            "external id must be namespaced, got {}",
+            r.experience.id
+        );
+        assert!(r.external_score > 0.0, "external_score must be populated");
+        assert!(
+            r.semantic_score.abs() < f64::EPSILON,
+            "external hits carry no semantic score"
+        );
+        assert_eq!(
+            r.experience.source, "fake-db",
+            "external hit records its source for provenance"
+        );
+    }
+
+    /// Objective: Verify a high-scoring external hit can OUTRANK a weak local
+    /// keyword-only hit, so external knowledge is genuinely competitive in the
+    /// fused ranking — not just appended at the bottom.
+    /// Invariants: Top external hit (rank 0, score 1.0) beats a low-confidence
+    /// local hit that only weakly matches the query.
+    #[tokio::test]
+    async fn hybrid_external_hit_can_outrank_weak_local() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder::new());
+        // Local memory: weak keyword match (single term, low confidence).
+        let mut local = Experience::new("t1", MemoryType::Knowledge, "rust", 0.1);
+        local.id = "local-1".to_string();
+        store.create(&local).await.expect("create");
+
+        let registry = registry_with_db_hits(vec![crate::knowledge::adapter::ExternalHit {
+            id: "strong".into(),
+            text: "comprehensive rust async guide from external db".into(),
+            score: 1.0,
+            source: "fake-db".into(),
+        }]);
+        let engine = RetrievalEngine::new(embedder, store, RetrievalMode::Hybrid)
+            .with_external_registry(registry);
+
+        let results = engine.search("rust", "t1", 5, None).await.expect("search");
+        // The external hit (rank 0 → rrf 1/60 ≈ 0.0167 + 0.2 importance) must
+        // beat the local hit (keyword rrf 1/60 + 0.02 importance). Both have the
+        // same keyword RRF term, but the external importance (1.0 * 0.2 = 0.2)
+        // dwarfs the local importance (0.1 * 0.2 = 0.02), so external wins.
+        assert!(!results.is_empty(), "must return results");
+        assert!(
+            results[0].is_external,
+            "high-score external hit must rank first, got id={}",
+            results[0].experience.id
+        );
+    }
+
+    /// Objective: Verify hybrid search WITHOUT an external registry behaves
+    /// exactly as before (no synthetic candidates, all is_external=false).
+    /// Invariants: Every result is local (is_external false, external_score 0).
+    #[tokio::test]
+    async fn hybrid_without_registry_has_no_external_results() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder::new());
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, "rust async", 0.8);
+        exp.id = "e1".to_string();
+        store.create(&exp).await.expect("create");
+        // No with_external_registry call → external stays None.
+        let engine = RetrievalEngine::new(embedder, store, RetrievalMode::Hybrid);
+
+        let results = engine.search("rust", "t1", 5, None).await.expect("search");
+        assert!(
+            results.iter().all(|r| !r.is_external),
+            "no external results without a registry"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|r| r.external_score.abs() < f64::EPSILON),
+            "external_score stays 0 without a registry"
+        );
+    }
+
+    /// Objective: Verify keyword/vector modes are UNAFFECTED by an attached
+    /// external registry (the plan scopes external fusion to hybrid only).
+    /// Invariants: Keyword search returns no external hits even when a registry
+    /// is attached.
+    #[tokio::test]
+    async fn keyword_mode_ignores_external_registry() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder::new());
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, "rust async", 0.8);
+        exp.id = "e1".to_string();
+        store.create(&exp).await.expect("create");
+        let registry = registry_with_db_hits(vec![crate::knowledge::adapter::ExternalHit {
+            id: "ext".into(),
+            text: "should not appear".into(),
+            score: 1.0,
+            source: "db".into(),
+        }]);
+        let engine = RetrievalEngine::new(embedder, store, RetrievalMode::Keyword)
+            .with_external_registry(registry);
+
+        let results = engine.search("rust", "t1", 5, None).await.expect("search");
+        assert!(
+            results.iter().all(|r| !r.is_external),
+            "keyword mode must not fuse external signals"
+        );
+    }
+
+    /// Objective: Verify set_external_registry (runtime attach) makes external
+    /// hits visible on the next search — mirrors the knowledge_attach MCP flow.
+    /// Invariants: Before attach, no external hits; after attach, external hits
+    /// appear.
+    #[tokio::test]
+    async fn set_external_registry_attaches_at_runtime() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder::new());
+        let mut engine = RetrievalEngine::new(embedder, store, RetrievalMode::Hybrid);
+        // No registry yet → no external results.
+        let before = engine.search("q", "t1", 5, None).await.expect("search");
+        assert!(before.iter().all(|r| !r.is_external));
+
+        engine.set_external_registry(registry_with_db_hits(vec![
+            crate::knowledge::adapter::ExternalHit {
+                id: "r1".into(),
+                text: "late-attached".into(),
+                score: 0.9,
+                source: "db".into(),
+            },
+        ]));
+        let after = engine.search("q", "t1", 5, None).await.expect("search");
+        assert!(
+            after.iter().any(|r| r.is_external),
+            "after set_external_registry, external hits must appear"
         );
     }
 }

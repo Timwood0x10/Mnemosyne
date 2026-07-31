@@ -26,6 +26,7 @@ use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
+use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
@@ -249,13 +250,16 @@ async fn build_store(
 }
 
 /// Build the retrieval engine based on the configured `retrieval_mode`.
+///
+/// Returns an un-`Arc`-wrapped engine so the caller can chain
+/// `with_external_registry` before wrapping in `Arc` for sharing.
 fn build_retrieval_engine(
     cfg: &lore_scope::config::Config,
     embedder: Arc<dyn EmbeddingService>,
     store: Arc<dyn ExperienceRepository>,
-) -> Arc<RetrievalEngine> {
+) -> RetrievalEngine {
     let mode = cfg.retrieval_mode;
-    Arc::new(RetrievalEngine::new(embedder, store, mode))
+    RetrievalEngine::new(embedder, store, mode)
 }
 
 /// Tool: search character knowledge graph (`character_search`).
@@ -524,7 +528,16 @@ async fn build_server(
 ) -> AnyhowResult<(MCPServer, Arc<PipelineDistiller>, Arc<RetrievalEngine>)> {
     let store = build_store(cfg).await?;
     let embedder = build_embedder(cfg)?;
-    let engine = build_retrieval_engine(cfg, embedder.clone(), store.clone());
+
+    // Shared external-knowledge registry (external-knowledge-plan §B/E).
+    // Created once here and shared (via Arc) between:
+    // - the retrieval engine (hybrid search fuses external signals via RRF),
+    // - the knowledge_attach/ingest MCP tools (runtime mutation via RwLock).
+    let external_registry = Arc::new(lore_scope::knowledge::ExternalKnowledgeRegistry::new());
+    let engine = Arc::new(
+        build_retrieval_engine(cfg, embedder.clone(), store.clone())
+            .with_external_registry(external_registry.clone()),
+    );
 
     let distill_cfg = DistillationConfig {
         min_importance: cfg.min_importance,
@@ -807,7 +820,36 @@ async fn build_server(
     let fact_store_knowledge = Arc::new(
         SqliteFactStore::open(&cfg.db_path).context("open fact store for knowledge tools")?,
     );
-    builder = register_knowledge_tools(builder, kstore, fact_store_knowledge).await;
+    // Shared cross-source entity linker (external-knowledge-plan §D3). Starts
+    // empty; `knowledge_attach` (Phase E) rebuilds it after attaching a
+    // source. `inspect_entity` reads it to resolve external surface names to
+    // unified graph nodes.
+    let entity_linker: Arc<std::sync::RwLock<lore_scope::knowledge::EntityLinker>> = Arc::new(
+        std::sync::RwLock::new(lore_scope::knowledge::EntityLinker::new()),
+    );
+    builder = register_knowledge_tools(
+        builder,
+        kstore.clone(),
+        fact_store_knowledge.clone(),
+        Some(entity_linker.clone()),
+    )
+    .await;
+
+    // ── External knowledge tools (external-knowledge-plan §E) ─────────
+    //
+    // Three tools that let the agent attach external knowledge sources
+    // (PDF/JSON/TXT/MD documents, JSON-backed DBs), materialize them into
+    // the graph, and compile AI conversations into three-state facts. They
+    // share the same registry + linker as the retrieval engine and
+    // inspect_entity so a runtime attach is immediately visible to search.
+    builder = register_external_knowledge_tools(
+        builder,
+        external_registry,
+        entity_linker,
+        kstore,
+        fact_store_knowledge,
+    )
+    .await;
 
     Ok((builder.build(), distiller, engine))
 }

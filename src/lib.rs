@@ -31,6 +31,7 @@
 //! | `config` | Configuration loading |
 //! | `mcp` | MCP server framework (types, transport, server) |
 
+pub mod agent_facts;
 pub mod character;
 pub mod classifier;
 pub mod cognition;

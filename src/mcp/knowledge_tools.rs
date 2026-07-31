@@ -12,16 +12,23 @@
 //! | `relation_graph`  | `entity`     | `doc`, `depth` | `store.relation_graph()` |
 //! | `evidence`        | `query`      | `doc`, `limit` | `store.search_evidence()` |
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
 use crate::knowledge::store::KnowledgeStore;
-use crate::knowledge::{KnowledgeEdge, SQLiteKnowledgeStore};
+use crate::knowledge::{EntityLinker, ExternalAlias, KnowledgeEdge, SQLiteKnowledgeStore};
 use crate::mcp::server::ServerBuilder;
 use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler};
+
+/// Shared, runtime-mutable entity linker.
+///
+/// Wrapped in `Arc<RwLock<...>>` so `inspect_entity` can read the current
+/// cross-source links while `knowledge_attach` rebuilds the linker after
+/// attaching a new source (external-knowledge-plan §D3, §E).
+pub type SharedEntityLinker = Arc<RwLock<EntityLinker>>;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -75,17 +82,86 @@ fn err_result(msg: impl Into<String>) -> ToolCallResult {
 
 struct InspectEntityHandler {
     store: Arc<SQLiteKnowledgeStore>,
+    /// Optional cross-source entity linker (external-knowledge-plan §D3).
+    /// When attached, the requested `name` is resolved through the linker
+    /// before querying the graph, and the response carries the external
+    /// aliases that map to the resolved entity.
+    linker: Option<SharedEntityLinker>,
 }
 
 #[async_trait::async_trait]
 impl ToolHandler for InspectEntityHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let name = req_str(args, "name")?;
+        let requested = req_str(args, "name")?;
         let doc = opt_str(args, "doc");
+        // Optional source hint: when the caller knows the surface came from a
+        // specific external source, scope the linker lookup so identical
+        // surfaces that different sources map differently are disambiguated.
+        let source_hint = opt_str(args, "source");
 
-        match self.store.inspect_entity(&name, doc).await? {
-            Some(result) => json_ok(&result),
-            None => Ok(err_result(format!("entity `{name}` not found"))),
+        // Phase D3: resolve the requested name through the EntityLinker first.
+        // The linker returns the canonical name; if the surface is unknown OR
+        // the linker is not attached, fall back to the requested name so the
+        // tool keeps working for purely-local entities.
+        let (canonical, external_aliases) = self.resolve_with_linker(&requested, source_hint);
+
+        match self.store.inspect_entity(&canonical, doc).await? {
+            Some(mut result) => {
+                // Attach the cross-source aliases that resolved to this entity
+                // so the response carries a full cross-source picture
+                // (external-knowledge-plan §D: "返回跨来源画像").
+                result.external_aliases = external_aliases;
+                json_ok(&result)
+            }
+            None => {
+                // If the canonical lookup missed, retry with the original
+                // requested name as a last resort (the linker may have mapped
+                // the surface to a canonical that isn't in the graph yet).
+                if canonical != requested {
+                    if let Some(mut result) = self.store.inspect_entity(&requested, doc).await? {
+                        result.external_aliases = external_aliases;
+                        return json_ok(&result);
+                    }
+                }
+                Ok(err_result(format!("entity `{requested}` not found")))
+            }
+        }
+    }
+}
+
+impl InspectEntityHandler {
+    /// Resolve `requested` through the attached linker (if any) and collect
+    /// the external aliases that map to the resolved canonical.
+    ///
+    /// Returns `(canonical_name, external_aliases)`. When no linker is
+    /// attached or the surface is unknown, the canonical equals `requested`
+    /// and the alias list is empty.
+    fn resolve_with_linker(
+        &self,
+        requested: &str,
+        source_hint: Option<&str>,
+    ) -> (String, Vec<ExternalAlias>) {
+        let Some(linker_arc) = &self.linker else {
+            return (requested.to_string(), Vec::new());
+        };
+        // std::sync::RwLock read guard is fine here: no .await is held while
+        // the guard is live, and the linker is a cheap HashMap lookup.
+        let linker = linker_arc
+            .read()
+            .expect("entity linker lock poisoned (reader)");
+        match linker.resolve(requested, source_hint) {
+            Some(canonical) => {
+                let aliases = linker
+                    .provenance(canonical)
+                    .iter()
+                    .map(|link| ExternalAlias {
+                        source: link.source.clone(),
+                        external_name: link.external_name.clone(),
+                    })
+                    .collect();
+                (canonical.to_string(), aliases)
+            }
+            None => (requested.to_string(), Vec::new()),
         }
     }
 }
@@ -229,29 +305,38 @@ impl ToolHandler for CorrectRelationHandler {
 ///
 /// `fact_store` provides durable fact reads for cognition snapshots, sharing
 /// the same SQLite database written by the compilation pipeline.
+/// `entity_linker` is the optional shared cross-source linker
+/// (external-knowledge-plan §D3): when supplied, `inspect_entity` resolves
+/// external surface names to unified graph nodes and decorates the response
+/// with the matching external aliases.
 /// Each tool wraps a [`KnowledgeStore`] method and speaks JSON-RPC 2.0 over
 /// the existing [`ServerBuilder`] infrastructure.
 pub async fn register_knowledge_tools(
     builder: ServerBuilder,
     store: Arc<SQLiteKnowledgeStore>,
     fact_store: Arc<SqliteFactStore>,
+    entity_linker: Option<SharedEntityLinker>,
 ) -> ServerBuilder {
     let kstore = store;
     builder
         .tool(
             ToolDefinition {
                 name: "inspect_entity".into(),
-                description: "Return the full picture for a named entity: object, events, relations, evidence, and mentions".into(),
+                description: "Return the full picture for a named entity: object, events, relations, evidence, mentions, and cross-source aliases. External surface names (e.g. 'John Smith') are resolved to the unified graph node via the entity linker when a source is attached.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string", "description": "Entity name (e.g. 赵云)"},
-                        "doc": {"type": "string", "description": "Optional document title filter"}
+                        "name": {"type": "string", "description": "Entity name or external surface (e.g. 赵云, John Smith)"},
+                        "doc": {"type": "string", "description": "Optional document title filter"},
+                        "source": {"type": "string", "description": "Optional external source hint to disambiguate identical surface names across sources (external-knowledge-plan §D)"}
                     },
                     "required": ["name"]
                 }),
             },
-            Arc::new(InspectEntityHandler { store: kstore.clone() }),
+            Arc::new(InspectEntityHandler {
+                store: kstore.clone(),
+                linker: entity_linker,
+            }),
         )
         .await
         .tool(
@@ -397,5 +482,208 @@ impl ToolHandler for CognitiveContextHandler {
         // 5. Return as JSON
         let json = snapshot.format_json();
         json_ok(&json)
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Tests — inspect_entity × EntityLinker integration (external-knowledge-plan §D)
+// ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::knowledge::adapter::EntityLink;
+    use crate::knowledge::{Document, KnowledgeObject, ObjectType};
+    use serde_json::json;
+
+    fn now_ts() -> i64 {
+        chrono::Utc::now().timestamp()
+    }
+
+    /// Build a shared linker preloaded with the CRM ↔ novel alias scenario
+    /// from the plan (§D4): "John Smith" / "J. Smith" → "Mr. Smith".
+    fn linked() -> SharedEntityLinker {
+        let linker = EntityLinker::from_links(vec![
+            EntityLink {
+                external_name: "John Smith".into(),
+                canonical_name: "Mr. Smith".into(),
+                source: "crm".into(),
+            },
+            EntityLink {
+                external_name: "J. Smith".into(),
+                canonical_name: "Mr. Smith".into(),
+                source: "novel".into(),
+            },
+        ]);
+        Arc::new(RwLock::new(linker))
+    }
+
+    /// Objective: Verify resolve_with_linker maps an external surface to the
+    /// canonical graph name and collects every (source, surface) alias.
+    /// Invariants: "John Smith" → "Mr. Smith"; aliases include both CRM and
+    /// novel surfaces; an unknown surface falls back to the requested name
+    /// with empty aliases.
+    #[tokio::test]
+    async fn resolve_with_linker_maps_surface_to_canonical_and_collects_aliases() {
+        let store = Arc::new(
+            crate::knowledge::SQLiteKnowledgeStore::open_in_memory()
+                .await
+                .expect("open"),
+        );
+        let handler = InspectEntityHandler {
+            store,
+            linker: Some(linked()),
+        };
+
+        let (canonical, aliases) = handler.resolve_with_linker("John Smith", None);
+        assert_eq!(
+            canonical, "Mr. Smith",
+            "external surface resolves to canonical"
+        );
+        assert_eq!(
+            aliases.len(),
+            2,
+            "both CRM and novel surfaces are listed as aliases"
+        );
+        let mut pairs: Vec<(String, String)> = aliases
+            .iter()
+            .map(|a| (a.source.clone(), a.external_name.clone()))
+            .collect();
+        pairs.sort_unstable();
+        assert_eq!(
+            pairs,
+            vec![
+                ("crm".into(), "John Smith".into()),
+                ("novel".into(), "J. Smith".into()),
+            ],
+            "alias list carries source + external surface pairs"
+        );
+    }
+
+    /// Objective: Verify a source hint scopes the lookup so identical surfaces
+    /// that different sources map differently are disambiguated.
+    /// Invariants: "John Smith" + source=crm → "Mr. Smith"; with no linker
+    /// attached the surface is returned unchanged with no aliases.
+    #[tokio::test]
+    async fn source_hint_scopes_resolution_and_no_linker_falls_back() {
+        let store = Arc::new(
+            crate::knowledge::SQLiteKnowledgeStore::open_in_memory()
+                .await
+                .expect("open"),
+        );
+        let handler_with_linker = InspectEntityHandler {
+            store: store.clone(),
+            linker: Some(linked()),
+        };
+        let (canonical, _) = handler_with_linker.resolve_with_linker("John Smith", Some("crm"));
+        assert_eq!(
+            canonical, "Mr. Smith",
+            "source-scoped lookup resolves correctly"
+        );
+
+        // No linker attached: surface is returned as-is, no aliases.
+        let handler_no_linker = InspectEntityHandler {
+            store,
+            linker: None,
+        };
+        let (canonical, aliases) = handler_no_linker.resolve_with_linker("John Smith", None);
+        assert_eq!(
+            canonical, "John Smith",
+            "without a linker the requested name is returned unchanged"
+        );
+        assert!(aliases.is_empty(), "no aliases without a linker");
+    }
+
+    /// Objective: Verify the full inspect_entity handler resolves an external
+    /// surface ("John Smith") to the graph node ("Mr. Smith") end-to-end and
+    /// decorates the response with cross-source aliases
+    /// (external-knowledge-plan §D4: "John Smith" ↔ "Mr. Smith" 同一实体").
+    /// Invariants: the returned object name is "Mr. Smith"; external_aliases
+    /// lists both surfaces; an unknown surface still works via fallback.
+    #[tokio::test]
+    async fn inspect_entity_resolves_external_surface_to_graph_node() {
+        let store = Arc::new(
+            crate::knowledge::SQLiteKnowledgeStore::open_in_memory()
+                .await
+                .expect("open"),
+        );
+        // Seed the graph with the canonical "Mr. Smith" node.
+        let did = store
+            .create_document(&Document {
+                id: 0,
+                title: "crm-export".into(),
+                author: None,
+                doc_type: Some("novel".into()),
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create doc");
+        store
+            .create_object(&KnowledgeObject {
+                id: 0,
+                doc_id: did,
+                object_type: ObjectType::Person,
+                name: "Mr. Smith".into(),
+                properties: json!({}),
+                confidence: 0.9,
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create Mr. Smith");
+
+        let handler = InspectEntityHandler {
+            store: store.clone(),
+            linker: Some(linked()),
+        };
+
+        // Query with the EXTERNAL surface "John Smith" — must resolve to the
+        // canonical "Mr. Smith" graph node.
+        let args = serde_json::json!({"name": "John Smith"});
+        let result = handler.call(&args).await.expect("handler succeeds");
+        assert!(
+            !result.is_error,
+            "handler must not error on a resolvable surface"
+        );
+        let payload: serde_json::Value =
+            serde_json::from_str(&result.content[0].text.clone().unwrap_or_default())
+                .expect("result is JSON");
+        assert_eq!(
+            payload["object"]["name"].as_str(),
+            Some("Mr. Smith"),
+            "external surface resolved to the canonical graph node"
+        );
+        let aliases = payload["external_aliases"]
+            .as_array()
+            .expect("aliases array");
+        assert_eq!(
+            aliases.len(),
+            2,
+            "both cross-source surfaces appear in the response"
+        );
+    }
+
+    /// Objective: Verify inspect_entity returns an error result (not a panic)
+    /// for a surface that the linker cannot resolve AND that is absent from
+    /// the graph.
+    /// Invariants: is_error true; message names the missing entity.
+    #[tokio::test]
+    async fn inspect_entity_unknown_surface_returns_error_not_panic() {
+        let store = Arc::new(
+            crate::knowledge::SQLiteKnowledgeStore::open_in_memory()
+                .await
+                .expect("open"),
+        );
+        let handler = InspectEntityHandler {
+            store,
+            linker: Some(linked()),
+        };
+        let args = serde_json::json!({"name": "totally-unknown-person"});
+        let result = handler.call(&args).await.expect("handler does not error");
+        assert!(result.is_error, "unknown entity yields an error result");
+        let text = result.content[0].text.clone().unwrap_or_default();
+        assert!(
+            text.contains("totally-unknown-person"),
+            "error message names the missing entity"
+        );
     }
 }

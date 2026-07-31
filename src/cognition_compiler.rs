@@ -3,7 +3,22 @@
 //! The compiler emits the universal `Observation` IR and immutable `Fact`
 //! records. `CompiledConversation` is retained only as a compatibility
 //! projection for existing MCP response fields and prompt reconstruction.
+//!
+//! ## Three-state conversation facts (external-knowledge-plan §C)
+//!
+//! [`CognitionCompiler::compile_conversation_facts`] produces a
+//! [`ConversationFacts`] container with three disjoint channels:
+//!
+//! - `user_facts` — first-hand user cognition (existing user-message path,
+//!   zero agent pollution).
+//! - `agent_facts` — `Event` facts for what the agent did, attributed to the
+//!   **Agent** entity.
+//! - `derived_facts` — agent restatements of user cognition, attributed to the
+//!   User entity but marked `agent_derived` with discounted confidence.
 
+use crate::agent_facts::{
+    ConversationFacts, agent_facts_from_messages, derived_facts_from_messages,
+};
 use crate::cognition::{Fact, Observation};
 use crate::conversation_compiler::{
     ConversationCompiler, compile_user_observations, user_facts_from_observations,
@@ -54,6 +69,40 @@ impl CognitionCompiler {
             facts,
             compatibility,
         }
+    }
+
+    /// Compile a conversation into the three-state [`ConversationFacts`]
+    /// container (external-knowledge-plan §C).
+    ///
+    /// - `user_facts`: first-hand user cognition, produced by the existing
+    ///   user-message path (`compile_user_facts`). This channel is NEVER
+    ///   polluted by agent or derived content (zero-pollution invariant).
+    /// - `agent_facts`: `Event` facts for agent tool calls and completed
+    ///   actions, attributed to `agent_entity_id` (the Agent entity, resolved
+    ///   via [`crate::fact_store::SqliteFactStore::resolve_agent`]).
+    /// - `derived_facts`: agent restatements of user cognition, attributed to
+    ///   `user_entity_id` but marked `agent_derived` with discounted confidence
+    ///   and double evidence.
+    ///
+    /// Callers persist each channel with the appropriate entity id and
+    /// weighting; the `agent_fact_compile` MCP tool drives this entry point
+    /// with `include_agent_facts = true`.
+    #[must_use]
+    pub fn compile_conversation_facts(
+        &self,
+        messages: &[Message],
+        user_entity_id: i64,
+        agent_entity_id: i64,
+        logical_time: i32,
+    ) -> ConversationFacts {
+        let user_facts = crate::conversation_compiler::compile_user_facts(
+            messages,
+            user_entity_id,
+            logical_time,
+        );
+        let agent_facts = agent_facts_from_messages(messages, agent_entity_id, logical_time);
+        let derived_facts = derived_facts_from_messages(messages, user_entity_id, logical_time);
+        ConversationFacts::from_channels(user_facts, agent_facts, derived_facts)
     }
 }
 
@@ -110,6 +159,89 @@ mod tests {
         assert!(
             result.facts.is_empty(),
             "Assistant-authored content must not produce persisted user facts"
+        );
+    }
+
+    /// Objective: Verify compile_conversation_facts populates all three channels
+    /// with the correct entity attribution, and that the user channel stays
+    /// unpolluted by agent/derived content (the zero-pollution invariant).
+    /// Invariants: user_facts target the User entity and carry NO attribution
+    /// marker; agent_facts target the Agent entity as Events; derived_facts
+    /// target the User entity but are marked agent_derived.
+    #[test]
+    fn compile_conversation_facts_separates_three_channels() {
+        let messages = vec![
+            Message::new("user", "I want to learn Rust"),
+            Message::new("assistant", "you want to learn Rust, great!"),
+            Message::new("assistant", "Done, I created a Rust learning plan."),
+        ];
+        let result = CognitionCompiler::new().compile_conversation_facts(&messages, 42, 99, 100);
+
+        // User channel: first-hand Goal fact, no attribution marker.
+        assert!(
+            result.user_facts.iter().all(|f| f.entity_id == 42),
+            "user_facts target the User entity"
+        );
+        assert!(
+            result
+                .user_facts
+                .iter()
+                .all(|f| f.payload.get("attribution").is_none()),
+            "user_facts carry no attribution marker (zero-pollution)"
+        );
+        assert!(
+            result
+                .user_facts
+                .iter()
+                .any(|f| f.fact_type == FactType::Goal),
+            "user goal is captured first-hand"
+        );
+
+        // Agent channel: Event facts, Agent entity, attribution "agent".
+        assert!(
+            result
+                .agent_facts
+                .iter()
+                .all(|f| f.entity_id == 99 && f.fact_type == FactType::Event),
+            "agent_facts target the Agent entity as Events"
+        );
+        assert!(
+            !result.agent_facts.is_empty(),
+            "agent completion language captured"
+        );
+
+        // Derived channel: User entity, attribution "agent_derived".
+        assert!(
+            result.derived_facts.iter().all(|f| f.entity_id == 42
+                && f.payload.get("attribution")
+                    == Some(&serde_json::Value::String("agent_derived".into()))),
+            "derived_facts target the User entity but are marked agent_derived"
+        );
+        assert!(
+            !result.derived_facts.is_empty(),
+            "agent restatement captured as a derived fact"
+        );
+    }
+
+    /// Objective: Verify compile_conversation_facts with NO agent activity
+    /// yields empty agent/derived channels but still populates user_facts —
+    /// the agent channel is opt-in and never injects content on its own.
+    /// Invariants: agent_facts and derived_facts empty; user_facts populated.
+    #[test]
+    fn compile_conversation_facts_without_agent_activity() {
+        let messages = vec![Message::new("user", "I like Rust and plan to ship it.")];
+        let result = CognitionCompiler::new().compile_conversation_facts(&messages, 7, 8, 1);
+        assert!(
+            !result.user_facts.is_empty(),
+            "user facts still compiled from user messages"
+        );
+        assert!(
+            result.agent_facts.is_empty(),
+            "no assistant messages → no agent facts"
+        );
+        assert!(
+            result.derived_facts.is_empty(),
+            "no assistant messages → no derived facts"
         );
     }
 }

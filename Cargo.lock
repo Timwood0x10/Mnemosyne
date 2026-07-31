@@ -12,6 +12,7 @@ dependencies = [
  "chrono",
  "clap",
  "fastembed",
+ "flate2",
  "instant-distance",
  "petgraph",
  "rayon",

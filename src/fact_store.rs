@@ -233,6 +233,44 @@ impl SqliteFactStore {
         self.resolve_entity(tenant_id, Some(user_id), &name, "user")
     }
 
+    /// Resolve or create a tenant-scoped **Agent** entity, distinct from every
+    /// User entity.
+    ///
+    /// Agent facts (tool calls, completed actions) are attributed to the Agent
+    /// entity so they never pollute the User's cognition channel
+    /// (external-knowledge-plan §C2, "agent 不替用户表态"). The `external_key`
+    /// is namespaced `agent:<agent_id>` so it cannot collide with user keys
+    /// (which are bare `<user_id>`).
+    ///
+    /// Empty ids map to `default` for backward compatibility. The returned id
+    /// is stable for the same tenant/agent pair and isolated from every other
+    /// pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when identity resolution fails.
+    pub fn resolve_agent(&self, tenant_id: &str, agent_id: &str) -> Result<i64> {
+        let tenant_id = if tenant_id.trim().is_empty() {
+            "default"
+        } else {
+            tenant_id.trim()
+        };
+        let agent_id = if agent_id.trim().is_empty() {
+            "default"
+        } else {
+            agent_id.trim()
+        };
+        let name = if agent_id == "default" {
+            "Agent".to_string()
+        } else {
+            format!("Agent:{agent_id}")
+        };
+        // Namespace the external key so agent identity never collides with a
+        // user identity that happens to share the same bare id.
+        let external_key = format!("agent:{agent_id}");
+        self.resolve_entity(tenant_id, Some(&external_key), &name, "agent")
+    }
+
     /// Resolve an existing tenant-scoped entity.
     ///
     /// # Errors
@@ -549,6 +587,65 @@ mod tests {
         assert_ne!(
             tenant_a_user, tenant_a_other,
             "Different users in one tenant must not collide"
+        );
+    }
+
+    /// Objective: Verify agent identities are stable, tenant-isolated, and NEVER
+    /// collide with a user identity that shares the same bare id — the core
+    /// zero-pollution boundary for the agent fact channel.
+    /// Invariants: resolve_agent is stable across calls; agent id != user id
+    /// for the same bare id; tenant isolation holds; default agent resolves.
+    #[test]
+    fn agent_identity_is_distinct_from_user_identity() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let agent_default = store
+            .resolve_agent("default", "")
+            .expect("resolve default agent");
+        let agent_default_again = store
+            .resolve_agent("default", "default")
+            .expect("resolve default agent again");
+        assert_eq!(
+            agent_default, agent_default_again,
+            "repeated agent resolution must be stable"
+        );
+
+        // The same bare id "alice" MUST resolve to different entities when used
+        // as a user vs an agent — agents never pollute the user channel.
+        let user_alice = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve user alice");
+        let agent_alice = store
+            .resolve_agent("tenant-a", "alice")
+            .expect("resolve agent alice");
+        assert_ne!(
+            user_alice, agent_alice,
+            "agent entity must never collide with a user entity sharing the same bare id"
+        );
+
+        // Tenant isolation: the same agent id in two tenants resolves differently.
+        let agent_a = store
+            .resolve_agent("tenant-a", "bot")
+            .expect("resolve tenant-a bot");
+        let agent_b = store
+            .resolve_agent("tenant-b", "bot")
+            .expect("resolve tenant-b bot");
+        assert_ne!(
+            agent_a, agent_b,
+            "the same agent id in different tenants must not collide"
+        );
+
+        // The agent entity is typed "agent", not "user".
+        let conn = store.lock_conn().expect("lock");
+        let entity_type: String = conn
+            .query_row(
+                "SELECT entity_type FROM entities WHERE id = ?1",
+                params![agent_alice],
+                |row| row.get(0),
+            )
+            .expect("read agent entity type");
+        assert_eq!(
+            entity_type, "agent",
+            "agent entity must be typed 'agent' so it is distinguishable from users"
         );
     }
 

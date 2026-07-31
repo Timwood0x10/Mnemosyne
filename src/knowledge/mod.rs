@@ -19,11 +19,23 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod adapter;
+pub mod entity_linker;
+pub mod external;
+pub mod format;
 pub mod migration;
+pub mod pdf;
 pub mod store;
 
 pub use migration::{MigrationStats, Migrator};
 pub use store::{KnowledgeStore, SQLiteKnowledgeStore};
+
+// Re-export the external-knowledge registry so callers can reach it as
+// `knowledge::ExternalKnowledgeRegistry` without naming the leaf submodule.
+pub use external::ExternalKnowledgeRegistry;
+// Re-export the entity linker for cross-source name resolution
+// (external-knowledge-plan §D).
+pub use entity_linker::EntityLinker;
 
 // ───────────────────────────────────────────────────────────────────────────
 // Enumerations — drive the SQL CHECK / type columns.
@@ -265,6 +277,22 @@ pub struct InspectEntityResult {
     pub lifecycle: EntityLifecycle,
     /// Character arc over time (if available).
     pub character_arc: Option<String>,
+    /// External surface names that resolve to this entity via the
+    /// [`EntityLinker`] (external-knowledge-plan §D). Each entry is
+    /// `(source, external_name)`; empty when no external links are attached.
+    /// Skipped from serialization when empty for backward compatibility.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub external_aliases: Vec<ExternalAlias>,
+}
+
+/// One cross-source alias entry: an external source refers to the entity by
+/// `external_name` (external-knowledge-plan §D).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExternalAlias {
+    /// Source name (mirrors [`crate::knowledge::adapter::EntityLink::source`]).
+    pub source: String,
+    /// Surface name used by that source.
+    pub external_name: String,
 }
 
 /// A single profile key-value entry.
