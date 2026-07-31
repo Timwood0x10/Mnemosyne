@@ -23,6 +23,51 @@ use serde::Deserialize;
 
 // ── Lexeme types ────────────────────────────────────────────────────────────
 
+/// Lifecycle stage of a lexeme (ELITE_LEXICON_PLAN §10).
+///
+/// Promotion path: `Candidate → Experimental → Core`.
+/// Retirement path: `Core/Experimental → Deprecated → Disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LexemeStatus {
+    /// Proposed but not yet validated by regression tests.
+    #[default]
+    Candidate,
+    /// Passing module tests; awaiting fixed-corpus regression.
+    Experimental,
+    /// Passed fixed-corpus regression; ships in the default core.
+    Core,
+    /// Scheduled for removal; kept for at least one release.
+    Deprecated,
+    /// Excluded from matchers entirely.
+    Disabled,
+}
+
+impl LexemeStatus {
+    /// Whether the lexeme participates in matching.
+    pub fn is_active(self) -> bool {
+        !matches!(self, LexemeStatus::Disabled)
+    }
+
+    /// Advance one step along the promotion path.
+    pub fn promote(self) -> LexemeStatus {
+        match self {
+            LexemeStatus::Candidate => LexemeStatus::Experimental,
+            LexemeStatus::Experimental => LexemeStatus::Core,
+            other => other,
+        }
+    }
+
+    /// Advance one step along the retirement path.
+    pub fn demote(self) -> LexemeStatus {
+        match self {
+            LexemeStatus::Core | LexemeStatus::Experimental => LexemeStatus::Deprecated,
+            LexemeStatus::Deprecated => LexemeStatus::Disabled,
+            other => other,
+        }
+    }
+}
+
 /// A single entry in the Elite Lexicon.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Lexeme {
@@ -38,7 +83,8 @@ pub struct Lexeme {
     pub priority: u16,
     pub constraints: MatchConstraints,
     pub source: LexiconSource,
-    pub status: String,
+    #[serde(default)]
+    pub status: LexemeStatus,
 }
 
 /// What a lexeme produces when matched.
@@ -317,4 +363,78 @@ pub fn is_chinese_stop_name(word: &str) -> bool {
 /// Access the global dictionary for callers that need the full API.
 pub fn global() -> std::sync::RwLockReadGuard<'static, Dictionary> {
     DICT.read().unwrap()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Objective: Verify the lexeme promotion path follows the plan.
+    /// Invariants: Candidate → Experimental → Core; terminal states stay put.
+    #[test]
+    fn status_promotes_through_lifecycle() {
+        assert_eq!(
+            LexemeStatus::Candidate.promote(),
+            LexemeStatus::Experimental,
+            "Candidate promotes to Experimental"
+        );
+        assert_eq!(
+            LexemeStatus::Experimental.promote(),
+            LexemeStatus::Core,
+            "Experimental promotes to Core"
+        );
+        assert_eq!(
+            LexemeStatus::Core.promote(),
+            LexemeStatus::Core,
+            "Core is the terminal promotion stage"
+        );
+        assert_eq!(
+            LexemeStatus::Disabled.promote(),
+            LexemeStatus::Disabled,
+            "Disabled must not be re-promoted"
+        );
+    }
+
+    /// Objective: Verify the retirement path and active filtering.
+    /// Invariants: Core/Experimental → Deprecated → Disabled; only Disabled is inactive.
+    #[test]
+    fn status_demotes_and_filters_active() {
+        assert_eq!(
+            LexemeStatus::Core.demote(),
+            LexemeStatus::Deprecated,
+            "Core demotes to Deprecated"
+        );
+        assert_eq!(
+            LexemeStatus::Deprecated.demote(),
+            LexemeStatus::Disabled,
+            "Deprecated demotes to Disabled"
+        );
+        assert_eq!(
+            LexemeStatus::Disabled.demote(),
+            LexemeStatus::Disabled,
+            "Disabled is terminal"
+        );
+
+        assert!(LexemeStatus::Core.is_active(), "Core is active");
+        assert!(
+            LexemeStatus::Deprecated.is_active(),
+            "Deprecated stays active until disabled"
+        );
+        assert!(
+            !LexemeStatus::Disabled.is_active(),
+            "Disabled must be excluded from matchers"
+        );
+    }
+
+    /// Objective: Verify JSON round-trips status names.
+    /// Invariants: lowercase JSON names deserialize to the right variants.
+    #[test]
+    fn status_deserializes_from_lowercase() {
+        let parsed: LexemeStatus = serde_json::from_str("\"core\"").expect("core parses");
+        assert_eq!(parsed, LexemeStatus::Core);
+        let parsed: LexemeStatus = serde_json::from_str("\"experimental\"").expect("parses");
+        assert_eq!(parsed, LexemeStatus::Experimental);
+        let parsed: LexemeStatus = serde_json::from_str("\"disabled\"").expect("parses");
+        assert_eq!(parsed, LexemeStatus::Disabled);
+    }
 }

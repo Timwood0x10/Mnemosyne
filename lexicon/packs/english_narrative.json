@@ -1,0 +1,224 @@
+{
+  "lexemes": [
+    {
+      "id": "en.narrative.speech.murmured",
+      "language": "en", "lemma": "murmur", "forms": ["murmurs", "murmured", "murmuring"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.speech.whispered",
+      "language": "en", "lemma": "whisper", "forms": ["whispers", "whispered", "whispering"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.speech.exclaimed",
+      "language": "en", "lemma": "exclaim", "forms": ["exclaims", "exclaimed", "exclaiming"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.movement.strolled",
+      "language": "en", "lemma": "stroll", "forms": ["strolls", "strolled", "strolling"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.movement.hurried",
+      "language": "en", "lemma": "hurry", "forms": ["hurries", "hurried", "hurrying"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.movement.marched",
+      "language": "en", "lemma": "march", "forms": ["marches", "marched", "marching"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.emotion.trembled",
+      "language": "en", "lemma": "tremble", "forms": ["trembles", "trembled", "trembling"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.emotion.blushed",
+      "language": "en", "lemma": "blush", "forms": ["blushes", "blushed", "blushing"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.emotion.grieved",
+      "language": "en", "lemma": "grieve", "forms": ["grieves", "grieved", "grieving"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}, {"type": "fact", "value": "emotion"}],
+      "polarity": "negative", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.emotion.admired",
+      "language": "en", "lemma": "admire", "forms": ["admires", "admired", "admiring"],
+      "pos": "verb", "semantic_class": "emotion",
+      "effects": [{"type": "event", "value": "action"}, {"type": "fact", "value": "preference"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.state.dwelt",
+      "language": "en", "lemma": "dwell", "forms": ["dwells", "dwelt", "dwelling"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.state.resided",
+      "language": "en", "lemma": "reside", "forms": ["resides", "resided", "residing"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "location"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.attack.slaughtered",
+      "language": "en", "lemma": "slaughter", "forms": ["slaughters", "slaughtered", "slaughtering"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 850,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.attack.invaded",
+      "language": "en", "lemma": "invade", "forms": ["invades", "invaded", "invading"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.attack.ambushed",
+      "language": "en", "lemma": "ambush", "forms": ["ambushes", "ambushed", "ambushing"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.transfer.granted",
+      "language": "en", "lemma": "grant", "forms": ["grants", "granted", "granting"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.transfer.bestowed",
+      "language": "en", "lemma": "bestow", "forms": ["bestows", "bestowed", "bestowing"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.cognition.mused",
+      "language": "en", "lemma": "muse", "forms": ["muses", "mused", "musing"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.cognition.observed",
+      "language": "en", "lemma": "observe", "forms": ["observes", "observed", "observing"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.cognition.regarded",
+      "language": "en", "lemma": "regard", "forms": ["regards", "regarded", "regarding"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.creation.founded",
+      "language": "en", "lemma": "found", "forms": ["founds", "founded", "founding"],
+      "pos": "verb", "semantic_class": "creation",
+      "effects": [{"type": "event", "value": "action"}, {"type": "fact", "value": "identity"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    },
+    {
+      "id": "en.narrative.creation.composed",
+      "language": "en", "lemma": "compose", "forms": ["composes", "composed", "composing"],
+      "pos": "verb", "semantic_class": "creation",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "domain", "name": "english_narrative"},
+      "status": "core"
+    }
+  ]
+}

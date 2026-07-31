@@ -273,6 +273,68 @@ impl LexiconRegistry {
     pub fn metrics(&self) -> MetricsSnapshot {
         self.metrics.snapshot()
     }
+
+    // ── Version manifest (P6 governance) ───────────────────────────────
+
+    /// Build a structured per-version lexicon manifest (§15).
+    ///
+    /// Includes content hash, entry counts by language and status, and the
+    /// lists of deprecated/disabled entries — suitable for the per-release
+    /// inventory required by the plan.
+    pub fn manifest(&self) -> LexiconManifest {
+        let mut en_count = 0usize;
+        let mut zh_count = 0usize;
+        let mut deprecated: Vec<String> = Vec::new();
+        let mut disabled: Vec<String> = Vec::new();
+        for lex in &self.lexemes {
+            match lex.language.as_str() {
+                "en" => en_count += 1,
+                "zh" => zh_count += 1,
+                _ => {}
+            }
+            match lex.status {
+                crate::dictionary::LexemeStatus::Deprecated => {
+                    deprecated.push(lex.id.clone());
+                }
+                crate::dictionary::LexemeStatus::Disabled => {
+                    disabled.push(lex.id.clone());
+                }
+                _ => {}
+            }
+        }
+        deprecated.sort();
+        disabled.sort();
+
+        LexiconManifest {
+            content_hash: self.content_hash.clone(),
+            total_entries: self.lexemes.len(),
+            en_entries: en_count,
+            zh_entries: zh_count,
+            deprecated_entries: deprecated,
+            disabled_entries: disabled,
+        }
+    }
+
+    /// List lexeme IDs currently marked `Deprecated`.
+    pub fn deprecated_ids(&self) -> Vec<String> {
+        self.manifest().deprecated_entries
+    }
+
+    /// List lexeme IDs currently marked `Disabled` (excluded from matchers).
+    pub fn disabled_ids(&self) -> Vec<String> {
+        self.manifest().disabled_entries
+    }
+}
+
+/// Per-version lexicon inventory (§15 of ELITE_LEXICON_PLAN.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LexiconManifest {
+    pub content_hash: String,
+    pub total_entries: usize,
+    pub en_entries: usize,
+    pub zh_entries: usize,
+    pub deprecated_entries: Vec<String>,
+    pub disabled_entries: Vec<String>,
 }
 
 // ── Builder ─────────────────────────────────────────────────────────────────
@@ -746,7 +808,7 @@ mod tests {
                 source: crate::dictionary::LexiconSource {
                     kind: "builtin".into(), name: "test".into(),
                 },
-                status: "core".into(),
+                status: crate::dictionary::LexemeStatus::Core,
             },
             Lexeme {
                 id: "en.test.second".into(),
@@ -765,7 +827,7 @@ mod tests {
                 source: crate::dictionary::LexiconSource {
                     kind: "builtin".into(), name: "test".into(),
                 },
-                status: "core".into(),
+                status: crate::dictionary::LexemeStatus::Core,
             },
         ];
         let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
@@ -819,6 +881,130 @@ mod tests {
         assert!(
             registry.by_id("en.action.speech.said").is_some(),
             "Core lexeme must still be present after merge"
+        );
+    }
+
+    /// Objective: Verify the english_narrative domain pack merges on top of core.
+    /// Invariants: Narrative lexemes (e.g. murmured, invaded) are present;
+    /// core entries remain; no cross-layer duplicate-ID errors.
+    #[test]
+    fn english_narrative_pack_merges_with_core() {
+        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+        let pack_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("lexicon/packs/english_narrative.json");
+        let registry = RegistryBuilder::new()
+            .load_core(&core_path)
+            .expect("Core must load")
+            .load_domain(&pack_path)
+            .expect("english_narrative pack must load")
+            .build()
+            .expect("Registry build must succeed");
+
+        assert!(
+            registry.by_id("en.narrative.speech.murmured").is_some(),
+            "Narrative lexeme murmured must be present"
+        );
+        assert!(
+            registry.by_id("en.narrative.attack.invaded").is_some(),
+            "Narrative lexeme invaded must be present"
+        );
+        assert!(
+            registry.by_id("en.action.speech.said").is_some(),
+            "Core lexeme said must still be present after merge"
+        );
+    }
+
+    /// Objective: Verify the manifest reports entry counts and status lists.
+    /// Invariants: Manifest has the same total as `lexemes()`; en/zh counts sum
+    /// to the total; with core+classical packs the counts are non-zero.
+    #[test]
+    fn manifest_reports_counts_and_statuses() {
+        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+        let pack_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("lexicon/packs/classical_chinese.json");
+        let registry = RegistryBuilder::new()
+            .load_core(&core_path)
+            .expect("Core must load")
+            .load_domain(&pack_path)
+            .expect("Pack must load")
+            .build()
+            .expect("Registry build must succeed");
+
+        let manifest = registry.manifest();
+        assert_eq!(
+            manifest.total_entries,
+            registry.lexemes().len(),
+            "Manifest total must match registry lexeme count"
+        );
+        assert_eq!(
+            manifest.en_entries + manifest.zh_entries,
+            manifest.total_entries,
+            "en+zh counts must sum to the total"
+        );
+        assert!(manifest.en_entries > 0, "English entries must exist");
+        assert!(manifest.zh_entries > 0, "Chinese entries must exist");
+        assert!(
+            !manifest.content_hash.is_empty(),
+            "Manifest must carry the content hash"
+        );
+    }
+
+    /// Objective: Verify deprecated/disabled ID reporting.
+    /// Invariants: A Disabled user lexeme appears in `disabled_ids()` but not
+    /// in matchers; a Core lexeme is not reported.
+    #[test]
+    fn manifest_lists_disabled_and_deprecated() {
+        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+        let mut disabled_lex = make_test_lexeme("en.test.to_disable", "tobedisabled");
+        disabled_lex.status = crate::dictionary::LexemeStatus::Disabled;
+        let registry = RegistryBuilder::new()
+            .load_core(&core_path)
+            .expect("Core must load")
+            .load_user(vec![disabled_lex])
+            .build()
+            .expect("Registry build must succeed");
+
+        assert!(
+            registry.disabled_ids().contains(&"en.test.to_disable".to_string()),
+            "Disabled lexeme must be reported by disabled_ids()"
+        );
+        assert!(
+            !registry.deprecated_ids().contains(&"en.test.to_disable".to_string()),
+            "Disabled lexeme must not be reported as deprecated"
+        );
+        assert!(
+            registry.by_id("en.action.speech.said").is_some(),
+            "Core lexeme must remain present"
+        );
+    }
+
+    /// Objective: Verify the classical_chinese domain pack merges on top of core.
+    /// Invariants: Classical lexemes (e.g. 伐, 弑) are present; core entries
+    /// remain; duplicate-ID validation does not trip across layers.
+    #[test]
+    fn classical_chinese_pack_merges_with_core() {
+        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+        let pack_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("lexicon/packs/classical_chinese.json");
+        let registry = RegistryBuilder::new()
+            .load_core(&core_path)
+            .expect("Core must load")
+            .load_domain(&pack_path)
+            .expect("classical_chinese pack must load")
+            .build()
+            .expect("Registry build must succeed");
+
+        assert!(
+            registry.by_id("zh.classical.attack.fa").is_some(),
+            "Classical lexeme 伐 must be present"
+        );
+        assert!(
+            registry.by_id("zh.classical.attack.shishi").is_some(),
+            "Classical lexeme 弑 must be present"
+        );
+        assert!(
+            registry.by_id("zh.action.attack.sha").is_some(),
+            "Core lexeme 杀 must still be present after merge"
         );
     }
 
@@ -937,7 +1123,7 @@ mod tests {
             source: crate::dictionary::LexiconSource {
                 kind: "builtin".into(), name: "test".into(),
             },
-            status: "core".into(),
+            status: crate::dictionary::LexemeStatus::Core,
         }
     }
 }

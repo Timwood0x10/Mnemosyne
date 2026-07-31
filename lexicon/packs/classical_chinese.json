@@ -1,0 +1,284 @@
+{
+  "lexemes": [
+    {
+      "id": "zh.classical.speech.yun",
+      "language": "zh", "lemma": "云", "forms": [],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.speech.yu",
+      "language": "zh", "lemma": "谕", "forms": ["谕示"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.speech.bing",
+      "language": "zh", "lemma": "禀", "forms": ["禀告", "禀报"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.speech.chen",
+      "language": "zh", "lemma": "陈", "forms": ["陈述", "陈情"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 600,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.speech.jian",
+      "language": "zh", "lemma": "谏", "forms": ["进谏"],
+      "pos": "verb", "semantic_class": "speech",
+      "effects": [{"type": "event", "value": "dialogue"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.fa",
+      "language": "zh", "lemma": "伐", "forms": ["征伐"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.zheng",
+      "language": "zh", "lemma": "征", "forms": ["出征"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.tao",
+      "language": "zh", "lemma": "讨", "forms": ["声讨"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.mie",
+      "language": "zh", "lemma": "灭", "forms": ["灭族"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.shishi",
+      "language": "zh", "lemma": "弑", "forms": ["弑君"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 900,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.tu",
+      "language": "zh", "lemma": "屠", "forms": ["屠杀", "屠戮"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 850,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.attack.wei",
+      "language": "zh", "lemma": "围", "forms": ["围困", "围攻"],
+      "pos": "verb", "semantic_class": "attack",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.beng",
+      "language": "zh", "lemma": "崩", "forms": ["驾崩"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.hong",
+      "language": "zh", "lemma": "薨", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 800,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.zu",
+      "language": "zh", "lemma": "卒", "forms": [],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.wang",
+      "language": "zh", "lemma": "亡", "forms": ["阵亡"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.fei",
+      "language": "zh", "lemma": "废", "forms": ["废黜", "废除"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "hostile"}],
+      "polarity": "negative", "priority": 750,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.transfer.xian",
+      "language": "zh", "lemma": "献", "forms": ["献上", "献出"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.transfer.feng",
+      "language": "zh", "lemma": "奉", "forms": ["奉上", "奉献"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.transfer.pin",
+      "language": "zh", "lemma": "聘", "forms": ["聘娶"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "relation", "value": "friendly"}],
+      "polarity": "positive", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.transfer.na",
+      "language": "zh", "lemma": "纳", "forms": ["纳降", "纳贡"],
+      "pos": "verb", "semantic_class": "transfer",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.cognition.shi",
+      "language": "zh", "lemma": "识", "forms": ["认识", "识破"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "fact", "value": "knowledge"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.cognition.cha",
+      "language": "zh", "lemma": "察", "forms": ["观察", "察知"],
+      "pos": "verb", "semantic_class": "cognition",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.movement.dun",
+      "language": "zh", "lemma": "遁", "forms": ["遁走", "逃遁"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.movement.fu",
+      "language": "zh", "lemma": "赴", "forms": ["赴任", "奔赴"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.movement.yi",
+      "language": "zh", "lemma": "诣", "forms": ["诣见"],
+      "pos": "verb", "semantic_class": "movement",
+      "effects": [{"type": "event", "value": "movement"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.chijie",
+      "language": "zh", "lemma": "持", "forms": ["持有", "持剑"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}],
+      "polarity": "neutral", "priority": 650,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    },
+    {
+      "id": "zh.classical.state.ju",
+      "language": "zh", "lemma": "据", "forms": ["占据", "据守"],
+      "pos": "verb", "semantic_class": "state",
+      "effects": [{"type": "event", "value": "action"}, {"type": "modifier", "value": "possession"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": true, "requires_participant": true},
+      "source": {"kind": "domain", "name": "classical_chinese"},
+      "status": "core"
+    }
+  ]
+}

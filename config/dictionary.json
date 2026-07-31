@@ -967,6 +967,188 @@
       "constraints": {"allow_single": true, "requires_participant": true},
       "source": {"kind": "builtin", "name": "corpus frequency"},
       "status": "core"
+    },
+
+    {
+      "id": "en.function.negation.not",
+      "language": "en", "lemma": "not", "forms": ["n't"],
+      "pos": "particle", "semantic_class": "negation",
+      "effects": [{"type": "modifier", "value": "negation"}],
+      "polarity": "negative", "priority": 950,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.negation.never",
+      "language": "en", "lemma": "never", "forms": [],
+      "pos": "adverb", "semantic_class": "negation",
+      "effects": [{"type": "modifier", "value": "negation"}],
+      "polarity": "negative", "priority": 900,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.negation.no",
+      "language": "en", "lemma": "no", "forms": [],
+      "pos": "particle", "semantic_class": "negation",
+      "effects": [{"type": "modifier", "value": "negation"}],
+      "polarity": "negative", "priority": 850,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.uncertainty.may",
+      "language": "en", "lemma": "may", "forms": ["might", "maybe"],
+      "pos": "modal", "semantic_class": "uncertainty",
+      "effects": [{"type": "modifier", "value": "uncertainty"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.uncertainty.probably",
+      "language": "en", "lemma": "probably", "forms": [],
+      "pos": "adverb", "semantic_class": "uncertainty",
+      "effects": [{"type": "modifier", "value": "uncertainty"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.uncertainty.perhaps",
+      "language": "en", "lemma": "perhaps", "forms": [],
+      "pos": "adverb", "semantic_class": "uncertainty",
+      "effects": [{"type": "modifier", "value": "uncertainty"}],
+      "polarity": "neutral", "priority": 750,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.time.was",
+      "language": "en", "lemma": "was", "forms": ["were", "is", "are", "be", "been"],
+      "pos": "verb", "semantic_class": "time",
+      "effects": [{"type": "modifier", "value": "time"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.time.will",
+      "language": "en", "lemma": "will", "forms": ["would", "shall", "should"],
+      "pos": "modal", "semantic_class": "time",
+      "effects": [{"type": "modifier", "value": "time"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "en.function.attribution.reportedly",
+      "language": "en", "lemma": "reportedly", "forms": ["allegedly"],
+      "pos": "adverb", "semantic_class": "attribution",
+      "effects": [{"type": "modifier", "value": "attribution"}],
+      "polarity": "neutral", "priority": 750,
+      "constraints": {"word_boundary": true, "allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+
+    {
+      "id": "zh.function.negation.bu",
+      "language": "zh", "lemma": "不", "forms": [],
+      "pos": "particle", "semantic_class": "negation",
+      "effects": [{"type": "modifier", "value": "negation"}],
+      "polarity": "negative", "priority": 950,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.negation.mei",
+      "language": "zh", "lemma": "没", "forms": ["没有"],
+      "pos": "particle", "semantic_class": "negation",
+      "effects": [{"type": "modifier", "value": "negation"}],
+      "polarity": "negative", "priority": 900,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.negation.wei",
+      "language": "zh", "lemma": "未", "forms": [],
+      "pos": "particle", "semantic_class": "negation",
+      "effects": [{"type": "modifier", "value": "negation"}],
+      "polarity": "negative", "priority": 850,
+      "constraints": {"allow_single": true},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.uncertainty.keneng",
+      "language": "zh", "lemma": "可能", "forms": [],
+      "pos": "adverb", "semantic_class": "uncertainty",
+      "effects": [{"type": "modifier", "value": "uncertainty"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.uncertainty.yexu",
+      "language": "zh", "lemma": "也许", "forms": ["或许", "大概"],
+      "pos": "adverb", "semantic_class": "uncertainty",
+      "effects": [{"type": "modifier", "value": "uncertainty"}],
+      "polarity": "neutral", "priority": 800,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.uncertainty.jushuo",
+      "language": "zh", "lemma": "据说", "forms": [],
+      "pos": "adverb", "semantic_class": "attribution",
+      "effects": [{"type": "modifier", "value": "attribution"}],
+      "polarity": "neutral", "priority": 750,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.time.cengjing",
+      "language": "zh", "lemma": "曾经", "forms": ["曾"],
+      "pos": "adverb", "semantic_class": "time",
+      "effects": [{"type": "modifier", "value": "time"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.time.yijing",
+      "language": "zh", "lemma": "已经", "forms": ["已"],
+      "pos": "adverb", "semantic_class": "time",
+      "effects": [{"type": "modifier", "value": "time"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
+    },
+    {
+      "id": "zh.function.time.zhengzai",
+      "language": "zh", "lemma": "正在", "forms": ["在"],
+      "pos": "adverb", "semantic_class": "time",
+      "effects": [{"type": "modifier", "value": "time"}],
+      "polarity": "neutral", "priority": 700,
+      "constraints": {"allow_single": false},
+      "source": {"kind": "builtin", "name": "corpus frequency"},
+      "status": "core"
     }
   ],
 

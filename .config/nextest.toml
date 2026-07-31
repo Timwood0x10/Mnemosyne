@@ -19,3 +19,13 @@ test-group = 'serial-db'
 [[profile.default.overrides]]
 filter = 'test(=fix_caoren_relation)'
 test-group = 'serial-db'
+
+# daiyu_raw / daiyu_query read the same shared DB and would race with the
+# rebuilders above (file deleted mid-open → disk I/O error).
+[[profile.default.overrides]]
+filter = 'test(=daiyu_raw)'
+test-group = 'serial-db'
+
+[[profile.default.overrides]]
+filter = 'test(=daiyu_query)'
+test-group = 'serial-db'

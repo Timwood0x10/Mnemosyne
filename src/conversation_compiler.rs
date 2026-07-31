@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use crate::classifier::MemoryClassifier;
 use crate::cognition::{Fact, FactType, Mention, Observation, Rule};
@@ -9,6 +10,14 @@ use crate::scorer::ImportanceScorer;
 use crate::types::{
     CompiledConversation, Decision, Memory, MemoryType, Message, ReasoningStep, SessionState,
 };
+
+/// Single-pass matcher over all functional lexemes (negation, uncertainty, …).
+///
+/// Built once per process from the lexicon registry (P3: never rebuild inside
+/// the per-message loop). The Aho-Corasick automaton scans each message in one
+/// pass instead of O(V) `contains` checks per class.
+static FUNCTIONAL_MATCHER: LazyLock<crate::lexicon::LexiconMatcher> =
+    LazyLock::new(crate::lexicon::LexiconMatcher::from_global_registry);
 
 static MODULE_NAMES: &[&str] = &[
     "compiler",
@@ -297,22 +306,50 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
         .filter(|message| message.is_user())
         .flat_map(|message| {
             let subject = subject.clone();
+            // Detect negation/uncertainty in a single pass over the message
+            // using the pre-built functional-word matcher (P3). Functional
+            // words live in `config/dictionary.json` (ELITE_LEXICON_PLAN §5.3).
+            let mut negated = false;
+            let mut uncertain = false;
+            for m in FUNCTIONAL_MATCHER.find_iter(&message.content) {
+                match m.semantic_class.as_str() {
+                    "negation" => negated = true,
+                    "uncertainty" => uncertain = true,
+                    _ => {}
+                }
+            }
+
             actions.iter().filter_map(move |(marker, action)| {
-                message.content.find(marker).map(|offset| Observation {
-                    subject: subject.clone(),
-                    action: (*action).to_string(),
-                    object: None,
-                    modifiers: vec![crate::cognition::Modifier {
+                message.content.find(marker).map(|offset| {
+                    let mut modifiers = vec![crate::cognition::Modifier {
                         key: "content".to_string(),
                         value: message.content.clone(),
-                    }],
-                    timestamp: None,
-                    evidence: Some(crate::cognition::EvidenceRef {
-                        doc_id: 0,
-                        offset,
-                        length: marker.len(),
-                        text: message.content.clone(),
-                    }),
+                    }];
+                    if negated {
+                        modifiers.push(crate::cognition::Modifier {
+                            key: "negated".to_string(),
+                            value: "true".to_string(),
+                        });
+                    }
+                    if uncertain {
+                        modifiers.push(crate::cognition::Modifier {
+                            key: "uncertain".to_string(),
+                            value: "true".to_string(),
+                        });
+                    }
+                    Observation {
+                        subject: subject.clone(),
+                        action: (*action).to_string(),
+                        object: None,
+                        modifiers,
+                        timestamp: None,
+                        evidence: Some(crate::cognition::EvidenceRef {
+                            doc_id: 0,
+                            offset,
+                            length: marker.len(),
+                            text: message.content.clone(),
+                        }),
+                    }
                 })
             })
         })
@@ -324,6 +361,10 @@ pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> 
     let rule = DefaultRule;
     observations
         .iter()
+        // Skip observations whose source message was negated
+        // (ELITE_LEXICON_PLAN §13.3: "I do not plan to X" must not produce an
+        // affirmative Goal). Uncertain statements are kept but tagged.
+        .filter(|observation| !has_modifier(observation, "negated"))
         .flat_map(|observation| {
             let mut facts = rule.apply(observation);
             for fact in &mut facts {
@@ -335,6 +376,9 @@ pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> 
                     .find(|modifier| modifier.key == "content")
                 {
                     fact.payload["content"] = serde_json::Value::String(content.value.clone());
+                }
+                if has_modifier(observation, "uncertain") {
+                    fact.payload["uncertain"] = serde_json::Value::Bool(true);
                 }
                 // Propagate observation evidence into the fact payload so
                 // provenance (source message offset, length, text) is not lost.
@@ -350,6 +394,14 @@ pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> 
             facts
         })
         .collect()
+}
+
+/// Return `true` if the observation carries the given modifier key.
+fn has_modifier(observation: &Observation, key: &str) -> bool {
+    observation
+        .modifiers
+        .iter()
+        .any(|modifier| modifier.key == key && modifier.value == "true")
 }
 
 /// Compile user messages through the Observation IR into immutable facts.

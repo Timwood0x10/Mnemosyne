@@ -112,6 +112,12 @@ impl ToolHandler for MemoryCompileTool {
                 "observations_compiled": compiled.observations.len(),
                 "facts_compiled": compiled.facts.len(),
                 "facts_stored": stored_facts,
+                // Lexicon provenance: which lexicon version produced these facts
+                // (ELITE_LEXICON_PLAN §15 — hash in compile diagnostics).
+                "lexicon": {
+                    "content_hash": crate::lexicon::global().content_hash(),
+                    "lexemes": crate::lexicon::global().lexemes().len(),
+                },
             },
             "distilled_memories": memories,
         });
