@@ -26,6 +26,7 @@ use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
+use lore_scope::mcp::portrait_tool::{PortraitTool, portrait_extract_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
@@ -850,6 +851,12 @@ async fn build_server(
         fact_store_knowledge,
     )
     .await;
+
+    // portrait_extract — deterministic resume/person-document portrait via
+    // rules (no LLM). Stateless; no store dependency.
+    builder = builder
+        .tool(portrait_extract_definition(), Arc::new(PortraitTool::new()))
+        .await;
 
     Ok((builder.build(), distiller, engine))
 }

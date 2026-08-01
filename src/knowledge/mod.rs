@@ -25,6 +25,7 @@ pub mod external;
 pub mod format;
 pub mod migration;
 pub mod pdf;
+pub mod portrait;
 pub mod store;
 
 pub use migration::{MigrationStats, Migrator};

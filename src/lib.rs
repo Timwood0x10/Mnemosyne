@@ -62,5 +62,6 @@ pub mod retrieval;
 pub mod scorer;
 pub mod storage;
 pub mod store;
+pub mod temporal;
 pub mod types;
 pub mod vector;

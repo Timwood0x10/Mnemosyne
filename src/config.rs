@@ -132,6 +132,10 @@ pub enum RetrievalMode {
 pub const WEIGHT_SEMANTIC: f64 = 0.6;
 pub const WEIGHT_KEYWORD_HYBRID: f64 = 0.2;
 pub const WEIGHT_IMPORTANCE_HYBRID: f64 = 0.2;
+/// Temporal-relevance weight in hybrid fusion (mem0-style time-aware
+/// retrieval). Scaled by `temporal_score` in [0,1]; kept small so time is a
+/// decisive-but-bounded tiebreaker, never a dominant signal.
+pub const WEIGHT_TEMPORAL_HYBRID: f64 = 0.15;
 pub const WEIGHT_KEYWORD_ONLY: f64 = 0.7;
 pub const WEIGHT_IMPORTANCE_ONLY: f64 = 0.3;
 

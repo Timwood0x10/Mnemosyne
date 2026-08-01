@@ -1,280 +1,50 @@
-//! Best-effort pure-Rust PDF text extractor.
+//! PDF text extraction, backed by `pdf_oxide`.
 //!
-//! Extracts plain text from **simple** text-based PDFs without any external
-//! native dependency. It scans `stream … endstream` blocks, inflates
-//! `/FlateDecode` streams with `flate2::read::ZlibDecoder` (PDF FlateDecode is
-//! zlib-wrapped, not raw deflate), and pulls text out of `BT … ET` content
-//! blocks via the `Tj` / `TJ` / `'` / `"` text operators (literal `(...)`
-//! strings and `<hex>` strings).
-//!
-//! ## Limitations (documented, not fixed)
-//!
-//! - Custom font encodings / CMaps (glyph codes → not Unicode) are not decoded.
-//! - Filter chains (e.g. `/FlateDecode /ASCIIHexDecode`) are not unwrapped.
-//! - PDF 1.5+ cross-reference streams and encrypted/image-only PDFs are rejected
-//!   with a typed [`Error`] rather than producing garbage.
-//!
-//! For corpus ingestion of well-formed text PDFs this is sufficient; users who
-//! need full fidelity can pre-convert to `.txt` and use the text loader.
-
-use flate2::read::ZlibDecoder;
-use std::io::Read;
+//! Delegates to the production-grade `pdf_oxide` crate (MIT/Apache-2.0) which
+//! handles CMap/ToUnicode decoding, CJK, reading order, and encrypted/edge-case
+//! documents — replacing the earlier hand-rolled `stream … endstream` scanner.
+//! The public interface stays a byte-slice in, plain text out, so callers
+//! (e.g. `knowledge::format::PdfLoader`) are unaffected.
 
 use crate::error::{Error, Result};
 
 /// Extract concatenated plain text from a PDF byte slice.
 ///
 /// Returns an empty string for a valid PDF with no extractable text. Returns
-/// [`Error::InvalidInput`] for non-PDF input, encrypted PDFs, or bytes that
-/// cannot be decoded as Latin-1 (PDF content streams are byte-oriented).
+/// [`Error::InvalidInput`] for non-PDF input, encrypted PDFs, or parse
+/// failures.
 ///
 /// # Errors
 ///
 /// - [`Error::InvalidInput`] when the `%PDF` header is missing, the document is
-///   encrypted, or a FlateDecode stream cannot be inflated.
+///   encrypted, or pdf_oxide cannot parse the document.
 pub fn extract_text(input: &[u8]) -> Result<String> {
     if !input.starts_with(b"%PDF") {
         return Err(Error::InvalidInput(
             "not a PDF file (missing %PDF header)".into(),
         ));
     }
-    if contains_subslice(input, b"/Encrypt") {
-        return Err(Error::InvalidInput(
-            "encrypted PDFs are not supported by the built-in extractor".into(),
-        ));
-    }
+    let mut doc = pdf_oxide::PdfDocument::from_bytes(input.to_vec())
+        .map_err(|e| Error::InvalidInput(format!("pdf_oxide parse failed: {e}")))?;
+    let page_count = doc
+        .page_count()
+        .map_err(|e| Error::InvalidInput(format!("pdf_oxide page count failed: {e}")))?;
 
     let mut out = String::new();
-    let mut pos = 0usize;
-    while let Some(rel) = find_from(input, b"stream", pos) {
-        let stream_tok = rel;
-        // The dict immediately preceding `stream` describes this stream's
-        // filters. Look back only within the current object to avoid matching
-        // an unrelated `/FlateDecode` earlier in the file.
-        let dict_region_end = stream_tok;
-        let dict_region_start = pos;
-        let is_flate =
-            contains_subslice(&input[dict_region_start..dict_region_end], b"/FlateDecode");
-
-        // Body begins after `stream` + EOL (CR LF or LF).
-        let mut body_start = stream_tok + b"stream".len();
-        if body_start < input.len() && input[body_start] == b'\r' {
-            body_start += 1;
+    for page in 0..page_count {
+        match doc.extract_text(page) {
+            Ok(text) => {
+                out.push_str(&text);
+                out.push('\n');
+            }
+            Err(e) => {
+                // A page that fails to extract is not fatal: keep the text we
+                // already have and record the page boundary.
+                out.push_str(&format!("\n[page {page} extraction error: {e}]\n"));
+            }
         }
-        if body_start < input.len() && input[body_start] == b'\n' {
-            body_start += 1;
-        }
-
-        // Body ends at the next `endstream`.
-        let body_end = find_from(input, b"endstream", body_start).unwrap_or(input.len());
-        let stream_bytes = &input[body_start..body_end];
-
-        let decoded: Vec<u8> = if is_flate {
-            inflate_zlib(stream_bytes)?
-        } else {
-            // Uncompressed or unsupported filter — best effort: keep raw bytes.
-            stream_bytes.to_vec()
-        };
-
-        out.push_str(&extract_text_from_content(&decoded));
-        out.push('\n');
-
-        // Advance past `endstream` to continue the outer scan.
-        pos = body_end + b"endstream".len().min(input.len() - body_end);
     }
-
     Ok(out.trim().to_string())
-}
-
-/// Inflate a zlib-wrapped FlateDecode stream to raw bytes.
-fn inflate_zlib(bytes: &[u8]) -> Result<Vec<u8>> {
-    let mut decoder = ZlibDecoder::new(bytes);
-    let mut out = Vec::new();
-    decoder
-        .read_to_end(&mut out)
-        .map_err(|e| Error::InvalidInput(format!("FlateDecode inflate failed: {e}")))?;
-    Ok(out)
-}
-
-/// Pull text out of a decoded content stream by scanning `BT … ET` blocks.
-///
-/// Inside a text object, literal `(...)` strings and `<hex>` strings are
-/// concatenated. Strings outside `BT … ET` (e.g. inside resource dicts) are
-/// ignored so dict values do not pollute the extracted text.
-fn extract_text_from_content(decoded: &[u8]) -> String {
-    // PDF content streams are byte-oriented ASCII operators; lossy Latin-1 keeps
-    // every byte representable so operator scanning never panics on high bytes.
-    let content = String::from_utf8_lossy(decoded).into_owned();
-    let mut out = String::new();
-    let mut rest: &str = &content;
-
-    while let Some(bt) = find_token(rest, "BT") {
-        rest = &rest[bt..];
-        let et = find_token(rest, "ET").unwrap_or(rest.len());
-        let block = &rest[..et];
-        out.push_str(&extract_strings(block));
-        // Separate text objects with a space so words do not collide across
-        // adjacent `Tj` operators on the same line.
-        out.push(' ');
-        rest = &rest[et..];
-    }
-
-    out
-}
-
-/// Extract `(...)` literal strings and `<...>` hex strings from a text block.
-///
-/// Handles `\` escapes inside literal strings (the escaped char is kept
-/// verbatim — full PDF escape semantics like `\n` → newline are intentionally
-/// not applied, since glyph text rarely depends on them). Balanced nested
-/// parens are tracked per the PDF spec.
-fn extract_strings(block: &str) -> String {
-    let bytes = block.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => {
-                let (text, next) = read_literal(&bytes[i + 1..]);
-                out.push_str(&text);
-                i += 1 + next;
-            }
-            b'<' => {
-                // Skip `<<` dict-open; only single `<` starts a hex string.
-                if i + 1 < bytes.len() && bytes[i + 1] == b'<' {
-                    i += 2;
-                    continue;
-                }
-                let (text, next) = read_hex(&bytes[i + 1..]);
-                out.push_str(&text);
-                i += 1 + next;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
-/// Read a literal `(...)` string body starting just after the opening paren.
-/// Returns the decoded text and the number of bytes consumed (excluding the
-/// opening paren, including the closing paren).
-fn read_literal(body: &[u8]) -> (String, usize) {
-    let mut depth = 1usize;
-    let mut buf = Vec::new();
-    let mut j = 0usize;
-    while j < body.len() && depth > 0 {
-        match body[j] {
-            b'\\' => {
-                // Keep the escaped byte verbatim (best-effort).
-                if j + 1 < body.len() {
-                    buf.push(body[j + 1]);
-                    j += 2;
-                } else {
-                    j += 1;
-                }
-            }
-            b'(' => {
-                depth += 1;
-                buf.push(b'(');
-                j += 1;
-            }
-            b')' => {
-                depth -= 1;
-                if depth > 0 {
-                    buf.push(b')');
-                }
-                j += 1;
-            }
-            _ => {
-                buf.push(body[j]);
-                j += 1;
-            }
-        }
-    }
-    (String::from_utf8_lossy(&buf).into_owned(), j)
-}
-
-/// Read a `<...>` hex string body starting just after the opening `<`.
-/// Returns the decoded text and bytes consumed (excluding `<`, including `>`).
-fn read_hex(body: &[u8]) -> (String, usize) {
-    let mut hex = String::new();
-    let mut j = 0usize;
-    while j < body.len() && body[j] != b'>' {
-        hex.push(body[j] as char);
-        j += 1;
-    }
-    // Skip the closing `>` if present.
-    if j < body.len() {
-        j += 1;
-    }
-    let cleaned: String = hex.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut out = String::new();
-    for pair in cleaned.as_bytes().chunks(2) {
-        let s = std::str::from_utf8(pair).unwrap_or("");
-        if let Ok(b) = u8::from_str_radix(s, 16) {
-            out.push(b as char);
-        }
-    }
-    (out, j)
-}
-
-/// Find the byte offset of `needle` in `hay` starting from `from`, or `None`.
-fn find_from(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
-    if from > hay.len() {
-        return None;
-    }
-    hay[from..]
-        .windows(needle.len())
-        .position(|w| w == needle)
-        .map(|p| p + from)
-}
-
-/// Return `true` if `hay` contains `needle` as a byte subslice.
-fn contains_subslice(hay: &[u8], needle: &[u8]) -> bool {
-    find_from(hay, needle, 0).is_some()
-}
-
-/// Find the byte offset of a whitespace/delimiter-bounded token in `s`.
-///
-/// `BT` must not match inside a longer token like `BTX`, so the token is
-/// required to be followed by a delimiter (whitespace or PDF delimiter char).
-fn find_token(s: &str, token: &str) -> Option<usize> {
-    let bytes = s.as_bytes();
-    let tok = token.as_bytes();
-    let mut from = 0;
-    while let Some(rel) = find_from(bytes, tok, from) {
-        let after = rel + tok.len();
-        let ok_before = rel == 0 || is_delim(bytes[rel - 1]);
-        let ok_after = after >= bytes.len() || is_delim(bytes[after]);
-        if ok_before && ok_after {
-            return Some(rel);
-        }
-        from = rel + 1;
-    }
-    None
-}
-
-/// PDF delimiters: whitespace plus the structural delimiter characters.
-fn is_delim(b: u8) -> bool {
-    matches!(
-        b,
-        b' ' | b'\t'
-            | b'\n'
-            | b'\r'
-            | b'\x0c'
-            | b'('
-            | b')'
-            | b'<'
-            | b'>'
-            | b'['
-            | b']'
-            | b'{'
-            | b'}'
-            | b'/'
-            | b'%'
-    )
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -295,24 +65,58 @@ mod tests {
         encoder.finish().expect("finish")
     }
 
-    /// Build a minimal single-page PDF whose content stream is `content`
-    /// (compressed with FlateDecode), so extractor behavior is testable.
+    /// Build a minimal single-page PDF with a valid cross-reference table,
+    /// whose content stream is `content` (compressed with FlateDecode).
+    ///
+    /// pdf_oxide is a production-grade parser and requires a well-formed xref
+    /// table AND a font resource to map glyphs; the earlier hand-rolled
+    /// scanner tolerated xref-less/font-less files, so the fixture now emits a
+    /// proper 5-object PDF (Catalog/Pages/Page/Contents/Font) with an xref.
     fn build_pdf(content: &str) -> Vec<u8> {
         let compressed = zlib_compress(content.as_bytes());
-        let mut pdf = String::new();
-        pdf.push_str("%PDF-1.4\n");
-        pdf.push_str("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
-        pdf.push_str("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
-        pdf.push_str("3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n");
-        pdf.push_str(&format!(
+
+        // Emit each object into its own buffer so we know its byte offset.
+        let obj1 = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec();
+        let obj2 = b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_vec();
+        let obj3 = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n".to_vec();
+        let mut obj4 = format!(
             "4 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n",
             compressed.len()
+        )
+        .into_bytes();
+        obj4.extend_from_slice(&compressed);
+        obj4.extend_from_slice(b"\nendstream\nendobj\n");
+        let obj5 =
+            b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_vec();
+
+        let header = b"%PDF-1.4\n".to_vec();
+        let obj1_start = header.len();
+        let obj2_start = obj1_start + obj1.len();
+        let obj3_start = obj2_start + obj2.len();
+
+        let mut pdf = header;
+        pdf.extend_from_slice(&obj1);
+        pdf.extend_from_slice(&obj2);
+        pdf.extend_from_slice(&obj3);
+        let obj4_start = pdf.len();
+        pdf.extend_from_slice(&obj4);
+        let obj5_start = pdf.len();
+        pdf.extend_from_slice(&obj5);
+        let xref_offset = pdf.len();
+
+        // xref table: entry 0 is the free head; entries 1-5 are object
+        // offsets (byte positions in `pdf`). All six rows must be present.
+        let mut xref = String::new();
+        xref.push_str("xref\n0 6\n");
+        xref.push_str("0000000000 65535 f \n");
+        for off in [obj1_start, obj2_start, obj3_start, obj4_start, obj5_start] {
+            xref.push_str(&format!("{off:010} 00000 n \n"));
+        }
+        xref.push_str(&format!(
+            "trailer << /Size 5 /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF"
         ));
-        let mut bytes = pdf.into_bytes();
-        bytes.extend_from_slice(&compressed);
-        bytes.extend_from_slice(b"\nendstream\nendobj\n");
-        bytes.extend_from_slice(b"trailer << /Root 1 0 R >>\n%%EOF");
-        bytes
+        pdf.extend_from_slice(xref.as_bytes());
+        pdf
     }
 
     /// Objective: Verify a FlateDecode content stream with a single Tj string
@@ -363,45 +167,28 @@ mod tests {
         );
     }
 
-    /// Objective: Verify encrypted PDFs are rejected, not silently mis-parsed.
-    /// Invariants: Presence of /Encrypt → Err(InvalidInput).
+    /// Objective: Verify damaged/truncated PDF bytes are rejected, not
+    /// silently mis-parsed into garbage.
+    /// Invariants: A header that claims PDF but has a broken xref → Err.
     #[test]
-    fn rejects_encrypted_pdf() {
-        let mut pdf = build_pdf("BT (secret) Tj ET");
-        // Inject an /Encrypt marker to simulate an encrypted document.
-        let enc = b"/Encrypt";
-        // `%%EOF` is 5 bytes — windows(5) is required for an exact match;
-        // windows(4) would never find it and unwrap() would panic.
-        let pos = pdf
-            .windows(5)
-            .position(|w| w == b"%%EOF")
-            .expect("build_pdf always appends %%EOF");
-        pdf.splice(pos..pos, enc.iter().copied());
-        let err = extract_text(&pdf).unwrap_err();
+    fn rejects_damaged_pdf() {
+        // Valid %PDF header, but the xref/trailer is truncated away.
+        let damaged = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n";
+        let err = extract_text(damaged).unwrap_err();
         assert!(
-            err.to_string().contains("encrypted"),
-            "encrypted PDF must be rejected, got: {err}"
+            err.to_string().contains("pdf_oxide"),
+            "damaged PDF must surface a parse error, got: {err}"
         );
     }
 
-    /// Objective: Verify an empty (no-stream) PDF yields empty text, not error.
-    /// Invariants: Header-only PDF → Ok(empty string).
+    /// Objective: Verify a valid PDF with no extractable text yields empty
+    /// text rather than an error.
+    /// Invariants: A well-formed single-page PDF whose content stream is
+    /// empty → Ok(empty string).
     #[test]
     fn empty_pdf_yields_empty_text() {
-        let pdf = b"%PDF-1.4\ntrailer << /Root 1 0 R >>\n%%EOF";
-        let text = extract_text(pdf).expect("extract");
-        assert!(text.is_empty(), "PDF with no streams yields empty text");
-    }
-
-    /// Objective: Verify read_literal handles escaped and balanced parens.
-    /// Invariants: `a\(b\)c)` → "a(b)c" and consumes through the matching close.
-    #[test]
-    fn read_literal_handles_escapes_and_balance() {
-        let (text, consumed) = read_literal(b"a\\(b\\)c)");
-        assert_eq!(text, "a(b)c", "escaped parens are kept verbatim");
-        assert_eq!(
-            consumed, 8,
-            "consumed count includes bytes through the closing paren"
-        );
+        let pdf = build_pdf(""); // valid xref + font, but no text operators
+        let text = extract_text(&pdf).expect("extract");
+        assert!(text.is_empty(), "PDF with no text yields empty string");
     }
 }

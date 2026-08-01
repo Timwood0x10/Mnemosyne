@@ -76,6 +76,7 @@ instant-distance = "0.6"
 # This dependency is intentionally opt-in because ONNX and tokenizers dominate
 # clean-build time and binary size.
 fastembed = { version = "4", optional = true }
+pdf_oxide = "0.3.37"
 
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }

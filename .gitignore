@@ -12,3 +12,5 @@ docs/
 .fastembed_cache/
 
 **/*.pyc
+
+**/*.pdf

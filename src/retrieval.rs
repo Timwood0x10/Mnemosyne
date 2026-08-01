@@ -33,16 +33,18 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::Utc;
 use serde::Serialize;
 
 use crate::config::{
     RetrievalMode, WEIGHT_IMPORTANCE_HYBRID, WEIGHT_IMPORTANCE_ONLY, WEIGHT_KEYWORD_ONLY,
-    WEIGHT_SEMANTIC,
+    WEIGHT_SEMANTIC, WEIGHT_TEMPORAL_HYBRID,
 };
 use crate::embed::EmbeddingService;
 use crate::error::{Error, Result};
 use crate::knowledge::ExternalKnowledgeRegistry;
 use crate::store::ExperienceRepository;
+use crate::temporal::{TimeIntent, temporal_score};
 use crate::types::{Experience, MemoryType};
 
 /// A single retrieval result with its computed score.
@@ -63,6 +65,13 @@ pub struct RetrievalResult {
     /// not come from an external source keep this at 0.0.
     #[serde(default, skip_serializing_if = "is_zero_f64")]
     pub external_score: f64,
+    /// Temporal relevance in `[0,1]` (mem0-style time-aware ranking).
+    ///
+    /// 0.0 when the query has no temporal intent or the experience carries no
+    /// usable timestamp; otherwise reflects freshness (Current/Future) or age
+    /// preference (Past) per the query intent.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub temporal_score: f64,
     /// `true` when this result is a synthetic external hit (not a persisted
     /// experience). Consumers can filter these out when only local memories
     /// are admissible.
@@ -210,6 +219,7 @@ impl RetrievalEngine {
                 score,
                 keyword_score,
                 semantic_score: 0.0,
+                temporal_score: 0.0,
                 external_score: 0.0,
                 is_external: false,
             });
@@ -257,6 +267,7 @@ impl RetrievalEngine {
                 score,
                 keyword_score: 0.0,
                 semantic_score,
+                temporal_score: 0.0,
                 external_score: 0.0,
                 is_external: false,
             });
@@ -331,6 +342,24 @@ impl RetrievalEngine {
             .map(|(rank, (exp, _))| (exp.id.as_str(), rank))
             .collect();
 
+        // Temporal relevance (mem0-style time-aware retrieval): detect the
+        // query intent once and score every candidate by its timestamps.
+        // Unlike keyword/semantic (rank-based RRF), time is fused as a
+        // weighted additive term — rank-only fusion cancels out when keyword
+        // and temporal orders are reversed across exactly two candidates
+        // (1/(K+0)+1/(K+1) is symmetric), so a score-bounded additive term is
+        // the decisive-yet-bounded way to break ties. Current/Future queries
+        // prefer fresh, still-valid instances; Past queries prefer older ones.
+        let intent = TimeIntent::from_query(query);
+        let now = Utc::now();
+        let temporal_of: HashMap<&str, f64> = candidates
+            .iter()
+            .map(|exp| {
+                let t = temporal_score(intent, exp.created_at, exp.expires_at, now);
+                (exp.id.as_str(), t)
+            })
+            .collect();
+
         // RRF constant; 60 is the standard value used by Elasticsearch.
         const RRF_K: f64 = 60.0;
 
@@ -344,7 +373,11 @@ impl RetrievalEngine {
             let rrf = 1.0 / (RRF_K + i as f64) + 1.0 / (RRF_K + semantic_rank as f64);
             // Importance remains a small, scale-bounded tiebreaker.
             let importance = exp.confidence * WEIGHT_IMPORTANCE_HYBRID;
-            let score = rrf + importance;
+            // Temporal relevance is a second scale-bounded additive term,
+            // scaled by the query intent's per-instance score.
+            let temporal =
+                temporal_of.get(exp.id.as_str()).copied().unwrap_or(0.0) * WEIGHT_TEMPORAL_HYBRID;
+            let score = rrf + importance + temporal;
             if score <= 0.0 {
                 continue;
             }
@@ -353,6 +386,7 @@ impl RetrievalEngine {
                 score,
                 keyword_score: *kw,
                 semantic_score: semantic_map.get(&exp.id).copied().unwrap_or(0.0),
+                temporal_score: temporal_of.get(exp.id.as_str()).copied().unwrap_or(0.0),
                 external_score: 0.0,
                 is_external: false,
             });
@@ -390,6 +424,7 @@ impl RetrievalEngine {
                     score,
                     keyword_score: 0.0,
                     semantic_score: 0.0,
+                    temporal_score: 0.0,
                     external_score: external_rrf,
                     is_external: true,
                 });
@@ -917,6 +952,61 @@ mod tests {
         assert!(
             after.iter().any(|r| r.is_external),
             "after set_external_registry, external hits must appear"
+        );
+    }
+
+    /// Objective: Verify temporal fusion favors the fresh instance for a
+    /// Current-intent query and the old one for a Past-intent query.
+    /// Invariants: With identical content (equal keyword/semantic signals),
+    /// the fresh experience outranks the old one for "现在" queries, and the
+    /// ranking flips for "以前" queries — proving the temporal RRF term is the
+    /// deciding signal.
+    #[tokio::test]
+    async fn temporal_fusion_flips_ranking_by_intent() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder::new());
+        let engine = RetrievalEngine::new(embedder, store.clone(), RetrievalMode::Hybrid);
+
+        // Two experiences with identical text (same keyword/semantic score),
+        // differing only in timestamps.
+        let mut fresh = Experience::new("t1", MemoryType::Knowledge, "config cache policy", 0.5);
+        fresh.id = "fresh".into();
+        fresh.created_at = Utc::now() - chrono::Duration::days(1);
+        store.create(&fresh).await.expect("create fresh");
+
+        let mut old = Experience::new("t1", MemoryType::Knowledge, "config cache policy", 0.5);
+        old.id = "old".into();
+        old.created_at = Utc::now() - chrono::Duration::days(80);
+        store.create(&old).await.expect("create old");
+
+        // Current-intent query (no temporal marker → Current default):
+        // fresh must rank first.
+        let current = engine
+            .search("config cache policy", "t1", 5, None)
+            .await
+            .expect("search");
+        let current_first = current.first().expect("result").experience.id.clone();
+        assert_eq!(
+            current_first, "fresh",
+            "Current intent must rank the fresh instance first, got {current_first:?}"
+        );
+
+        // Past-intent query ("before" marker): old must rank first.
+        let past = engine
+            .search("before config cache policy", "t1", 5, None)
+            .await
+            .expect("search");
+        let past_first = past.first().expect("result").experience.id.clone();
+        assert_eq!(
+            past_first, "old",
+            "Past intent must rank the old instance first, got {past_first:?}"
+        );
+
+        // The temporal component must be populated and non-zero for hybrid
+        // results (proving the fourth RRF signal actually fired).
+        assert!(
+            current.iter().any(|r| r.temporal_score > 0.0),
+            "temporal_score must be populated for hybrid results"
         );
     }
 }
