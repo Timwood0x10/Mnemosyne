@@ -25,6 +25,7 @@ use lore_scope::fact_store::SqliteFactStore;
 use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
+use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use lore_scope::mcp::portrait_tool::{PortraitTool, portrait_extract_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
@@ -847,7 +848,7 @@ async fn build_server(
         builder,
         external_registry,
         entity_linker,
-        kstore,
+        kstore.clone(),
         fact_store_knowledge,
     )
     .await;
@@ -856,6 +857,16 @@ async fn build_server(
     // rules (no LLM). Stateless; no store dependency.
     builder = builder
         .tool(portrait_extract_definition(), Arc::new(PortraitTool::new()))
+        .await;
+
+    // person_key_events — distill a person's full trajectory into key events
+    // (importance score + turning flag + evidence anchors). Supplies evidence
+    // only; the AI consuming this tool performs the analysis.
+    builder = builder
+        .tool(
+            key_events_definition(),
+            Arc::new(KeyEventsTool::new(kstore)),
+        )
         .await;
 
     Ok((builder.build(), distiller, engine))

@@ -93,13 +93,16 @@ pub fn compile(
             continue;
         }
 
-        // Chapter tracking: parse the actual chapter number from "第X回" /
-        // "第X章" headings at the START of each iteration, so that events
-        // found in the heading sentence and in the body text that follows
-        // are both tagged with the correct chapter number. Doing this before
-        // the mention scan also ensures heading-only sentences (which may
-        // contain no entity mentions) still advance the chapter counter.
-        if let Some(ch_num) = parse_chapter_number(text) {
+        // Timeline tracking: in-book years (e.g. "In 1805") are the PRIMARY
+        // timeline for novels without chapter headings (English texts);
+        // "第X回/第X章" chapter numbers are the fallback (Chinese novels).
+        // Both carry forward: an event keeps the last seen timeline marker
+        // until the next one appears. Year detection runs first so it wins
+        // when both kinds of markers exist.
+        if let Some(year) = parse_in_book_year(text) {
+            current_chapter = year;
+            ctx.current_timestamp = Some(current_chapter);
+        } else if let Some(ch_num) = parse_chapter_number(text) {
             current_chapter = ch_num;
             ctx.current_timestamp = Some(current_chapter);
         }
@@ -212,6 +215,35 @@ fn parse_chapter_number(text: &str) -> Option<i32> {
 
     // Try Chinese numeral
     chinese_to_int(num_str)
+}
+
+/// Parse an in-book year marker (e.g. "In 1805", "1807,") as the PRIMARY
+/// timeline for novels without chapter headings (English texts like War and
+/// Peace). Returns `None` unless a 4-digit year in a plausible range
+/// (1700–2100) is found; the year must NOT be embedded in a longer number
+/// (e.g. a 5+ digit id) to avoid false positives.
+fn parse_in_book_year(text: &str) -> Option<i32> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            // A 4-digit run bounded by non-digits (or string edges).
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            let run = &text[start..i];
+            if run.len() == 4 {
+                let year: i32 = run.parse().ok()?;
+                if (1700..=2100).contains(&year) {
+                    return Some(year);
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Convert a Chinese numeral string (e.g. "一百二十") to an integer.
@@ -464,6 +496,50 @@ fn event_pairs(participants: &[EventParticipant]) -> Vec<(String, String)> {
 mod tests {
     use super::*;
     use crate::compiler::entity::EntityDictionary;
+
+    /// Objective: Verify in-book year markers are detected as the primary
+    /// timeline (War-and-Peace style English texts without chapter headings).
+    /// Invariants: "In 1805", "1807," and "…1812." yield the expected years;
+    /// a year embedded in a longer number (id) is NOT matched; out-of-range
+    /// 4-digit numbers and non-year text yield None.
+    #[test]
+    fn in_book_year_detection() {
+        assert_eq!(parse_in_book_year("In 1805 Prince was silent."), Some(1805));
+        assert_eq!(parse_in_book_year("1807,"), Some(1807));
+        assert_eq!(parse_in_book_year("the winter of 1812."), Some(1812));
+        assert_eq!(parse_in_book_year("sentence 1805 continues"), Some(1805));
+
+        // Embedded in a longer digit run → not a standalone year.
+        assert_eq!(
+            parse_in_book_year("id=18056"),
+            None,
+            "5-digit run is not a year"
+        );
+        assert_eq!(
+            parse_in_book_year("id=118057"),
+            None,
+            "embedded 5-digit run rejected"
+        );
+
+        // Out of the plausible historical range.
+        assert_eq!(parse_in_book_year("year 0999"), None, "999 out of range");
+        assert_eq!(parse_in_book_year("year 9999"), None, "9999 out of range");
+
+        // No digits at all.
+        assert_eq!(parse_in_book_year("no year here"), None);
+        assert_eq!(parse_in_book_year(""), None);
+    }
+
+    /// Objective: Verify chapter headings still parse (fallback timeline).
+    /// Invariants: Chinese "第X回/第X章" headings map to numbers; narrative
+    /// text with "第X回" mid-sentence is rejected (start-anchored rule).
+    #[test]
+    fn chapter_number_fallback_still_works() {
+        assert_eq!(parse_chapter_number("第三回 桃园结义"), Some(3));
+        assert_eq!(parse_chapter_number("第120章"), Some(120));
+        assert_eq!(parse_chapter_number("他说：第三回合该如此"), None);
+        assert_eq!(parse_chapter_number("plain text"), None);
+    }
 
     fn make_dict() -> EntityDictionary {
         let mut d = EntityDictionary::default();

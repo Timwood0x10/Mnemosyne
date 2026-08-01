@@ -23,6 +23,7 @@ pub mod adapter;
 pub mod entity_linker;
 pub mod external;
 pub mod format;
+pub mod key_events;
 pub mod migration;
 pub mod pdf;
 pub mod portrait;
