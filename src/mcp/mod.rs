@@ -17,6 +17,7 @@ pub mod knowledge_tools;
 pub mod memory_compile;
 pub mod portrait_tool;
 pub mod server;
+pub mod sse;
 pub mod transport;
 pub mod types;
 

@@ -8,3 +8,4 @@
 pub mod schema;
 
 pub use schema::KNOWLEDGE_SCHEMA;
+pub use schema::WORLD_SCHEMA;

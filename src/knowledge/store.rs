@@ -17,7 +17,7 @@ use rusqlite::{Connection, params};
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result, StorageError};
-use crate::storage::KNOWLEDGE_SCHEMA;
+use crate::storage::{KNOWLEDGE_SCHEMA, WORLD_SCHEMA};
 
 use super::{
     Chapter, CompilerRun, Document, EntityProfileEntry, Evidence, EvidenceHit, EvidenceSourceType,
@@ -264,6 +264,14 @@ impl SQLiteKnowledgeStore {
         )?;
         conn.execute_batch(KNOWLEDGE_SCHEMA)
             .map_err(|e| StorageError::Schema(format!("init knowledge schema: {e}")))?;
+        // WORLD_SCHEMA (V7 entity-centric tables: entities/aliases/profiles/
+        // events/…) was declared in `storage::schema` but never executed —
+        // the doc comment claimed `init` ran it, yet only KNOWLEDGE_SCHEMA
+        // did (CODE_REVIEW C10). Executing it here is idempotent
+        // (CREATE TABLE IF NOT EXISTS) and brings the V7 general model live
+        // as the destination for DocumentSource/domain-pack output.
+        conn.execute_batch(WORLD_SCHEMA)
+            .map_err(|e| StorageError::Schema(format!("init world schema: {e}")))?;
         Ok(())
     }
 
@@ -1051,6 +1059,30 @@ mod tests {
 
     async fn fresh() -> SQLiteKnowledgeStore {
         SQLiteKnowledgeStore::open_in_memory().await.expect("open")
+    }
+
+    /// Objective: Verify `WORLD_SCHEMA` (V7 entity-centric tables) is now
+    /// executed by `init` — the dead-code wiring fix for C10.
+    /// Invariants: after `open_in_memory`, the V7 tables `entities`,
+    /// `entity_aliases`, `entity_profiles`, and `events` exist (a fresh
+    /// connection that never executed WORLD_SCHEMA would fail this query).
+    #[tokio::test]
+    async fn world_schema_tables_are_created() {
+        let store = fresh().await;
+        let conn = store.conn.lock().await;
+        for table in ["entities", "entity_aliases", "entity_profiles", "events"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    rusqlite::params![table],
+                    |row| row.get(0),
+                )
+                .expect("query sqlite_master");
+            assert_eq!(
+                count, 1,
+                "WORLD_SCHEMA must create table `{table}` on init (C10 wiring)"
+            );
+        }
     }
 
     async fn seed_doc(store: &SQLiteKnowledgeStore, title: &str) -> i64 {
