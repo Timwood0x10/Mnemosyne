@@ -42,6 +42,13 @@ pub enum Error {
     /// A catch-all for errors that don't fit a specific category.
     #[error("internal error: {0}")]
     Internal(String),
+
+    /// A JSON-RPC request could not be parsed (JSON-RPC 2.0 §5.1, code
+    /// -32700). Carried as a typed variant (NEW-M8) so the server can reply
+    /// with the mandated `id: null` parse error without inspecting the
+    /// message text for a brittle `"parse:"` prefix.
+    #[error("json-rpc parse error: {0}")]
+    JsonRpcParse(String),
 }
 
 /// Errors from the embedding service.

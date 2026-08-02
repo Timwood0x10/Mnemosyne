@@ -755,6 +755,53 @@ mod tests {
         }
     }
 
+    /// Objective: Verify that `。` acts as a sentence boundary and is never
+    /// skipped when walking back to a name (NEW-H24 regression lock).
+    /// Invariants: "话说。刘备字玄德" must discover "刘备" — never the garbage
+    /// "说话刘备" that would result from crossing the `。` boundary.
+    #[test]
+    fn sentence_boundary_stops_name_walk() {
+        let mut ctx = CompileContext::default();
+        extract_profiles(
+            "话说。刘备字玄德，涿郡人也。",
+            &mut ctx,
+            Some(&make_dict()),
+            &[],
+            &crate::language::ChineseLanguageProvider::new(),
+        );
+        let names: Vec<&str> = ctx.entities.iter().map(|e| e.name.as_str()).collect();
+        assert!(
+            names.contains(&"刘备"),
+            "`。`-boundary walk must still find 刘备, got {names:?}"
+        );
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("说话") || n.contains("话说")),
+            "name walk must not cross the `。` sentence boundary, got {names:?}"
+        );
+    }
+
+    /// Objective: Verify `find_entity_in_text` is deterministic for same-length
+    /// aliases (NEW-H25 regression lock) — HashMap iteration order must not
+    /// leak into resolution.
+    /// Invariants: Repeated resolution of text containing two same-length
+    /// aliases yields the same entity every time.
+    #[test]
+    fn same_length_alias_resolution_is_deterministic() {
+        let dict = make_dict();
+        let mut results = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let hit = find_entity_in_text("关羽字云长", &dict);
+            results.insert(hit.map(|(name, _)| name));
+        }
+        assert_eq!(
+            results.len(),
+            1,
+            "same-length alias resolution must be stable across runs, got {results:?}"
+        );
+    }
+
     /// Objective: Verify the English frontend discovers titled personal names.
     /// Invariants: The entity retains title plus name and a title profile.
     #[test]

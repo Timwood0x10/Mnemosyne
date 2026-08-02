@@ -52,7 +52,12 @@ pub struct ToolCallResult {
     /// Content blocks to return to the client.
     pub content: Vec<ContentBlock>,
     /// If `true`, the tool call failed gracefully (the error is in `content`).
-    #[serde(default, skip_serializing_if = "is_false")]
+    ///
+    /// Serialized as `isError` to match the MCP wire contract and what the
+    /// handlers emit (NEW-M11). Previously the field name `is_error` leaked
+    /// into the JSON while handlers wrote `isError` — two spellings for one
+    /// flag.
+    #[serde(default, skip_serializing_if = "is_false", rename = "isError")]
     pub is_error: bool,
 }
 

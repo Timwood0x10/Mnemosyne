@@ -65,7 +65,7 @@ impl Transport for StdioTransport {
             return Ok(None);
         }
         let msg: JSONRPCMessage =
-            serde_json::from_str(trimmed).map_err(|e| Error::Internal(format!("parse: {e}")))?;
+            serde_json::from_str(trimmed).map_err(|e| Error::JsonRpcParse(e.to_string()))?;
         Ok(Some(msg))
     }
 

@@ -277,8 +277,6 @@ pub struct InspectEntityResult {
     pub mentions: Vec<Mention>,
     /// Lifecycle: birth chapter → peak chapters → death chapter.
     pub lifecycle: EntityLifecycle,
-    /// Character arc over time (if available).
-    pub character_arc: Option<String>,
     /// External surface names that resolve to this entity via the
     /// [`EntityLinker`] (external-knowledge-plan §D). Each entry is
     /// `(source, external_name)`; empty when no external links are attached.
@@ -321,7 +319,11 @@ pub struct EntityLifecycle {
 /// One row of the `timeline` tool (dev_guide §5).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TimelineEntry {
-    pub chapter: i32,
+    /// Narrative chapter when the edge has a timestamp, `None` otherwise.
+    /// Previously this defaulted to 0 — a sentinel that collided with real
+    /// chapter 0 and misled ordering (NEW-K12). NULL valid_from now stays
+    /// `None` instead of being masked as chapter 0.
+    pub chapter: Option<i32>,
     pub event: String,
     pub predicate: String,
     pub target: String,

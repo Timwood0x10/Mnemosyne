@@ -277,15 +277,17 @@ async fn real_corpus_zhaoyun_timeline_ordered() {
         .await
         .expect("timeline on real corpus");
     assert!(!tl.is_empty(), "赵云 should have a non-empty timeline");
-    // Verify ascending chapter order.
+    // Verify ascending chapter order. `chapter` is Option since edges with
+    // NULL valid_from stay None (NEW-K12); None sorts first, so unwrap_or(0)
+    // preserves the monotonic check.
     let mut prev = 0;
     for entry in &tl {
+        let ch = entry.chapter.unwrap_or(0);
         assert!(
-            entry.chapter >= prev,
-            "timeline must be sorted ascending; got {prev} then {}",
-            entry.chapter
+            ch >= prev,
+            "timeline must be sorted ascending; got {prev} then {ch}"
         );
-        prev = entry.chapter;
+        prev = ch;
     }
 }
 

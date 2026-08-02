@@ -1,26 +1,48 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-type FactionMap = HashMap<String, HashMap<String, Vec<String>>>;
+/// Faction map: novel → (faction name, member list).
+///
+/// The inner faction key is a leaked `&'static str`: the map is a
+/// process-lifetime config cache (`LazyLock`), so each faction name is
+/// leaked exactly ONCE at load time. This replaces the old per-lookup
+/// `unsafe transmute::<&str, &'static str>` (NEW-I2), which was fragile —
+/// any future refactor that shortened the borrow could turn it into UB.
+/// `Box::leak` is safe and makes the `'static` guarantee structural.
+type FactionMap = HashMap<String, HashMap<&'static str, Vec<String>>>;
 
 fn load_faction_map() -> FactionMap {
     let path =
         std::env::var("FACTION_MAP_PATH").unwrap_or_else(|_| "config/faction_map.json".to_string());
-    std::fs::read_to_string(&path)
+    // Parse with owned keys first, then leak the faction names once.
+    let parsed: HashMap<String, HashMap<String, Vec<String>>> = std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    parsed
+        .into_iter()
+        .map(|(novel, factions)| {
+            let factions = factions
+                .into_iter()
+                .map(|(faction, members)| {
+                    // Box::leak returns &'static mut str; reborrow as the
+                    // immutable &'static str the map stores.
+                    let faction: &'static str = Box::leak(faction.into_boxed_str());
+                    (faction, members)
+                })
+                .collect();
+            (novel, factions)
+        })
+        .collect()
 }
 
 static FACTION_MAP: LazyLock<FactionMap> = LazyLock::new(load_faction_map);
 
-fn faction_from_json<'a>(novel: &str, character: &str) -> Option<&'a str> {
-    // Safety: we leak the string to get a &'static str. The memory is
-    // allocated once and never freed, which is fine for a config map
-    // that lives for the process lifetime.
+fn faction_from_json(novel: &str, character: &str) -> Option<&'static str> {
     for (faction, members) in FACTION_MAP.get(novel)? {
         if members.iter().any(|m| m == character) {
-            return Some(unsafe { std::mem::transmute::<&str, &'static str>(faction.as_str()) });
+            // Safe: faction names were leaked to 'static at load time.
+            return Some(*faction);
         }
     }
     None

@@ -58,9 +58,11 @@ async fn caocao_growth_trajectory() {
     println!("  共 {} 个时间点\n", entries.len());
     let mut prev_chapter = 0i32;
     for e in &entries {
-        if e.chapter != prev_chapter {
-            println!("  ▸ 第 {} 回:", e.chapter);
-            prev_chapter = e.chapter;
+        // chapter is Option (None when the edge has no valid_from, NEW-K12).
+        let ch = e.chapter.unwrap_or(0);
+        if ch != prev_chapter {
+            println!("  ▸ 第 {} 回:", ch);
+            prev_chapter = ch;
         }
         println!("      {}  [{}]", e.event, e.predicate);
     }

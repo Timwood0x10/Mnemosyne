@@ -173,7 +173,11 @@ impl MCPServer {
             let msg = match transport.recv().await {
                 Ok(Some(m)) => m,
                 Ok(None) => return Ok(()),
-                Err(Error::Internal(msg)) if msg.starts_with("parse:") => {
+                // Typed parse-error variant (NEW-M8): the old
+                // `Error::Internal(msg) if msg.starts_with("parse:")` relied
+                // on the transport's error text staying prefixed with
+                // "parse:" — brittle across refactors.
+                Err(Error::JsonRpcParse(msg)) => {
                     let resp = JSONRPCMessage::Response(JSONRPCResponse {
                         jsonrpc: "2.0".to_string(),
                         id: Value::Null,

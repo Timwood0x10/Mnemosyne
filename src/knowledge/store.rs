@@ -162,7 +162,10 @@ pub trait KnowledgeStore: Send + Sync {
     async fn get_edges_touching(&self, object_id: i64) -> Result<Vec<KnowledgeEdge>>;
     /// Re-target an edge to point at `new_target_id`. Used by the
     /// `correct_relation` MCP tool to fix misattributed relations in place.
-    async fn update_edge_target(&self, edge_id: i64, new_target_id: i64) -> Result<()>;
+    /// Returns the number of rows actually updated (0 when the edge id is
+    /// unknown) so callers can report an accurate `changed` count instead of
+    /// overstating (NEW-M1).
+    async fn update_edge_target(&self, edge_id: i64, new_target_id: i64) -> Result<usize>;
 
     // ── evidence + links ──────────────────────────────────────
     async fn create_evidence(&self, e: &Evidence) -> Result<i64>;
@@ -488,13 +491,13 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         Ok(out)
     }
 
-    async fn update_edge_target(&self, edge_id: i64, new_target_id: i64) -> Result<()> {
+    async fn update_edge_target(&self, edge_id: i64, new_target_id: i64) -> Result<usize> {
         let conn = self.conn.lock().await;
-        conn.execute(
+        let n = conn.execute(
             "UPDATE knowledge_edges SET target_id = ?1 WHERE id = ?2",
             params![new_target_id, edge_id],
         )?;
-        Ok(())
+        Ok(n)
     }
 
     async fn create_evidence(&self, e: &Evidence) -> Result<i64> {
@@ -746,7 +749,6 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 death_chapter,
                 event_count,
             },
-            character_arc: None,
             // The store layer is link-unaware; the MCP `inspect_entity` tool
             // populates this field from the attached EntityLinker so the
             // cross-source aliases ride on the same response payload
@@ -804,7 +806,9 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 format!("{} → {}", e.predicate, target)
             };
             entries.push(TimelineEntry {
-                chapter: e.valid_from.unwrap_or(0),
+                // Keep NULL valid_from as None (NEW-K12) — the old
+                // `unwrap_or(0)` masked unknown chapters as a fake "chapter 0".
+                chapter: e.valid_from,
                 event: event_label,
                 predicate: e.predicate.clone(),
                 target,
@@ -1369,9 +1373,9 @@ mod tests {
             .await
             .expect("timeline");
         assert_eq!(tl.len(), 2);
-        assert_eq!(tl[0].chapter, 1, "serves@ch1 must come first");
+        assert_eq!(tl[0].chapter, Some(1), "serves@ch1 must come first");
         assert_eq!(tl[0].predicate, "serves");
-        assert_eq!(tl[1].chapter, 3);
+        assert_eq!(tl[1].chapter, Some(3));
         assert_eq!(tl[1].predicate, "kills");
         assert_eq!(tl[0].target, "丁原");
     }

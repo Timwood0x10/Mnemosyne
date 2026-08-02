@@ -244,15 +244,27 @@ impl ToolHandler for CorrectRelationHandler {
         // predicate. The previous implementation resolved `old_target` but
         // never used it to filter, so ALL edges with the matching predicate
         // were reported as "changed" — even ones pointing at other entities.
-        let src = match self.store.find_object_by_name(&source, None).await? {
+        // The `doc` param is passed through to entity resolution (NEW-K2): a
+        // correction scoped to one document must not re-target a same-named
+        // entity from another document. `find_document_by_title` is the
+        // public trait API (the private `resolve_doc_id` helper is not
+        // visible from the handler module).
+        let doc_id = match doc {
+            Some(title) => match self.store.find_document_by_title(title).await? {
+                Some(d) => Some(d.id),
+                None => None,
+            },
+            None => None,
+        };
+        let src = match self.store.find_object_by_name(&source, doc_id).await? {
             Some(s) => s,
             None => return Ok(err_result(format!("source `{source}` not found"))),
         };
-        let target_entity = match self.store.find_object_by_name(&old_target, None).await? {
+        let target_entity = match self.store.find_object_by_name(&old_target, doc_id).await? {
             Some(t) => t,
             None => return Ok(err_result(format!("old_target `{old_target}` not found"))),
         };
-        let new_entity = match self.store.find_object_by_name(&new_target, None).await? {
+        let new_entity = match self.store.find_object_by_name(&new_target, doc_id).await? {
             Some(n) => n,
             None => return Ok(err_result(format!("new_target `{new_target}` not found"))),
         };
@@ -280,8 +292,9 @@ impl ToolHandler for CorrectRelationHandler {
         // reporting success to the client.
         let mut changed = 0usize;
         for e in &matched {
-            self.store.update_edge_target(e.id, new_entity.id).await?;
-            changed += 1;
+            // Use the actual affected-row count from the store (NEW-M1): an
+            // unknown edge id returns 0 rows and must not inflate `changed`.
+            changed += self.store.update_edge_target(e.id, new_entity.id).await?;
         }
 
         let details = serde_json::json!({
@@ -392,7 +405,7 @@ pub async fn register_knowledge_tools(
         .tool(
             ToolDefinition {
                 name: "correct_relation".into(),
-                description: "Correct a misattributed relation in the knowledge graph. Finds edges matching (source_name, predicate, old_target) and reports the correction needed.".into(),
+                description: "Correct a misattributed relation in the knowledge graph. Finds edges matching (source_name, predicate, old_target) and APPLIES the correction in place, re-targeting each matching edge to new_target and reporting how many were changed.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {

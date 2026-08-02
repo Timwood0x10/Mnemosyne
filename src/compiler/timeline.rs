@@ -468,4 +468,53 @@ mod tests {
         assert_eq!(ally.unwrap().valid_from, Some(5));
         assert_eq!(ally.unwrap().valid_to, None);
     }
+
+    /// Objective: Verify that an unchanged relation type does NOT clobber its
+    /// valid_from timestamp (NEW-H22 regression lock).
+    /// Invariants: Two associated events at ts=3 and ts=9 (same type) keep
+    /// valid_from=3 on the ongoing relation; no closed duplicate is emitted.
+    #[test]
+    fn unchanged_type_keeps_valid_from() {
+        let events = vec![
+            mk_event(3, "吕布服丁原", "吕布", "丁原"),
+            mk_event(9, "吕布从丁原", "吕布", "丁原"),
+        ];
+        let rels = build_timeline(&events, &[], &TimelineConfig::default());
+        let ongoing = rels
+            .iter()
+            .filter(|r| r.relation_type == "associated" && r.valid_to.is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ongoing.len(),
+            1,
+            "exactly one ongoing relation expected, got {ongoing:?}"
+        );
+        assert_eq!(
+            ongoing[0].valid_from,
+            Some(3),
+            "valid_from must stay at first occurrence, got {:?}",
+            ongoing[0].valid_from
+        );
+        // No closed relation for the same pair should exist (type unchanged).
+        let closed = rels
+            .iter()
+            .filter(|r| r.relation_type == "associated" && r.valid_to.is_some())
+            .count();
+        assert_eq!(closed, 0, "no closed relation when type never changed");
+    }
+
+    /// Objective: Verify that reverse-direction duplicates are deduplicated
+    /// (NEW-H23 regression lock).
+    /// Invariants: A single two-participant event produces ONE relation row,
+    /// not both (A,B) and (B,A).
+    #[test]
+    fn reverse_direction_deduplicated() {
+        let events = vec![mk_event(5, "吕布服丁原", "吕布", "丁原")];
+        let rels = build_timeline(&events, &[], &TimelineConfig::default());
+        assert_eq!(
+            rels.len(),
+            1,
+            "one event with two participants must yield exactly one relation, got {rels:?}"
+        );
+    }
 }

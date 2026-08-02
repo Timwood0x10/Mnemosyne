@@ -260,4 +260,60 @@ mod tests {
             assert_eq!(idx[&key], sid, "index maps to position");
         }
     }
+
+    /// Objective: Verify overlapping chunks do not duplicate sentences
+    /// (NEW-C21 regression lock).
+    /// Invariants: Two chunks sharing a sentence in their overlap region
+    /// yield ONE sentence in split_all — never two with the same byte range.
+    #[test]
+    fn split_all_dedups_overlapping_chunks() {
+        // Chunk 0 covers [0..10), chunk 1 covers [8..20): the sentence at
+        // [8..10) appears in both.
+        let chunks = vec![
+            make_chunk(0, "关羽斩华雄。", 0),
+            make_chunk(1, "华雄。张飞喝断桥。", 8),
+        ];
+        let sents = split_all(&chunks);
+        let ranges: Vec<(usize, usize)> = sents
+            .iter()
+            .map(|s| (s.start_offset, s.end_offset))
+            .collect();
+        let mut unique = ranges.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            ranges.len(),
+            unique.len(),
+            "no duplicate (start_offset, end_offset) may exist, got {ranges:?}"
+        );
+        assert!(
+            sents.iter().any(|s| s.text.contains("张飞")),
+            "non-overlap sentence must still be present"
+        );
+    }
+
+    /// Objective: Verify sentence offsets point at the TRIMMED text boundaries
+    /// (NEW-H26 regression lock) — the document slice must equal the text.
+    /// Invariants: For each sentence, a hypothetical
+    /// `document[start_offset..end_offset]` slice equals `sentence.text`.
+    #[test]
+    fn sentence_offsets_match_trimmed_text() {
+        // Leading space before the first sentence and trailing whitespace
+        // after the separator would break the slice equivalence if offsets
+        // pointed at the untrimmed boundaries.
+        let chunk = make_chunk(0, " 关羽斩华雄。  张飞喝断桥。", 100);
+        let sents = split_chunk(&chunk);
+        assert!(!sents.is_empty(), "two sentences expected");
+        for s in &sents {
+            let document = &chunk.text;
+            let local_start = s.start_offset - chunk.start_offset;
+            let local_end = s.end_offset - chunk.start_offset;
+            let slice = &document[local_start..local_end];
+            assert_eq!(
+                slice, s.text,
+                "document slice must equal sentence text (trimmed offsets), got {slice:?} vs {:?}",
+                s.text
+            );
+        }
+    }
 }

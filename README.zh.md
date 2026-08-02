@@ -167,7 +167,7 @@ Apache-2.0
 
 | 工具 | 功能 | 必须参数 |
 |------|------|----------|
-| `memory_distill` | 8 阶段蒸馏：提取→分类→评分→过滤→压缩→嵌入→冲突解决→持久化 | `conversation_id`, `messages[]` |
+| `lore_scope` | 8 阶段蒸馏：提取→分类→评分→过滤→压缩→嵌入→冲突解决→持久化 | `conversation_id`, `messages[]` |
 | `memory_compile` | 编译会话状态：goal、module、files、problems、reasoning_chain。可选蒸馏。 | `messages[]` |
 | `memory_search` | 关键词 / 向量 / 混合检索 | `query` |
 | `memory_store` | 手动写入记忆 | `content` |

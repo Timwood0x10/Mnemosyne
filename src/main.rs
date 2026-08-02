@@ -87,7 +87,14 @@ impl ToolHandler for MemorySearchTool {
             .get("tenant_id")
             .and_then(Value::as_str)
             .unwrap_or("default");
-        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(5) as usize;
+        // Clamp the requested limit (NEW-M3): an unbounded value (e.g.
+        // 1,000,000) would make the engine materialize the entire memory
+        // table in one response. 200 mirrors the evidence tool's cap.
+        let limit = args
+            .get("limit")
+            .and_then(Value::as_u64)
+            .unwrap_or(5)
+            .min(200) as usize;
         let memory_type_filter = args
             .get("memory_type")
             .and_then(Value::as_str)
@@ -281,10 +288,14 @@ impl ToolHandler for CharacterSearchTool {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("novels");
         let novel = args.get("novel").and_then(serde_json::Value::as_str);
+        // Default 10 to match the schema, and clamp to a sane upper bound
+        // (NEW-M4): the handler previously defaulted to 50 while the schema
+        // documented 10, and accepted unbounded limits.
         let limit = args
             .get("limit")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(50) as usize;
+            .unwrap_or(10)
+            .min(200) as usize;
         let include_events = args
             .get("include_events")
             .and_then(serde_json::Value::as_bool)

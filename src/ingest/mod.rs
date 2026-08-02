@@ -25,6 +25,29 @@ use crate::error::Result;
 use crate::faction;
 use crate::types::Metadata;
 
+/// Max CHARACTERS scanned after a name mention for death detection (NEW-I3).
+///
+/// The old code scanned 100 raw BYTES (~33 CJK chars) after the name — enough
+/// to spill into the next sentence and match ANOTHER character's death
+/// ("刘备闻关羽死" wrongly marked 刘备 as dead). A 40-char window stays within
+/// the death sentence while bounding the false-positive range.
+const DEATH_WINDOW_CHARS: usize = 40;
+
+/// Byte offset `max_chars` characters after `start`, clamped to the next
+/// char boundary. Measured in characters, not raw bytes, so the death
+/// window does not silently cover different byte widths for CJK vs ASCII.
+fn char_window_end(text: &str, start: usize, max_chars: usize) -> usize {
+    let start = extract::floor_char_boundary(text, start);
+    let mut end = start;
+    for (count, (i, c)) in text[start..].char_indices().enumerate() {
+        if count >= max_chars {
+            break;
+        }
+        end = start + i + c.len_utf8();
+    }
+    end
+}
+
 /// Overall ingestion statistics.
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct IngestionStats {
@@ -198,7 +221,6 @@ impl IngestionPipeline {
         }
 
         // Scan chapters
-        let t0 = std::time::Instant::now();
         for ch in &chapters {
             self.process_chapter(
                 ch,
@@ -208,16 +230,12 @@ impl IngestionPipeline {
                 &name_pairs,
             )?;
         }
-        let scan_ms = t0.elapsed().as_millis();
 
         // Insert into DB
-        let t1 = std::time::Instant::now();
         let mut stats = IngestionStats::default();
         stats += self
             .insert_characters(novel_name, tenant_id, now_ts, &char_info)
             .await?;
-        let insert_ms = t1.elapsed().as_millis();
-        eprintln!("[{novel_name}] scan={scan_ms}ms insert={insert_ms}ms");
         Ok(stats)
     }
 
@@ -350,19 +368,25 @@ impl IngestionPipeline {
                 }
             }
 
-            // Death detection
-            for (_st, en, _al) in positions {
-                for dkw in extract::DEATH_KW {
-                    // Floor to char boundary to avoid panicking on multi-byte text
-                    let context_end =
-                        extract::floor_char_boundary(text, std::cmp::min(text.len(), *en + 100));
-                    if text[*en..context_end].contains(dkw) {
-                        if info._last_death_check.is_none_or(|last| ch.num > last) {
-                            info.death_chapter = Some(ch.num);
-                            info.death_desc = extract::extract_action_sentence(text, name)
-                                .map(|s| s.chars().take(200).collect());
-                            info._last_death_check = Some(ch.num);
-                        }
+            // Death detection (NEW-I3): FIRST occurrence wins + a tighter,
+            // character-based window.
+            //
+            // Old behavior had two defects: (1) a 100-raw-byte window after
+            // the name could spill into the NEXT sentence and match another
+            // character's death ("刘备闻关羽死" wrongly marked 刘备 as dead);
+            // (2) a later chapter could overwrite an earlier death chapter
+            // (last-chapter-wins). Now the window is 40 CHARS (stays within
+            // the death sentence) and the first detected death is locked in.
+            if info.death_chapter.is_none() {
+                for (_st, en, _al) in positions {
+                    let context_end = char_window_end(text, *en, DEATH_WINDOW_CHARS);
+                    if extract::DEATH_KW
+                        .iter()
+                        .any(|dkw| text[*en..context_end].contains(dkw))
+                    {
+                        info.death_chapter = Some(ch.num);
+                        info.death_desc = extract::extract_action_sentence(text, name)
+                            .map(|s| s.chars().take(200).collect());
                         break;
                     }
                 }
