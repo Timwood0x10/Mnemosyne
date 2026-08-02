@@ -19,6 +19,7 @@ pub mod document;
 pub mod extract;
 pub mod faction;
 pub mod inference;
+pub mod name_validation;
 pub mod pipeline;
 pub mod profile;
 pub mod pronoun;

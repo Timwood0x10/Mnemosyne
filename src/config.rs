@@ -136,6 +136,24 @@ pub const WEIGHT_IMPORTANCE_HYBRID: f64 = 0.2;
 /// retrieval). Scaled by `temporal_score` in [0,1]; kept small so time is a
 /// decisive-but-bounded tiebreaker, never a dominant signal.
 pub const WEIGHT_TEMPORAL_HYBRID: f64 = 0.15;
+/// Exponential temporal-decay rate λ (per second) for
+/// `score = e^(−λ·Δt)`. Default ≈ 0.01/day ≈ 1.157e-7/s, so a 90-day-old
+/// memory scores e^−0.9 ≈ 0.41. Repeated occurrence refreshes the memory
+/// timestamp, resetting the decay (long-term preferences stay fresh).
+pub const TEMPORAL_DECAY_LAMBDA_PER_SEC: f64 = 1.157e-7;
+/// Default context-usage threshold (percent) that triggers distillation +
+/// memory injection in `memory_context_check`. Configurable per call via the
+/// `threshold` argument; this is the fallback when none is supplied.
+pub const CONTEXT_INJECT_THRESHOLD: f64 = 40.0;
+/// Grayscale gate for the pure-embedding memory features (plan
+/// `embedding-memory-plan.md`, P0–P3).
+///
+/// **Default OFF**: the embedding-memory modules (`anchor`, `centroid`) exist
+/// as independent additions, but the main-line behaviors they would change
+/// (exponential temporal decay in retrieval, `inject_memories` in
+/// `memory_context_check`) stay at their legacy values until this flag is
+/// flipped. Set to `true` only after the grayscale modules pass full tests.
+pub const EMBEDDING_MEMORY_GRAYSCALE: bool = false;
 pub const WEIGHT_KEYWORD_ONLY: f64 = 0.7;
 pub const WEIGHT_IMPORTANCE_ONLY: f64 = 0.3;
 

@@ -104,6 +104,10 @@ pub fn extract_profiles(
         let dictionary_entity = dict
             .and_then(|dictionary| find_entity_in_text(line, dictionary))
             .map(|(name, _)| name);
+        // Entity-name validation happens INSIDE discover_entity_name's Chinese
+        // branch (English title names like "Mr. Bennet" bypass it); dictionary
+        // hits are trusted and skip it — 三国/水浒 with a known lexicon keep
+        // their entities.
         let discovered_entity = dictionary_entity
             .is_none()
             .then(|| discover_entity_name(line, lang.discovery_markers()))
@@ -400,6 +404,7 @@ fn discover_entity_name(line: &str, markers: &[&str]) -> Option<String> {
                 && !result.contains("却有")
                 && !result.contains("篆文")
                 && !result.contains("锦绣")
+                && is_valid_person_name(&result)
             {
                 return Some(result);
             }
@@ -407,6 +412,11 @@ fn discover_entity_name(line: &str, markers: &[&str]) -> Option<String> {
     }
     None
 }
+
+/// Validate that a heuristically discovered entity name looks like a real
+/// person name (P-constraint). Tables live in `config/name_validation.json`
+/// (user-extensible) — see [`crate::compiler::name_validation`].
+use crate::compiler::name_validation::is_valid_person_name;
 
 /// Discover an English personal name beginning with a configured title.
 fn discover_english_title_name(line: &str, markers: &[&str]) -> Option<String> {
@@ -566,6 +576,92 @@ mod tests {
         d.alias_to_canonical.insert("云长".into(), "关羽".into());
         d.alias_to_canonical.insert("张飞".into(), "张飞".into());
         d
+    }
+
+    /// Objective: Verify the person-name validator accepts real names and
+    /// rejects the garbage the heuristic produced on 大秦帝国.
+    /// Invariants: common names + compound surnames pass; function-word/noun
+    /// tails / non-surname heads / bad shapes are rejected.
+    #[test]
+    fn person_name_validation_gates() {
+        // C1: shape.
+        assert!(!is_valid_person_name("嬴"), "single char is not a name");
+        assert!(!is_valid_person_name("嬴渠梁一"), "5 chars rejected");
+        assert!(!is_valid_person_name("abc"), "non-CJK rejected");
+
+        // C2: surname-led (incl. compound).
+        assert!(is_valid_person_name("嬴渠梁"), "嬴 is a surname");
+        assert!(is_valid_person_name("商鞅"), "商 is a surname");
+        assert!(is_valid_person_name("吕不韦"), "吕 is a surname");
+        assert!(is_valid_person_name("公孙鞅"), "compound surname 公孙");
+        assert!(is_valid_person_name("司马错"), "compound surname 司马");
+        assert!(!is_valid_person_name("涓的秘"), "涓 is not a surname");
+
+        // C3: function words anywhere.
+        assert!(!is_valid_person_name("涓的秘密"), "ends with 的");
+        assert!(!is_valid_person_name("的感觉却"), "ends with 却");
+        assert!(
+            !is_valid_person_name("一金令"),
+            "starts with function word 一"
+        );
+
+        // C4: noun tails.
+        assert!(!is_valid_person_name("牛角"), "ends with noun 角");
+        assert!(!is_valid_person_name("白绢衣裤"), "ends with noun 裤");
+        assert!(!is_valid_person_name("一金令箭"), "ends with noun 箭");
+        assert!(!is_valid_person_name("文明时代"), "ends with noun 代");
+
+        // Sanity: real person with a noun-looking char in the MIDDLE still
+        // passes (only the TAIL is gated by C4). `王金城` would be rejected
+        // because 城 is a noun tail — that is the intended C4 behavior.
+        assert!(
+            is_valid_person_name("李金诚"),
+            "name containing 金 mid-name is fine"
+        );
+    }
+
+    /// Objective: Verify the heuristic garbage from the 大秦帝国 baseline is
+    /// now filtered by the constraint inside `extract_profiles`.
+    /// Invariants: a line that used to yield `涓的秘密`-style entities now
+    /// yields none, while real introduction lines still extract.
+    #[test]
+    fn validation_filters_baseline_garbage() {
+        let lang = crate::language::ChineseLanguageProvider::new();
+        let mut ctx = CompileContext {
+            document_title: "test".into(),
+            ..Default::default()
+        };
+        // Garbage-prone line: marker 也 preceded by a non-name fragment.
+        profile_lines_garbage(&mut ctx, &lang);
+        assert!(
+            ctx.entities.iter().all(|e| is_valid_person_name(&e.name)),
+            "all extracted entities must pass the name validator"
+        );
+    }
+
+    /// Feed lines that previously produced garbage entities and assert no
+    /// invalid entity survives.
+    fn profile_lines_garbage(
+        ctx: &mut CompileContext,
+        lang: &crate::language::ChineseLanguageProvider,
+    ) {
+        // These are the kind of fragments the baseline mis-discovered.
+        for line in [
+            "涓的秘密者也。",
+            "一金令箭者也。",
+            "白绢衣裤者也。",
+            "牛角者也。",
+        ] {
+            extract_profiles(line, ctx, None, &[], lang);
+        }
+        assert!(
+            ctx.entities.is_empty(),
+            "garbage fragments must yield no entities, got {:?}",
+            ctx.entities
+                .iter()
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// Objective: Verify that "字玄德" after "刘备" extracts courtesy_name.

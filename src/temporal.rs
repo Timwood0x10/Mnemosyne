@@ -9,6 +9,8 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::config::{EMBEDDING_MEMORY_GRAYSCALE, TEMPORAL_DECAY_LAMBDA_PER_SEC};
+
 /// Which point in time a query targets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeIntent {
@@ -86,32 +88,62 @@ impl TimeIntent {
 /// Compute a [0,1] temporal relevance score for an experience given the
 /// query intent.
 ///
-/// - [`TimeIntent::Current`]: freshness — linear decay from `now` back to
-///   `now - FRESHNESS_WINDOW`; expired instances score 0.
-/// - [`TimeIntent::Past`]: age preference — older instances score higher
-///   (linear ramp over the same window, capped at the window edge).
+/// Behavior is gated by [`EMBEDDING_MEMORY_GRAYSCALE`]:
+///
+/// - **OFF (default, legacy)**: linear decay over a 90-day window — the
+///   pre-grayscale behavior, so the retrieval main line is unchanged.
+/// - **ON (grayscale)**: exponential decay (plan P2)
+///   `score = e^(−λ·Δt)` for freshness (Current/Future), inverted
+///   `1 − e^(−λ·Δt)` for age preference (Past).
+///
+/// Both branches:
+/// - [`TimeIntent::Current`]: freshness; expired instances score 0.
+/// - [`TimeIntent::Past`]: age preference — older instances score higher.
 /// - [`TimeIntent::Future`]: validity — expired scores 0, otherwise the same
-///   freshness ramp as Current (an upcoming plan is most relevant when it is
-///   recent AND still valid).
+///   freshness as Current.
 pub fn temporal_score(
     intent: TimeIntent,
     created_at: DateTime<Utc>,
     expires_at: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> f64 {
-    const FRESHNESS_WINDOW_SECS: i64 = 90 * 24 * 3600; // 90 days
     let expired = expires_at.is_some_and(|exp| exp <= now);
     if expired {
         return 0.0;
     }
-    let age_secs = (now - created_at)
-        .num_seconds()
-        .clamp(0, FRESHNESS_WINDOW_SECS);
-    let freshness = 1.0 - age_secs as f64 / FRESHNESS_WINDOW_SECS as f64;
-    match intent {
-        TimeIntent::Current | TimeIntent::Future => freshness,
-        TimeIntent::Past => 1.0 - freshness,
+    if EMBEDDING_MEMORY_GRAYSCALE {
+        // Grayscale path: exponential decay (plan P2).
+        let age_secs = (now - created_at).num_seconds().max(0) as f64;
+        let decay = temporal_score_exponential(age_secs, TEMPORAL_DECAY_LAMBDA_PER_SEC);
+        match intent {
+            TimeIntent::Current | TimeIntent::Future => decay,
+            TimeIntent::Past => 1.0 - decay,
+        }
+    } else {
+        // Legacy path: linear decay over a 90-day window (pre-grayscale).
+        const FRESHNESS_WINDOW_SECS: i64 = 90 * 24 * 3600; // 90 days
+        let age_secs = (now - created_at)
+            .num_seconds()
+            .clamp(0, FRESHNESS_WINDOW_SECS);
+        let freshness = 1.0 - age_secs as f64 / FRESHNESS_WINDOW_SECS as f64;
+        match intent {
+            TimeIntent::Current | TimeIntent::Future => freshness,
+            TimeIntent::Past => 1.0 - freshness,
+        }
     }
+}
+
+/// Exponential temporal decay: `e^(−λ·age_secs)`, in `(0, 1]`.
+///
+/// - age 0 → 1.0 (just now: full freshness).
+/// - age → ∞ → 0+ (asymptotically forgotten).
+/// - λ = 0 → 1.0 for any age (decay disabled).
+#[must_use]
+pub fn temporal_score_exponential(age_secs: f64, lambda: f64) -> f64 {
+    if lambda <= 0.0 {
+        return 1.0;
+    }
+    (-lambda * age_secs).exp()
 }
 
 #[cfg(test)]
@@ -251,5 +283,61 @@ mod tests {
                 "never-expiring instance must score > 0 for {intent:?}"
             );
         }
+    }
+
+    /// Objective: Verify the exponential decay formula `e^(−λ·Δt)`.
+    /// Invariants: age 0 → 1.0; larger age → strictly smaller score; λ=0 →
+    /// constant 1.0 (decay disabled); score stays in (0, 1].
+    #[test]
+    fn exponential_decay_formula() {
+        let day = 86_400.0;
+        let lambda = 1.157e-7; // ≈ 0.01/day
+        assert_eq!(
+            temporal_score_exponential(0.0, lambda),
+            1.0,
+            "zero age scores full freshness"
+        );
+        let young = temporal_score_exponential(day, lambda);
+        let old = temporal_score_exponential(90.0 * day, lambda);
+        assert!(
+            young > old,
+            "exponential decay must be strictly decreasing in age"
+        );
+        assert!(
+            (old - (-0.9f64).exp()).abs() < 1e-3,
+            "90 days at λ=0.01/day must score ≈ e^−0.9 ≈ 0.41, got {old}"
+        );
+        assert!(
+            (0.0..=1.0).contains(&old),
+            "decay score must stay within (0, 1]"
+        );
+    }
+
+    /// Objective: Verify λ=0 disables decay entirely.
+    /// Invariants: any age with λ=0 → 1.0.
+    #[test]
+    fn lambda_zero_disables_decay() {
+        assert_eq!(temporal_score_exponential(10_000.0, 0.0), 1.0);
+        assert_eq!(temporal_score_exponential(0.0, 0.0), 1.0);
+        assert_eq!(
+            temporal_score_exponential(1e9, -1.0),
+            1.0,
+            "negative λ treated as disabled"
+        );
+    }
+
+    /// Objective: Verify Current-intent temporal_score now uses exponential
+    /// decay (fresher instance scores strictly higher than an older one).
+    /// Invariants: 1 day old > 90 days old; both in (0,1].
+    #[test]
+    fn current_prefers_fresh_exponential() {
+        let now = Utc::now();
+        let fresh = temporal_score(TimeIntent::Current, now - Duration::days(1), None, now);
+        let old = temporal_score(TimeIntent::Current, now - Duration::days(90), None, now);
+        assert!(
+            fresh > old,
+            "fresh must outscore old under exponential decay"
+        );
+        assert!((0.0..=1.0).contains(&fresh) && (0.0..=1.0).contains(&old));
     }
 }

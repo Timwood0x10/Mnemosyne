@@ -32,6 +32,8 @@
 //! | `mcp` | MCP server framework (types, transport, server) |
 
 pub mod agent_facts;
+pub mod anchor;
+pub mod centroid;
 pub mod character;
 pub mod classifier;
 pub mod cognition;

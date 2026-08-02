@@ -19,14 +19,19 @@ use serde_json::{Value, json};
 
 use crate::cognition::{FactStore, FactType};
 use crate::cognition_compiler::CognitionCompiler;
+use crate::config::{CONTEXT_INJECT_THRESHOLD, EMBEDDING_MEMORY_GRAYSCALE};
 use crate::distiller::{Distiller, PipelineDistiller};
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
 use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
 use crate::types::Message;
 
-/// Default context-usage threshold (percentage) that triggers distillation.
-pub const DEFAULT_CONTEXT_THRESHOLD: f64 = 40.0;
+/// Backward-compatible alias for the default context-usage threshold.
+///
+/// The single source of truth is [`CONTEXT_INJECT_THRESHOLD`] in `config`;
+/// this re-export keeps existing callers of `DEFAULT_CONTEXT_THRESHOLD`
+/// compiling while the tool defaults flow from config.
+pub const DEFAULT_CONTEXT_THRESHOLD: f64 = CONTEXT_INJECT_THRESHOLD;
 
 /// Handler for the proactive `memory_context_check` tool.
 pub struct ContextCheckTool {
@@ -86,21 +91,36 @@ impl ToolHandler for ContextCheckTool {
 
         if !triggered {
             // No-op diagnostic: report usage and current memory state.
+            // Grayscale OFF → exact legacy payload (no inject_memories field,
+            // original reason text). Grayscale ON → empty injection slot
+            // (plan P3: below the gate we inject nothing, preserving the
+            // host's context window).
             let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
             let facts = self.fact_store.get_facts(user_entity_id)?;
-            let payload = json!({
-                "context_usage_percent": context_usage,
-                "threshold_percent": threshold,
-                "distill_mode": false,
-                "reason": format!(
-                    "context usage {context_usage:.0}% below threshold {threshold:.0}% — no distillation"
-                ),
-                "current": {
+            let mut payload = serde_json::Map::new();
+            payload.insert("context_usage_percent".into(), json!(context_usage));
+            payload.insert("threshold_percent".into(), json!(threshold));
+            payload.insert("distill_mode".into(), json!(false));
+            payload.insert(
+                "reason".into(),
+                json!(format!(
+                    "context usage {context_usage:.0}% below threshold {threshold:.0}% — no distillation{}",
+                    if EMBEDDING_MEMORY_GRAYSCALE { ", no injection" } else { "" }
+                )),
+            );
+            payload.insert(
+                "current".into(),
+                json!({
                     "user_entity_id": user_entity_id,
                     "facts": facts.len(),
-                },
-            });
-            return Ok(ToolCallResult::text(payload.to_string()));
+                }),
+            );
+            if EMBEDDING_MEMORY_GRAYSCALE {
+                payload.insert("inject_memories".into(), json!([]));
+            }
+            return Ok(ToolCallResult::text(
+                serde_json::Value::Object(payload).to_string(),
+            ));
         }
 
         // ── Triggered: compile → persist → distill → profile ────────────
@@ -112,7 +132,10 @@ impl ToolHandler for ContextCheckTool {
         let stored_facts = self.fact_store.insert_batch(&compiled.facts)?;
 
         // Distill the conversation into long-term memories (knowledge/preferences…).
+        // Grayscale ON: the distilled memories ARE the injection payload —
+        // original text, never an LLM rewrite ("检索代数化、注入原文化").
         let mut distilled = 0usize;
+        let mut inject_memories: Vec<String> = Vec::new();
         if let Some(distiller) = &self.distiller {
             let conversation_id = args
                 .get("conversation_id")
@@ -122,25 +145,42 @@ impl ToolHandler for ContextCheckTool {
                 .distill(conversation_id, &messages, tenant_id, user_id)
                 .await?;
             distilled = memories.len();
+            if EMBEDDING_MEMORY_GRAYSCALE {
+                inject_memories = memories
+                    .iter()
+                    .map(|m| m.content.clone())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+            }
         }
 
         // Rebuild the user profile from ALL accumulated facts of this user.
         let profile = build_user_profile(&self.fact_store, user_entity_id)?;
 
-        let payload = json!({
-            "context_usage_percent": context_usage,
-            "threshold_percent": threshold,
-            "distill_mode": true,
-            "reason": "context usage exceeded threshold — distillation activated",
-            "compiled": {
+        let mut payload = serde_json::Map::new();
+        payload.insert("context_usage_percent".into(), json!(context_usage));
+        payload.insert("threshold_percent".into(), json!(threshold));
+        payload.insert("distill_mode".into(), json!(true));
+        payload.insert(
+            "reason".into(),
+            json!("context usage exceeded threshold — distillation activated"),
+        );
+        payload.insert(
+            "compiled".into(),
+            json!({
                 "observations": compiled.observations.len(),
                 "facts_compiled": compiled.facts.len(),
                 "facts_stored": stored_facts,
                 "distilled_memories": distilled,
-            },
-            "profile": profile,
-        });
-        Ok(ToolCallResult::text(payload.to_string()))
+            }),
+        );
+        payload.insert("profile".into(), profile);
+        if EMBEDDING_MEMORY_GRAYSCALE {
+            payload.insert("inject_memories".into(), json!(inject_memories));
+        }
+        Ok(ToolCallResult::text(
+            serde_json::Value::Object(payload).to_string(),
+        ))
     }
 }
 
