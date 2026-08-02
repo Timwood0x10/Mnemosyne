@@ -54,16 +54,77 @@ async fn call_tool(
     resp.result.as_ref().expect("result").clone()
 }
 
+/// Build a minimal single-page PDF whose trailer carries an `/Encrypt`
+/// dictionary (object 6). pdf_oxide parses the file but rejects every page's
+/// text extraction ("PDF is encrypted and requires a password"), which the
+/// loader must surface as InvalidInput — never a silent partial success.
+///
+/// The test does NOT depend on `corpus/1.pdf` being encrypted (that file's
+/// contents have drifted over time); it constructs the encrypted fixture
+/// deterministically instead.
+fn build_encrypted_pdf(content: &str) -> Vec<u8> {
+    use flate2::Compression;
+    use flate2::write::ZlibEncoder;
+    use std::io::Write;
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(content.as_bytes()).expect("write");
+    let compressed = encoder.finish().expect("finish");
+
+    let obj1 = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n".to_vec();
+    let obj2 = b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n".to_vec();
+    let obj3 = b"3 0 obj\n<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n".to_vec();
+    let mut obj4 = format!(
+        "4 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n",
+        compressed.len()
+    )
+    .into_bytes();
+    obj4.extend_from_slice(&compressed);
+    obj4.extend_from_slice(b"\nendstream\nendobj\n");
+    let obj5 =
+        b"5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n".to_vec();
+    // Object 6: Standard security handler — marks the document encrypted.
+    let obj6 = b"6 0 obj\n<< /Filter /Standard /V 2 /R 3 /O <00000000000000000000000000000000> /U <00000000000000000000000000000000> /P -4 >>\nendobj\n".to_vec();
+
+    let header = b"%PDF-1.4\n".to_vec();
+    let o1 = header.len();
+    let o2 = o1 + obj1.len();
+    let o3 = o2 + obj2.len();
+    let mut pdf = header;
+    pdf.extend_from_slice(&obj1);
+    pdf.extend_from_slice(&obj2);
+    pdf.extend_from_slice(&obj3);
+    let o4 = pdf.len();
+    pdf.extend_from_slice(&obj4);
+    let o5 = pdf.len();
+    pdf.extend_from_slice(&obj5);
+    let o6 = pdf.len();
+    pdf.extend_from_slice(&obj6);
+    let xref_offset = pdf.len();
+
+    let mut xref = String::new();
+    xref.push_str("xref\n0 7\n0000000000 65535 f \n");
+    for off in [o1, o2, o3, o4, o5, o6] {
+        xref.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    xref.push_str(&format!(
+        "trailer << /Size 7 /Root 1 0 R /Encrypt 6 0 R >>\nstartxref\n{xref_offset}\n%%EOF"
+    ));
+    pdf.extend_from_slice(xref.as_bytes());
+    pdf
+}
+
 /// Objective: Verify attaching an encrypted PDF fails gracefully via MCP.
 /// Invariants: attach returns an error result with a clear message; the
 /// knowledge store stays empty (no garbage materialized).
 #[tokio::test]
 async fn attach_encrypted_pdf_fails_gracefully() {
-    let pdf_path = std::path::Path::new("corpus/1.pdf");
-    if !pdf_path.exists() {
-        eprintln!("⚠  corpus/1.pdf not present — skipping encrypted-PDF MCP test");
-        return;
-    }
+    // Deterministic encrypted-PDF fixture in a temp file (no dependence on
+    // corpus/1.pdf, whose contents have drifted).
+    let bytes = build_encrypted_pdf("BT (Hello World) Tj ET");
+    let tmp = std::env::temp_dir().join("lorescope_encrypted_1.pdf");
+    std::fs::write(&tmp, &bytes).expect("write temp encrypted pdf");
+    let pdf_path_str = tmp.to_string_lossy().to_string();
 
     let (server, store) = {
         // Rebuild with access to the store for the empty-graph assertion.
@@ -92,7 +153,7 @@ async fn attach_encrypted_pdf_fails_gracefully() {
         "knowledge_attach",
         serde_json::json!({
             "source_type": "document",
-            "path": "corpus/1.pdf",
+            "path": pdf_path_str,
             "source_name": "encrypted-one"
         }),
     )

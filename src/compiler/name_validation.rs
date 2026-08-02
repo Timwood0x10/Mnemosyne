@@ -838,7 +838,6 @@ fn fallback_config() -> NameValidationConfig {
             "钗".into(),
             "珮".into(),
             "帛".into(),
-            "布".into(),
             "绸".into(),
             "缎".into(),
             "纱".into(),

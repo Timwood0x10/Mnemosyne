@@ -31,18 +31,32 @@ pub fn extract_text(input: &[u8]) -> Result<String> {
         .map_err(|e| Error::InvalidInput(format!("pdf_oxide page count failed: {e}")))?;
 
     let mut out = String::new();
+    // Track whether EVERY page failed to extract: a document whose pages all
+    // reject extraction (e.g. an encrypted PDF needing a password) must
+    // surface as an error, not as a "success" carrying `[page N extraction
+    // error]` markers — matching the documented InvalidInput contract.
+    let mut all_pages_failed = page_count > 0;
     for page in 0..page_count {
         match doc.extract_text(page) {
             Ok(text) => {
+                all_pages_failed = false;
                 out.push_str(&text);
                 out.push('\n');
             }
             Err(e) => {
-                // A page that fails to extract is not fatal: keep the text we
-                // already have and record the page boundary.
+                // A page that fails to extract is not fatal when OTHER pages
+                // succeed: keep the text we already have and record the page
+                // boundary. But if no page yields text, this is a real
+                // failure (encrypted / unreadable document).
                 out.push_str(&format!("\n[page {page} extraction error: {e}]\n"));
             }
         }
+    }
+    if all_pages_failed {
+        return Err(Error::InvalidInput(
+            "pdf_oxide could not extract text from any page (encrypted or unreadable document)"
+                .into(),
+        ));
     }
     Ok(out.trim().to_string())
 }
