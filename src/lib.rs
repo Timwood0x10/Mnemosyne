@@ -66,4 +66,5 @@ pub mod storage;
 pub mod store;
 pub mod temporal;
 pub mod types;
+pub mod value_extract;
 pub mod vector;
