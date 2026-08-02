@@ -51,6 +51,7 @@ pub mod extractor;
 pub mod fact_store;
 pub mod faction;
 pub mod filter;
+pub mod fused_compile;
 pub mod ingest;
 pub mod knowledge;
 pub mod language;
