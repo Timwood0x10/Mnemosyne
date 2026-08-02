@@ -228,12 +228,6 @@ pub async fn compile_source(
                 .await?;
             stats.edges += 1;
         }
-
-        // Link a representative evidence to the relation edges as well (keeps
-        // the fact↔evidence chain intact per the provenance rule).
-        if let (Some(first_ev), false) = (evidence_ids.first(), relation_targets.is_empty()) {
-            let _ = first_ev;
-        }
     }
 
     Ok(stats)

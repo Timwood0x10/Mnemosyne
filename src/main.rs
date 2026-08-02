@@ -29,6 +29,7 @@ use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use lore_scope::mcp::portrait_tool::{PortraitTool, portrait_extract_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
+use lore_scope::mcp::register_generalize_tool;
 use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
@@ -863,6 +864,16 @@ async fn build_server(
         fact_store_knowledge,
     )
     .await;
+
+    // ── Generalize tool (generalization plan) ─────────────────────────
+    //
+    // `generalize_compile` — the production entry point for the unified
+    // DocumentSource + DomainProfile + compile_source pipeline. It compiles
+    // ANY caller-provided data (pasted conversation or raw prose) into the
+    // knowledge graph, wiring the generalization modules into a live tool so
+    // external data can be ingested and later retrieved to sustain the AI
+    // persona.
+    builder = register_generalize_tool(builder, kstore.clone()).await;
 
     // portrait_extract — deterministic resume/person-document portrait via
     // rules (no LLM). Stateless; no store dependency.

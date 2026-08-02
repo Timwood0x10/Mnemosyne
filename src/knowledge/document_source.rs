@@ -101,6 +101,56 @@ impl DocumentSource for DialogSource {
     }
 }
 
+/// A raw-text source: arbitrary caller-provided text with no backing file or
+/// conversation. This is the most general entry point — any string of prose,
+/// notes, chat transcript pasted directly, or structured records flattened to
+/// text can be compiled without materializing a file on disk.
+pub struct RawTextSource {
+    /// Document title (used as the top-level entity anchor).
+    title: String,
+    /// Origin identifier for provenance.
+    source: String,
+    /// Arbitrary text body.
+    text: String,
+    /// Free-form document type tag (e.g. `"text"`, `"notes"`, `"memory"`).
+    doc_type: String,
+}
+
+impl RawTextSource {
+    /// Create a raw-text source.
+    #[must_use]
+    pub fn new(
+        title: impl Into<String>,
+        source: impl Into<String>,
+        text: impl Into<String>,
+        doc_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            title: title.into(),
+            source: source.into(),
+            text: text.into(),
+            doc_type: doc_type.into(),
+        }
+    }
+}
+
+impl DocumentSource for RawTextSource {
+    fn load(&self) -> Result<Vec<ExternalDoc>> {
+        let body = self.text.trim();
+        if body.is_empty() {
+            return Ok(Vec::new());
+        }
+        Ok(vec![ExternalDoc {
+            title: self.title.clone(),
+            text: body.to_string(),
+            chapter: None,
+            source: self.source.clone(),
+            doc_type: self.doc_type.clone(),
+            author: None,
+        }])
+    }
+}
+
 /// Convenience: load a single source through the trait (object-safety
 /// wrapper used by tools that hold a boxed source).
 ///
@@ -201,5 +251,36 @@ mod tests {
             matches!(result, Err(Error::Io(_))),
             "missing file → Io error"
         );
+    }
+
+    /// Objective: Verify RawTextSource wraps arbitrary prose into a single
+    /// ExternalDoc without touching disk, keeping title/source/doc_type.
+    /// Invariants: 1 doc; text verbatim; tags preserved.
+    #[test]
+    fn raw_text_source_roundtrip() {
+        let source = RawTextSource::new(
+            "我的记忆",
+            "paste",
+            "  我偏爱简洁的架构设计，反对过度抽象。  ",
+            "notes",
+        );
+        let docs = load_source(&source).expect("load");
+        assert_eq!(docs.len(), 1, "one text blob → one document");
+        assert_eq!(docs[0].doc_type, "notes");
+        assert_eq!(docs[0].title, "我的记忆");
+        assert_eq!(docs[0].source, "paste");
+        assert_eq!(
+            docs[0].text, "我偏爱简洁的架构设计，反对过度抽象。",
+            "trimmed"
+        );
+    }
+
+    /// Objective: Verify RawTextSource yields NO documents for blank input.
+    /// Invariants: whitespace-only text → empty vec; no panic.
+    #[test]
+    fn raw_text_blank_yields_nothing() {
+        let source = RawTextSource::new("t", "s", "   \n\t ", "text");
+        let docs = load_source(&source).expect("load");
+        assert!(docs.is_empty(), "blank text → no documents");
     }
 }
