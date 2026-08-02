@@ -89,7 +89,11 @@ fn real_value_extraction_on_export() {
             }
         }
     }
-    items.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    items.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Coverage: real extraction must beat the 3-fact compile baseline.
     assert!(

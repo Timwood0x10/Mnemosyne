@@ -170,6 +170,25 @@ src/
 | `MEMORY_RETRIEVAL_MODE` | `keyword` | `keyword` / `vector` / `hybrid` |
 | `FACTION_MAP_PATH` | `config/faction_map.json` | Faction map configuration |
 
+### Local ONNX Embedding (`--features local-embed`)
+
+The project ships a self-contained ONNX embedder — **no remote server, no API
+key, nothing to deploy**:
+
+- Provider: `FastEmbedProvider` (`src/entity_resolver/embedding.rs`)
+- Model: `all-MiniLM-L6-v2` (ONNX local, **384-dim**), downloaded once on
+  first use and cached locally (~90 MB); offline afterwards.
+- Enable: build/test with the `local-embed` Cargo feature:
+
+```bash
+cargo test --features local-embed --test real_embed_probe   # real-embed probe
+cargo build --features local-embed                          # enable at build
+```
+
+- The `RemoteEmbedder` path (`MEMORY_EMBEDDING_PROVIDER=openai|ollama`) is the
+  **alternative** that needs an upstream server; the self-contained ONNX path
+  is the zero-deployment default for local use.
+
 ### Development
 
 ```bash

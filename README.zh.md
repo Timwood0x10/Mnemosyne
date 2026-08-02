@@ -276,6 +276,21 @@ MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
 | `MEMORY_RETRIEVAL_MODE` | `keyword` | `keyword`, `vector`, `hybrid` |
 | `MEMORY_OPENAI_API_KEY` | — | `provider=openai` 时必须设置 |
 
+## 本地 ONNX Embedding（`--features local-embed`）
+
+项目内置自包含的 ONNX 向量模型——**无需远程服务、无需 API key、无需额外部署**：
+
+- 提供者：`FastEmbedProvider`（`src/entity_resolver/embedding.rs`）
+- 模型：`all-MiniLM-L6-v2`（ONNX 本地，**384 维**），首次使用自动下载并本地缓存（约 90MB），之后离线可用
+- 启用：构建/测试时加 `local-embed` Cargo feature：
+
+```bash
+cargo test --features local-embed --test real_embed_probe   # 真实向量探针测试
+cargo build --features local-embed                          # 构建时启用
+```
+
+- `RemoteEmbedder` 通道（`MEMORY_EMBEDDING_PROVIDER=openai|ollama`）是**需要上游服务的替代方案**；自包含 ONNX 路径是零部署的本地默认。
+
 ## 开发
 
 ```bash
