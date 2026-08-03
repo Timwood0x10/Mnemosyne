@@ -219,6 +219,25 @@ impl Experience {
             distance: 0.0,
         }
     }
+
+    /// Apply an agent's usefulness feedback to this memory (self-evolution).
+    ///
+    /// Raises `confidence` (importance) for a useful memory, lowers it for a
+    /// not-useful one — always clamped to `[0, 1]` — and tallies the vote in
+    /// `metadata` under `useful_votes` / `not_useful_votes`. Mutates in place
+    /// and returns the number of votes now recorded for the used key.
+    pub fn apply_feedback(&mut self, useful: bool, delta: f64) -> i64 {
+        self.confidence = (self.confidence + if useful { delta } else { -delta }).clamp(0.0, 1.0);
+        let key = if useful {
+            "useful_votes"
+        } else {
+            "not_useful_votes"
+        };
+        let votes = self.metadata.get(key).and_then(|v| v.as_i64()).unwrap_or(0) + 1;
+        self.metadata
+            .insert(key.to_string(), serde_json::Value::from(votes));
+        votes
+    }
 }
 
 /// Origin of a memory, used for traceability and Evolution feedback.
@@ -613,6 +632,68 @@ mod tests {
             mem.display_text(),
             "compressed",
             "non-empty summary should take precedence"
+        );
+    }
+
+    /// Objective: Verify `apply_feedback` raises confidence and tallies the
+    /// useful vote (self-evolution).
+    /// Invariants: confidence +delta; `useful_votes` == 1; not-useful untouched.
+    #[test]
+    fn apply_feedback_useful_raises_importance() {
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, "x", 0.5);
+        let votes = exp.apply_feedback(true, 0.1);
+        assert_eq!(votes, 1, "first useful vote counted");
+        assert!(
+            (exp.confidence - 0.6).abs() < f64::EPSILON,
+            "useful feedback should raise confidence to 0.6"
+        );
+        assert_eq!(
+            exp.metadata.get("useful_votes"),
+            Some(&serde_json::Value::from(1)),
+            "useful_votes tallied"
+        );
+        assert!(
+            exp.metadata.get("not_useful_votes").is_none(),
+            "no not-useful votes recorded"
+        );
+    }
+
+    /// Objective: Verify `apply_feedback` lowers confidence for not-useful and
+    /// clamps at zero on repeated negative votes.
+    /// Invariants: confidence 0.2 → 0.1 → clamped to 0.0; votes accumulate.
+    #[test]
+    fn apply_feedback_not_useful_and_clamps() {
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, "x", 0.2);
+        assert_eq!(exp.apply_feedback(false, 0.1), 1, "first negative vote");
+        assert_eq!(exp.apply_feedback(false, 0.1), 2, "second negative vote");
+        assert!(
+            (exp.confidence).abs() < f64::EPSILON,
+            "confidence clamped to 0.0 after two 0.1 decreases from 0.2"
+        );
+        assert_eq!(
+            exp.metadata.get("not_useful_votes"),
+            Some(&serde_json::Value::from(2)),
+            "both negative votes tallied"
+        );
+        // Already at 0 — a further negative vote must not go below zero.
+        assert_eq!(exp.apply_feedback(false, 0.1), 3, "third vote counted");
+        assert!(
+            exp.confidence >= 0.0 && (exp.confidence - 0.0).abs() < f64::EPSILON,
+            "confidence never drops below zero"
+        );
+    }
+
+    /// Objective: Verify `apply_feedback` clamps confidence at 1.0 on repeated
+    /// useful votes.
+    /// Invariants: 0.95 + 0.1 → 1.0 (not 1.05).
+    #[test]
+    fn apply_feedback_clamps_at_one() {
+        let mut exp = Experience::new("t1", MemoryType::Preference, "x", 0.95);
+        let _ = exp.apply_feedback(true, 0.1);
+        assert!(
+            (exp.confidence - 1.0).abs() < f64::EPSILON,
+            "confidence capped at 1.0, got {}",
+            exp.confidence
         );
     }
 }

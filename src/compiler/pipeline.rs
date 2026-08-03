@@ -19,6 +19,7 @@
 use serde::Serialize;
 
 use crate::compiler::Chunk;
+use crate::compiler::entity::{CorpusEntityProvider, EntityProvider};
 use crate::compiler::sentence;
 use crate::error::Result;
 use crate::knowledge::document_source::DocumentSource;
@@ -215,6 +216,52 @@ pub async fn compile_source(
             store
                 .upsert_world_profile(world_entity_id, key, value, 0.8)
                 .await?;
+        }
+
+        // ③d Corpus entity discovery — for non-dialog prose, detect the cast
+        //     from the actual text (speakers before dialogue verbs) instead of
+        //     relying on a hand-maintained dictionary. Each discovered entity
+        //     becomes its own person object and a V7 world entity, so a text
+        //     about 刘备/关羽/曹操 yields three entities, not just the doc
+        //     title. Entities already present or equal to the doc title are
+        //     skipped (no duplication).
+        if !(doc.doc_type.contains("dialog") || doc.doc_type.contains("conversation")) {
+            let corpus = CorpusEntityProvider::from_text(&doc.title, &doc.text, 1);
+            for entry in corpus.entries() {
+                if entry.canonical_name == doc.title {
+                    continue;
+                }
+                if store
+                    .find_object_by_name(&entry.canonical_name, Some(doc_id))
+                    .await?
+                    .is_some()
+                {
+                    continue;
+                }
+                store
+                    .create_object(&KnowledgeObject {
+                        id: 0,
+                        doc_id,
+                        object_type: ObjectType::Person,
+                        name: entry.canonical_name.clone(),
+                        properties: serde_json::json!({
+                            "discovered": true,
+                            "source": "corpus",
+                            "frequency": entry
+                                .properties
+                                .get("frequency")
+                                .cloned()
+                                .unwrap_or_else(|| "0".to_string()),
+                        }),
+                        confidence: 0.7,
+                        created_at: now_ts(),
+                    })
+                    .await?;
+                store
+                    .upsert_world_entity(&entry.canonical_name, "person", 0.6)
+                    .await?;
+                stats.objects += 1;
+            }
         }
 
         // ④ Persist evidence (original sentences, for traceability).
@@ -422,5 +469,49 @@ mod tests {
             .expect("world_entities row must be written by compile");
         assert_eq!(world.entity_type, "person", "default entity type");
         assert_eq!(world.name, "session-v7", "entity name matches document");
+    }
+
+    /// Objective: Verify corpus entity discovery — a non-dialog text with
+    /// several speakers yields entities for the main speakers, not just the
+    /// doc-title anchor. This is the "entities come from the text, not a
+    /// dictionary" guarantee.
+    ///
+    /// The heuristic is intentionally tolerant: prose like `大哥所言` may also
+    /// surface an honorary term, but the *data* always comes from the text,
+    /// and the main speakers are always present. We assert the core cast is
+    /// discovered (anchor + 刘备 + 关羽), not an exact object count.
+    /// Invariants: the three core entities exist and corpus ones are flagged.
+    #[tokio::test]
+    async fn corpus_text_discovers_multiple_entities() {
+        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
+        let source = crate::knowledge::document_source::RawTextSource::new(
+            "会谈纪要",
+            "paste",
+            "刘备说道：此事需从长计议。关羽道：大哥所言极是。刘备又说道：那便依计行事。",
+            "text",
+        );
+
+        let stats = compile_source(&source, &profile(), &store, "t1")
+            .await
+            .expect("compile");
+        // Anchor + the discovered cast: must exceed the single-anchor case.
+        assert!(
+            stats.objects >= 3,
+            "corpus discovery must surface the speakers, got {stats:?}"
+        );
+
+        for name in ["会谈纪要", "刘备", "关羽"] {
+            let obj = store
+                .find_object_by_name(name, None)
+                .await
+                .expect("query")
+                .unwrap_or_else(|| panic!("entity `{name}` must be discovered"));
+            if name != "会谈纪要" {
+                assert_eq!(
+                    obj.properties["discovered"], true,
+                    "corpus entities are flagged as discovered"
+                );
+            }
+        }
     }
 }

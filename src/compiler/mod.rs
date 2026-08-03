@@ -13,23 +13,18 @@
 //!   └── Timeline Builder → Writer → Store
 //! ```
 
-pub mod alias;
 pub mod chunk;
 pub mod document;
+pub mod entity;
 pub mod extract;
 pub mod faction;
-pub mod inference;
 pub mod name_validation;
 pub mod pipeline;
 pub mod profile;
-pub mod pronoun;
-pub mod relation;
 pub mod resolver;
 pub mod sentence;
 pub mod timeline;
 pub mod writer;
-
-pub mod entity;
 
 use std::ops::Range;
 

@@ -149,7 +149,17 @@ impl ToolHandler for MemoryStoreTool {
 }
 
 /// Tool: record agent feedback on a memory (`memory_feedback`).
-struct MemoryFeedbackTool;
+///
+/// Persists the feedback by adjusting the memory's importance (confidence)
+/// and counting useful/not-useful votes in its metadata. This is the
+/// self-evolution loop that `CODE_REVIEW_FINDINGS.md` H3 wanted: feedback is
+/// no longer a log-only stub — it changes what the model will surface later.
+struct MemoryFeedbackTool {
+    store: Arc<dyn ExperienceRepository>,
+}
+
+/// Net confidence adjustment applied per useful / not-useful vote.
+const FEEDBACK_CONFIDENCE_DELTA: f64 = 0.1;
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryFeedbackTool {
@@ -160,15 +170,25 @@ impl ToolHandler for MemoryFeedbackTool {
             .ok_or_else(|| Error::InvalidInput("missing `memory_id`".into()))?;
         let useful = args.get("useful").and_then(Value::as_bool).unwrap_or(true);
 
-        // For now, feedback is logged via tracing. Future Evolution work
-        // will persist feedback and adjust importance decay.
+        let Some(mut exp) = self.store.get(memory_id).await? else {
+            return Ok(ToolCallResult::text(format!(
+                "memory `{memory_id}` not found; feedback not applied"
+            )));
+        };
+
+        // Apply the vote: adjust importance + tally in metadata (self-evolve).
+        let votes = exp.apply_feedback(useful, FEEDBACK_CONFIDENCE_DELTA);
+        self.store.update(&exp).await?;
         tracing::info!(
             memory_id = %memory_id,
             useful = %useful,
-            "memory feedback recorded"
+            votes = %votes,
+            confidence = %exp.confidence,
+            "memory feedback persisted"
         );
         Ok(ToolCallResult::text(format!(
-            "feedback recorded for memory `{memory_id}` (useful={useful})"
+            "feedback applied for memory `{memory_id}` (useful={useful}, votes={votes}, confidence={:.2})",
+            exp.confidence
         )))
     }
 }
@@ -691,7 +711,9 @@ async fn build_server(
                     "required": ["memory_id"]
                 }),
             },
-            Arc::new(MemoryFeedbackTool),
+            Arc::new(MemoryFeedbackTool {
+                store: store.clone(),
+            }),
         )
         .await;
 

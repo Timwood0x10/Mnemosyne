@@ -48,19 +48,3 @@ test-group = 'serial-db'
 [[profile.default.overrides]]
 filter = 'test(=lubu_query)'
 test-group = 'serial-db'
-
-# find_kongxuan / mcp_kongxuan / fengshen_mcp_query all open
-# /tmp/fengshen_mcp.db, which fengshen_mcp_query deletes and rebuilds at
-# start. Without serial grouping they race (file deleted mid-open → fast
-# empty-result failures like find_kongxuan failing only in full runs).
-[[profile.default.overrides]]
-filter = 'test(=find_kongxuan)'
-test-group = 'serial-db'
-
-[[profile.default.overrides]]
-filter = 'test(=mcp_kongxuan)'
-test-group = 'serial-db'
-
-[[profile.default.overrides]]
-filter = 'test(=fengshen_mcp_query)'
-test-group = 'serial-db'

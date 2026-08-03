@@ -6,6 +6,7 @@
 //! with safe single-character shortname matches ("飞曰"→张飞).
 
 mod conversation;
+mod corpus;
 mod json_provider;
 mod novel;
 mod provider;
@@ -19,6 +20,7 @@ use crate::compiler::{Mention, Sentence};
 use crate::ingest::extract::{ACTION_VERBS, DIALOG_VERBS, floor_char_boundary};
 
 pub use conversation::ConversationProvider;
+pub use corpus::CorpusEntityProvider;
 pub use json_provider::JsonEntityProvider;
 pub use novel::NovelProvider;
 pub use provider::{EntityEntry, EntityProvider};

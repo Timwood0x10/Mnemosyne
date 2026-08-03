@@ -153,6 +153,10 @@ pub struct EntityState {
     pub emotion_trend: Vec<Fact>,
     /// The most recent events, newest first.
     pub recent_events: Vec<Fact>,
+    /// The most recent fact for each relationship target (long-term ties).
+    pub relationships: Vec<Fact>,
+    /// The most recent fact for each identity attribute (who the entity is).
+    pub identity_attributes: Vec<Fact>,
     /// Values emitted by application-specific aggregators.
     pub extensions: Vec<serde_json::Value>,
 }
@@ -204,6 +208,19 @@ impl StateEngine {
             .take(20)
             .cloned()
             .collect();
+        // The latest fact per relationship target, plus per identity
+        // attribute — completing the five-dimension cognitive model
+        // (identity, preference, goal, emotion, relationship).
+        let relationships = latest_by_payload_key(
+            &chronological,
+            FactType::Relationship,
+            &["target", "with", "object", "content"],
+        );
+        let identity_attributes = latest_by_payload_key(
+            &chronological,
+            FactType::Identity,
+            &["attribute", "identity", "key", "content"],
+        );
         let extensions = self
             .aggregators
             .iter()
@@ -215,6 +232,8 @@ impl StateEngine {
             preferences,
             emotion_trend,
             recent_events,
+            relationships,
+            identity_attributes,
             extensions,
         }
     }
@@ -280,6 +299,14 @@ impl EntitySnapshot {
         out.push_str(&format!(
             "- Preferences: {}\n",
             self.state.preferences.len()
+        ));
+        out.push_str(&format!(
+            "- Relationships: {}\n",
+            self.state.relationships.len()
+        ));
+        out.push_str(&format!(
+            "- Identity attributes: {}\n",
+            self.state.identity_attributes.len()
         ));
         out.push_str(&format!(
             "- Recent events: {}\n\n",
@@ -493,6 +520,117 @@ mod tests {
             snapshot.format_json()["entity_id"],
             7,
             "JSON should preserve the entity id"
+        );
+    }
+
+    /// Objective: Verify the five-dimension cognitive model is complete —
+    /// relationships and identity attributes are aggregated per semantic key
+    /// (latest fact wins), just like goals and preferences.
+    /// Invariants: latest relationship per target; latest identity per key.
+    #[test]
+    fn aggregates_relationships_and_identity_dimensions() {
+        let facts = vec![
+            // Two relationship facts for the same target — newest should win.
+            fact(
+                FactType::Relationship,
+                2024,
+                serde_json::json!({"target": "Bob", "kind": "acquaintance"}),
+            ),
+            fact(
+                FactType::Relationship,
+                2026,
+                serde_json::json!({"target": "Bob", "kind": "colleague"}),
+            ),
+            fact(
+                FactType::Relationship,
+                2025,
+                serde_json::json!({"target": "Carol", "kind": "friend"}),
+            ),
+            // Two identity attributes for the same key — newest should win.
+            fact(
+                FactType::Identity,
+                2023,
+                serde_json::json!({"attribute": "occupation", "value": "student"}),
+            ),
+            fact(
+                FactType::Identity,
+                2026,
+                serde_json::json!({"attribute": "occupation", "value": "engineer"}),
+            ),
+            fact(
+                FactType::Identity,
+                2025,
+                serde_json::json!({"attribute": "nationality", "value": "CN"}),
+            ),
+        ];
+
+        let state = StateEngine::new().aggregate(&facts);
+
+        // Relationships: one per distinct target (Bob, Carol), Bob uses newest.
+        assert_eq!(
+            state.relationships.len(),
+            2,
+            "one relationship fact per target, got {}",
+            state.relationships.len()
+        );
+        let bob = state
+            .relationships
+            .iter()
+            .find(|f| f.payload["target"] == "Bob")
+            .expect("Bob relationship present");
+        assert_eq!(
+            bob.payload["kind"], "colleague",
+            "newest relationship fact for Bob wins"
+        );
+
+        // Identity: one per distinct attribute, occupation uses newest.
+        assert_eq!(
+            state.identity_attributes.len(),
+            2,
+            "one identity fact per attribute, got {}",
+            state.identity_attributes.len()
+        );
+        let occ = state
+            .identity_attributes
+            .iter()
+            .find(|f| f.payload["attribute"] == "occupation")
+            .expect("occupation identity present");
+        assert_eq!(
+            occ.payload["value"], "engineer",
+            "newest identity fact for occupation wins"
+        );
+    }
+
+    /// Objective: Verify `format_markdown` reports the two new dimensions.
+    /// Invariants: the health summary includes relationship and identity lines.
+    #[test]
+    fn markdown_reports_relationship_and_identity_counts() {
+        let snapshot = build_snapshot(
+            7,
+            "Alice".to_string(),
+            "User".to_string(),
+            vec![
+                fact(
+                    FactType::Relationship,
+                    2026,
+                    serde_json::json!({"target": "Bob", "kind": "friend"}),
+                ),
+                fact(
+                    FactType::Identity,
+                    2026,
+                    serde_json::json!({"attribute": "occupation", "value": "engineer"}),
+                ),
+            ],
+            &StateEngine::new(),
+        );
+        let md = snapshot.format_markdown();
+        assert!(
+            md.contains("Relationships: 1"),
+            "markdown reports one relationship, got:\n{md}"
+        );
+        assert!(
+            md.contains("Identity attributes: 1"),
+            "markdown reports one identity attribute, got:\n{md}"
         );
     }
 }

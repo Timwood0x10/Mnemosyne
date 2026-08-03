@@ -241,4 +241,20 @@ mod tests {
         assert!(names.contains(&"西游记"), "should find 西游记 profile");
         assert!(names.contains(&"三国演义"), "should find 三国演义 profile");
     }
+
+    /// Objective: Verify profiles load with an empty entity dictionary — the
+    /// design intent is that entities are discovered at compile time from the
+    /// corpus, not pre-listed by hand. An empty `entities` array must parse
+    /// cleanly and yield zero entries.
+    /// Invariants: loading a profile whose `entities` is empty yields 0
+    /// entries and no error.
+    #[test]
+    fn empty_entity_dictionary_is_valid() {
+        let provider = JsonEntityProvider::from_json(r#"{"profile_name":"测试","entities":[]}"#)
+            .expect("parse profile with empty entities");
+        assert!(
+            provider.entries().is_empty(),
+            "empty entity dictionary should produce no entries"
+        );
+    }
 }

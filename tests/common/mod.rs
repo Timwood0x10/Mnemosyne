@@ -3,13 +3,6 @@
 //! Provides `ensure_sanguo_db()` which lazily creates and populates the
 //! 三国演义 knowledge database. Tests sharing this DB MUST run serially
 //! (configured via `.config/nextest.toml` test-group `serial-db`).
-//!
-//! Every integration test compiles this module into its own crate, and each
-//! test only uses a subset of the helpers. A helper used by `sanguo_mcp` but
-//! not by `war_peace` therefore looks "dead" in the latter's compilation
-//! unit — this is expected for a shared helper module, not a real dead-code
-//! regression, so dead-code analysis is suppressed here.
-#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::Arc;
