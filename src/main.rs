@@ -31,6 +31,7 @@ use lore_scope::mcp::portrait_tool::{PortraitTool, portrait_extract_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_generalize_tool;
 use lore_scope::mcp::register_knowledge_tools;
+use lore_scope::mcp::serve_http_addr;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
 use lore_scope::retrieval::RetrievalEngine;
@@ -903,12 +904,31 @@ async fn main() -> AnyhowResult<()> {
         .init();
 
     let cli = CliArgs::parse();
+    // Read transport options up front (before `match cli.command` partially
+    // moves `command`), so the serve branch can dispatch on them without
+    // touching the moved field.
+    let transport_kind = cli.transport.clone();
+    let http_addr = cli.http_addr.clone();
+    let http_token = cli.http_token.clone();
     match cli.command {
         Some(Command::Serve) | None => {
             let cfg = cli.into_config().context("load configuration")?;
             let (server, _distiller, _engine) = build_server(&cfg).await?;
-            let mut transport = StdioTransport::new();
-            server.serve(&mut transport).await?;
+            match transport_kind.as_str() {
+                "http" => {
+                    let addr: std::net::SocketAddr = http_addr
+                        .parse()
+                        .context("invalid --http-addr; expected host:port")?;
+                    serve_http_addr(server, addr, http_token).await?;
+                }
+                "stdio" => {
+                    let mut transport = StdioTransport::new();
+                    server.serve(&mut transport).await?;
+                }
+                other => {
+                    anyhow::bail!("unsupported --transport `{other}` (expected `stdio` or `http`)");
+                }
+            }
         }
         Some(Command::Ingest { corpus_dir }) => {
             // `cli.command` is moved by this binding, so read `db_path` directly

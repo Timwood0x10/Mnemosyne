@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result, StorageError};
@@ -156,6 +156,15 @@ pub trait KnowledgeStore: Send + Sync {
         name: &str,
         doc_id: Option<i64>,
     ) -> Result<Option<KnowledgeObject>>;
+    /// Merge new `properties` (and optionally raise `confidence`) into an
+    /// existing object, preserving any keys not overwritten. Returns the
+    /// number of rows actually updated (0 when `id` is unknown).
+    async fn update_object_properties(
+        &self,
+        id: i64,
+        properties: &serde_json::Value,
+        confidence: Option<f64>,
+    ) -> Result<usize>;
 
     // ── edges ─────────────────────────────────────────────────
     async fn create_edge(&self, e: &KnowledgeEdge) -> Result<i64>;
@@ -416,6 +425,38 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
             ],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    async fn update_object_properties(
+        &self,
+        id: i64,
+        properties: &serde_json::Value,
+        confidence: Option<f64>,
+    ) -> Result<usize> {
+        let conn = self.conn.lock().await;
+        let existing: Option<String> = conn
+            .query_row(
+                "SELECT properties FROM knowledge_objects WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(raw) = existing else {
+            return Ok(0);
+        };
+        let mut merged = serde_json::from_str::<serde_json::Value>(&raw)
+            .unwrap_or_else(|_| serde_json::json!({}));
+        if let (Some(merged_obj), Some(new_obj)) = (merged.as_object_mut(), properties.as_object())
+        {
+            for (k, v) in new_obj {
+                merged_obj.insert(k.clone(), v.clone());
+            }
+        }
+        let n = conn.execute(
+            "UPDATE knowledge_objects SET properties = ?1, confidence = ?2 WHERE id = ?3",
+            params![json_to_string(&merged), confidence.unwrap_or(0.8), id],
+        )?;
+        Ok(n)
     }
 
     async fn get_object(&self, id: i64) -> Result<Option<KnowledgeObject>> {
@@ -1176,6 +1217,49 @@ mod tests {
             .await
             .expect("find missing");
         assert!(missing.is_none(), "unknown name must return None");
+    }
+
+    /// Objective: Verify `update_object_properties` merges new keys into an
+    /// existing object's properties (preserving old keys) and bumps confidence.
+    /// Invariants: old key survives; new key present; confidence updated;
+    /// returns the row count.
+    #[tokio::test]
+    async fn update_object_properties_merges_keys() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "水浒传").await;
+        let oid = seed_person(&store, did, "宋江", json!({"aliases": ["及时雨"]})).await;
+
+        let n = store
+            .update_object_properties(
+                oid,
+                &json!({"preference": "重义气", "relations": []}),
+                Some(0.95),
+            )
+            .await
+            .expect("update");
+        assert_eq!(n, 1, "one row updated");
+
+        let got = store.get_object(oid).await.expect("get").expect("exists");
+        assert_eq!(got.properties["aliases"][0], "及时雨", "old key preserved");
+        assert_eq!(got.properties["preference"], "重义气", "new key merged in");
+        assert!(
+            got.properties["relations"].is_array(),
+            "relations array set"
+        );
+        assert_eq!(got.confidence, 0.95, "confidence bumped");
+    }
+
+    /// Objective: Verify `update_object_properties` on an unknown id is a
+    /// safe no-op (returns 0, no panic).
+    /// Invariants: unknown id → Ok(0).
+    #[tokio::test]
+    async fn update_object_properties_unknown_id_noop() {
+        let store = fresh().await;
+        let n = store
+            .update_object_properties(999_999, &json!({"x": 1}), None)
+            .await
+            .expect("update");
+        assert_eq!(n, 0, "unknown id → zero rows updated");
     }
 
     /// Objective: Verify edge creation + `get_edges_touching` returns both

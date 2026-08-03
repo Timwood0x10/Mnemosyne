@@ -393,6 +393,20 @@ pub struct CliArgs {
     /// Optional OpenAI API key (required when embedding-provider=openai).
     #[arg(long, env = "MEMORY_OPENAI_API_KEY")]
     pub openai_api_key: Option<String>,
+
+    /// Serve transport: `stdio` (default, line-delimited JSON on stdio) or
+    /// `http` (MCP Streamable HTTP over SSE on `--addr`).
+    #[arg(long, env = "MEMORY_TRANSPORT", default_value = "stdio")]
+    pub transport: String,
+
+    /// Listen address for `--transport http` (e.g. `127.0.0.1:8080`).
+    #[arg(long, env = "MEMORY_HTTP_ADDR", default_value = "127.0.0.1:8080")]
+    pub http_addr: String,
+
+    /// Optional bearer token required for `--transport http`. When unset the
+    /// HTTP endpoints are served without authentication (local trust only).
+    #[arg(long, env = "MEMORY_HTTP_TOKEN")]
+    pub http_token: Option<String>,
 }
 
 /// Supported subcommands.
@@ -519,6 +533,9 @@ mod tests {
             embedding_provider: "none".into(),
             retrieval_mode: "keyword".into(),
             openai_api_key: None,
+            transport: "stdio".into(),
+            http_addr: "127.0.0.1:8080".into(),
+            http_token: None,
         };
         let cfg = args.into_config().expect("config");
         assert_eq!(cfg.db_path, "/tmp/test.db");

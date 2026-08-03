@@ -37,7 +37,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Async runtime: keep only the features used by the server.
-tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "io-util", "io-std"] }
+tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "io-util", "io-std", "net"] }
+
+# HTTP server for the MCP Streamable HTTP transport (remote serving).
+axum = { version = "0.8", features = ["http1"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 
 # ID generation
 uuid = { version = "1.17", features = ["v4", "serde"] }
@@ -81,6 +85,8 @@ pdf_oxide = "0.3.37"
 [dev-dependencies]
 tokio = { version = "1.45", features = ["full", "test-util"] }
 tempfile = "3.20"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
 
 [features]
 default = ["remote-embed"]
