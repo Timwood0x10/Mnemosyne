@@ -86,7 +86,11 @@ pub fn compile(
         .chain(config.action_verbs.iter())
         .map(|s| s.as_str())
         .collect();
-    let verb_ac = AhoCorasick::new(&all_verbs).unwrap();
+    // AhoCorasick::new only fails on an empty pattern set; all_verbs comes
+    // from a validated language config (never empty), so this expect never
+    // fires — the message keeps the panic traceable if it somehow does.
+    let verb_ac = AhoCorasick::new(&all_verbs)
+        .expect("verb automaton builds from a non-empty validated verb set");
 
     for text in sentences.iter() {
         if text.len() < 2 {

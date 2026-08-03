@@ -33,6 +33,8 @@ pub mod entity;
 
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
+
 // ── Chunk / Sentence (Phase 1-2, shared IR) ──────────────────────────────────
 
 /// A chunk of text (parallel compilation unit).
@@ -63,7 +65,7 @@ pub type SentenceId = usize;
 // ── Entity (Pass 1) ─────────────────────────────────────────────────────────
 
 /// A world entity (person, place, organization).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
     pub id: Option<i64>,
     pub name: String,
@@ -73,7 +75,7 @@ pub struct Entity {
 }
 
 /// A profile attribute attached to an entity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityProfile {
     pub entity_id: Option<i64>,
     pub key: String, // courtesy_name, birthplace, appearance, etc.
@@ -82,7 +84,7 @@ pub struct EntityProfile {
 }
 
 /// A mention of an entity in the text (Pass 2 builds these from Pass 1's index).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Mention {
     pub sentence_id: usize,
     pub entity_id: Option<i64>, // None = candidate, resolved in Pass 2
@@ -95,7 +97,7 @@ pub struct Mention {
 // ── Event (Pass 2) ──────────────────────────────────────────────────────────
 
 /// An event in the world timeline.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: Option<i64>,
     pub title: String,
@@ -109,14 +111,14 @@ pub struct Event {
 }
 
 /// A participant in an event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventParticipant {
     pub entity_name: String,
     pub role: String, // protagonist / antagonist / witness
 }
 
 /// A structured change that an event causes to an entity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEffect {
     pub target: String,    // entity name affected
     pub attribute: String, // "status" / "reputation" / "relation" / "faction"
@@ -126,7 +128,7 @@ pub struct EventEffect {
 }
 
 /// A long-term relation between two entities.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Relation {
     pub source: String,
     pub target: String,

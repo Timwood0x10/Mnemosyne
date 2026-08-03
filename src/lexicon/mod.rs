@@ -168,12 +168,20 @@ impl LexiconMetrics {
     /// Record one match of a lexeme (by ID) and its semantic class.
     pub fn record_hit(&self, id: &str, class: &str) {
         self.total_hits.fetch_add(1, Ordering::Relaxed);
+        // Mutex poisoning requires a panic while the guard is held; the map
+        // mutation below cannot panic, so these expects never fire.
         {
-            let mut by_id = self.hits_by_id.lock().unwrap();
+            let mut by_id = self
+                .hits_by_id
+                .lock()
+                .expect("hits_by_id mutex is not poisoned");
             *by_id.entry(id.to_string()).or_insert(0) += 1;
         }
         {
-            let mut by_class = self.hits_by_class.lock().unwrap();
+            let mut by_class = self
+                .hits_by_class
+                .lock()
+                .expect("hits_by_class mutex is not poisoned");
             *by_class.entry(class.to_string()).or_insert(0) += 1;
         }
     }
@@ -185,14 +193,21 @@ impl LexiconMetrics {
 
     /// Build a deterministic snapshot (sorted by id/class).
     pub fn snapshot(&self) -> MetricsSnapshot {
+        // Guard is released before any user code can panic on it; expect safe.
         let mut by_id: Vec<(String, u64)> = {
-            let guard = self.hits_by_id.lock().unwrap();
+            let guard = self
+                .hits_by_id
+                .lock()
+                .expect("hits_by_id mutex is not poisoned");
             guard.iter().map(|(k, v)| (k.clone(), *v)).collect()
         };
         by_id.sort_by(|a, b| a.0.cmp(&b.0));
 
         let mut by_class: Vec<(String, u64)> = {
-            let guard = self.hits_by_class.lock().unwrap();
+            let guard = self
+                .hits_by_class
+                .lock()
+                .expect("hits_by_class mutex is not poisoned");
             guard.iter().map(|(k, v)| (k.clone(), *v)).collect()
         };
         by_class.sort_by(|a, b| a.0.cmp(&b.0));
@@ -908,14 +923,23 @@ static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
 
 /// Access the global registry.
 pub fn global() -> std::sync::RwLockReadGuard<'static, LexiconRegistry> {
-    REGISTRY.read().unwrap()
+    // Read guards are released before user code can panic on them; the
+    // registry is written once at startup. Expect keeps the invariant
+    // traceable if poisoning ever occurs.
+    REGISTRY
+        .read()
+        .expect("global lexicon registry read lock is not poisoned")
 }
 
 /// Reload the global registry from the default core path.
 pub fn reload() -> Result<(), LexiconError> {
     let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
     let registry = RegistryBuilder::new().load_core(&core_path)?.build()?;
-    *REGISTRY.write().unwrap() = registry;
+    // The assignment below cannot panic while holding the write guard, so
+    // this expect never fires.
+    *REGISTRY
+        .write()
+        .expect("global lexicon registry write lock is not poisoned") = registry;
     Ok(())
 }
 

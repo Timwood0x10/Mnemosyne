@@ -867,21 +867,24 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         importance: f64,
     ) -> Result<i64> {
         let conn = self.conn.lock().await;
-        if let Some(existing) = conn
-            .query_row(
-                "SELECT id FROM world_entities WHERE name = ?1",
-                params![name],
-                |r| r.get::<_, i64>(0),
-            )
-            .optional()?
-        {
-            return Ok(existing);
-        }
-        conn.execute(
-            "INSERT INTO world_entities (name, entity_type, importance) VALUES (?1, ?2, ?3)",
+        // Atomic upsert (P2): a single INSERT ... ON CONFLICT (relying on the
+        // UNIQUE(name) index added to WORLD_SCHEMA) instead of a
+        // check-then-insert. Two stores sharing one SQLite file can no longer
+        // both pass the SELECT and create duplicate rows; the conflict
+        // clause updates in place and RETURNING gives the id in one round
+        // trip. SQLite supports RETURNING since 3.35.
+        conn.query_row(
+            "INSERT INTO world_entities (name, entity_type, importance)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(name) DO UPDATE SET
+                 entity_type = excluded.entity_type,
+                 importance = excluded.importance,
+                 updated_at = strftime('%s','now')
+             RETURNING id",
             params![name, entity_type, importance],
-        )?;
-        Ok(conn.last_insert_rowid())
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(Into::into)
     }
 
     async fn upsert_world_profile(
@@ -1462,6 +1465,51 @@ mod tests {
 
     async fn fresh() -> SQLiteKnowledgeStore {
         SQLiteKnowledgeStore::open_in_memory().await.expect("open")
+    }
+
+    /// Objective: Verify the P2 fix — `upsert_world_entity` is atomic and
+    /// unique-by-name is DB-enforced. Two INDEPENDENT store instances sharing
+    /// the same SQLite file must not create duplicate rows when they upsert
+    /// the same name concurrently.
+    /// Invariants: after racing two instances on one name, exactly ONE
+    /// `world_entities` row exists with that name.
+    #[tokio::test]
+    async fn concurrent_upsert_does_not_duplicate() {
+        let path = std::env::temp_dir().join("lorescope_p2_dup.db");
+        let _ = std::fs::remove_file(&path);
+        // Two independent connections to the SAME file — each has its own
+        // mutex, so the pre-fix check-then-insert could both pass the SELECT.
+        let store_a = SQLiteKnowledgeStore::open(path.to_str().unwrap())
+            .await
+            .expect("open a");
+        let store_b = SQLiteKnowledgeStore::open(path.to_str().unwrap())
+            .await
+            .expect("open b");
+
+        let (id_a, id_b) = tokio::join!(
+            store_a.upsert_world_entity("诸葛亮", "person", 0.9),
+            store_b.upsert_world_entity("诸葛亮", "person", 0.9),
+        );
+        assert!(id_a.is_ok(), "first upsert ok");
+        assert!(
+            id_b.is_ok(),
+            "second upsert ok — conflict must be handled, not errored"
+        );
+
+        // Count rows for this name — must be exactly one.
+        let count: i64 = store_a
+            .conn
+            .lock()
+            .await
+            .query_row(
+                "SELECT COUNT(*) FROM world_entities WHERE name = ?1",
+                params!["诸葛亮"],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(count, 1, "P2: concurrent upsert must not duplicate rows");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// Objective: Verify `WORLD_SCHEMA` (V7 entity-centric tables) is now

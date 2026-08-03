@@ -1,14 +1,11 @@
 //! War and Peace → MCP store, then query Anna via MCP.
 //! Run: cargo test --test war_mcp -- --nocapture
 
+mod common;
+
 use std::sync::Arc;
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
 use lore_scope::compiler::writer::{EvidenceBatch, EvidenceWriter};
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
 use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 
 const DB: &str = "/tmp/warpeace_mcp.db";
@@ -18,65 +15,10 @@ async fn war_mcp() {
     let _ = std::fs::remove_file(DB);
     println!("========== War and Peace → MCP Store ==========\n");
 
-    // 1. Compile with English config
-    let doc = Document::from_file("corpus/WarandPeace.txt").unwrap();
-    let text = &doc.text;
-    println!("Text: {} chars\n", text.len());
-
-    let mut ctx = CompileContext {
-        document_title: "War and Peace".into(),
-        ..Default::default()
-    };
-
-    let mut registry = EntityRegistry::new();
-    let provider =
-        Arc::new(JsonEntityProvider::from_file("config/entity_profiles/warandpeace.json").unwrap());
-    let obs_config = provider.observation_config();
-    registry.register(provider.clone());
-    let mut dict = registry.build_dictionary();
-
-    let patterns = provider.profile_patterns();
-    profile::extract_profiles(
-        text,
-        &mut ctx,
-        Some(&dict),
-        &patterns,
-        &lore_scope::language::EnglishLanguageProvider::new(),
-    );
-    for entity in &ctx.entities {
-        let aliases: Vec<&str> = ctx
-            .profiles
-            .iter()
-            .filter(|p| p.entity_id == entity.id)
-            .filter(|p| p.key == "courtesy_name" || p.key == "title")
-            .map(|p| p.value.as_str())
-            .collect();
-        dict.register_discovered(&entity.name, &aliases);
-    }
-    profile::register_discovered_entities(&mut dict, &ctx);
-    let alias_pairs: Vec<(String, i64)> = dict
-        .alias_to_canonical
-        .iter()
-        .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
-        .collect();
-    let entity_resolver = EntityResolver::new(AliasResolver::from_pairs(alias_pairs));
-
-    let chunks = chunk::plan(text, chunk::Config::default());
-    let sentences = sentence::split_all(&chunks);
-    let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
-    let config = extract::Config {
-        strong_verbs: obs_config.first().cloned().unwrap_or_default(),
-        action_verbs: obs_config.get(2).cloned().unwrap_or_default(),
-        ..extract::Config::default()
-    };
-    extract::compile(
-        &mut ctx,
-        &sent_texts,
-        &dict,
-        &config,
-        Some(&entity_resolver),
-    );
-    println!("Compiled: {} events\n", ctx.events.len());
+    // Full 84k-sentence compile with the warandpeace.json provider is ~2
+    // minutes; replay the shared disk cache (mtime-invalidated).
+    let compiled = common::ensure_war_mcp_compile();
+    println!("Compiled: {} events\n", compiled.events.len());
 
     // 2. Bootstrap MCP store
     let k_init = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
@@ -104,7 +46,7 @@ async fn war_mcp() {
 
     // 3. Write entities + events + evidence
     let mut ec = 0usize;
-    for e in &ctx.entities {
+    for e in &compiled.entities {
         if e.name.len() > 20 {
             continue;
         }
@@ -118,7 +60,7 @@ async fn war_mcp() {
     }
 
     let mut evc = 0usize;
-    for ev in &ctx.events {
+    for ev in &compiled.events {
         if ev.title.len() > 200 {
             continue;
         }
@@ -136,6 +78,9 @@ async fn war_mcp() {
     }
 
     let mut evidc = 0usize;
+    // Evidence needs the raw corpus text; the compile itself is cached, but
+    // reading the file for evidence lines is milliseconds.
+    let text = std::fs::read_to_string("corpus/WarandPeace.txt").expect("corpus");
     let mut batch: Vec<EvidenceBatch> = Vec::new();
     for (i, line) in text.lines().enumerate() {
         if line.len() < 20 {

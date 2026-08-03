@@ -364,7 +364,11 @@ static DICT: LazyLock<RwLock<Dictionary>> = LazyLock::new(|| {
 /// Reload the global dictionary from its default path (for hot-reload or testing).
 pub fn reload() -> Result<(), Box<dyn std::error::Error>> {
     let dict = Dictionary::load_default()?;
-    *DICT.write().unwrap() = dict;
+    // RwLock poisoning requires a panic while the write guard is held; the
+    // assignment below cannot panic, so this expect never fires.
+    *DICT
+        .write()
+        .expect("global dictionary write lock is not poisoned") = dict;
     Ok(())
 }
 
@@ -372,17 +376,26 @@ pub fn reload() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Check if `word` is a known English stop-word.
 pub fn is_english_stop_name(word: &str) -> bool {
-    DICT.read().unwrap().is_english_stop_name(word)
+    // Read guards are released before any user code runs again, so a poisoned
+    // lock is impossible in practice; expect documents the invariant.
+    DICT.read()
+        .expect("global dictionary read lock is not poisoned")
+        .is_english_stop_name(word)
 }
 
 /// Check if `word` is a known Chinese stop-word.
 pub fn is_chinese_stop_name(word: &str) -> bool {
-    DICT.read().unwrap().is_chinese_stop_name(word)
+    // See `is_english_stop_name` — read-guard unwrap cannot panic.
+    DICT.read()
+        .expect("global dictionary read lock is not poisoned")
+        .is_chinese_stop_name(word)
 }
 
 /// Access the global dictionary for callers that need the full API.
 pub fn global() -> std::sync::RwLockReadGuard<'static, Dictionary> {
-    DICT.read().unwrap()
+    // See `is_english_stop_name` — read-guard unwrap cannot panic.
+    DICT.read()
+        .expect("global dictionary read lock is not poisoned")
 }
 
 #[cfg(test)]

@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS world_entities (
     created_at  INTEGER DEFAULT (strftime('%s','localtime')),
     updated_at  INTEGER DEFAULT (strftime('%s','localtime'))
 );
-CREATE INDEX IF NOT EXISTS idx_world_entities_name ON world_entities(name);
+-- Entity names are UNIQUE: upsert_world_entity and the export/import path
+-- both rely on unique-by-name being enforced by the DATABASE, not by the
+-- per-instance connection mutex (P2 — two stores sharing one file could both
+-- pass a check-then-insert and silently duplicate a row).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_world_entities_name_unique ON world_entities(name);
 CREATE INDEX IF NOT EXISTS idx_world_entities_type ON world_entities(entity_type);
 
 -- ── world_entity_aliases ─────────────────────────────────
