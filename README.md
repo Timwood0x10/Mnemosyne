@@ -72,6 +72,7 @@ Compile any long-term interaction into an **evolving human cognitive model**: id
 | `relation_graph` | Relation graph BFS traversal (depth 1-5) | `entity` |
 | `evidence` | Original text evidence search (keyword match) | `query` |
 | `correct_relation` | Correct erroneous relations in knowledge graph | `source`, `predicate`, `old_target`, `new_target` |
+| `person_key_events` | Distill a person's trajectory into key events (score + evidence) | `name` |
 
 ### V1 Legacy Character Tools
 
@@ -82,7 +83,9 @@ Compile any long-term interaction into an **evolving human cognitive model**: id
 | `character_ingest` | Run four classics corpus distillation pipeline | Triggers full V1 extraction |
 | `character_graph` | Export 3D character relation graph JSON | For visualization |
 
-**Total: 15 MCP tools**
+> `portrait_extract` (resume → person portrait) was removed in favor of the
+> cognition-Facts conversation pipeline, which is the supported path for
+> companion-AI persona profiling.
 
 ---
 

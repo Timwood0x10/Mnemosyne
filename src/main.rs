@@ -28,7 +28,6 @@ use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
-use lore_scope::mcp::portrait_tool::{PortraitTool, portrait_extract_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_generalize_tool;
 use lore_scope::mcp::register_graph_search_tool;
@@ -937,12 +936,6 @@ async fn build_server(
     // `trace_path` — shortest hop-by-hop path between two entities (BFS over
     // graph edges), answering "how are these two connected?" in one call.
     builder = register_trace_path_tool(builder, kstore.clone()).await;
-
-    // portrait_extract — deterministic resume/person-document portrait via
-    // rules (no LLM). Stateless; no store dependency.
-    builder = builder
-        .tool(portrait_extract_definition(), Arc::new(PortraitTool::new()))
-        .await;
 
     // person_key_events — distill a person's full trajectory into key events
     // (importance score + turning flag + evidence anchors). Supplies evidence

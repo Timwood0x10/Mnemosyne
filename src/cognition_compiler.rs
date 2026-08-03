@@ -19,6 +19,7 @@
 use crate::agent_facts::{
     ConversationFacts, agent_facts_from_messages, derived_facts_from_messages,
 };
+use crate::agent_personality::agent_personality_facts_from_messages;
 use crate::cognition::{Fact, Observation};
 use crate::conversation_compiler::{
     ConversationCompiler, compile_user_observations, user_facts_from_observations,
@@ -100,7 +101,15 @@ impl CognitionCompiler {
             user_entity_id,
             logical_time,
         );
-        let agent_facts = agent_facts_from_messages(messages, agent_entity_id, logical_time);
+        // Agent channel = what the agent did (tool/action Events) PLUS the
+        // companion persona it reveals through first-person speech, so a
+        // companion agent's personality accumulates turn after turn.
+        let mut agent_facts = agent_facts_from_messages(messages, agent_entity_id, logical_time);
+        agent_facts.extend(agent_personality_facts_from_messages(
+            messages,
+            agent_entity_id,
+            logical_time,
+        ));
         let derived_facts = derived_facts_from_messages(messages, user_entity_id, logical_time);
         ConversationFacts::from_channels(user_facts, agent_facts, derived_facts)
     }

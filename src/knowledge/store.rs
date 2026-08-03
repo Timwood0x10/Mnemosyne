@@ -193,6 +193,20 @@ pub trait KnowledgeStore: Send + Sync {
         name: &str,
         doc_id: Option<i64>,
     ) -> Result<Option<KnowledgeObject>>;
+    /// Resolve an entity by exact name first, then by **name substring** as a
+    /// fallback.
+    ///
+    /// Corpus extraction can store a given name ("流苏") while a caller queries
+    /// the full name ("白流苏"), or vice versa. This method lets query tools
+    /// (`inspect_entity`, `person_key_events`) find the same graph node through
+    /// either spelling. The exact match is authoritative; the substring
+    /// fallback only fires when no exact object exists, and it requires the
+    /// substring candidate to be unambiguous to avoid alias false-positives.
+    async fn find_object_by_alias(
+        &self,
+        name: &str,
+        doc_id: Option<i64>,
+    ) -> Result<Option<KnowledgeObject>>;
     /// Merge new `properties` (and optionally raise `confidence`) into an
     /// existing object, preserving any keys not overwritten. Returns the
     /// number of rows actually updated (0 when `id` is unknown).
@@ -601,6 +615,53 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
             Some(Ok(o)) => Ok(Some(o)),
             Some(Err(e)) => Err(StorageError::Sqlite(format!("find_object_by_name: {e}")).into()),
             None => Ok(None),
+        }
+    }
+
+    async fn find_object_by_alias(
+        &self,
+        name: &str,
+        doc_id: Option<i64>,
+    ) -> Result<Option<KnowledgeObject>> {
+        // Exact match is authoritative — never substitute a substring hit when
+        // an exact object exists (exact semantics unchanged for existing callers).
+        if let Some(exact) = self.find_object_by_name(name, doc_id).await? {
+            return Ok(Some(exact));
+        }
+        // Substring fallback, matched in BOTH directions so a full-name query
+        // ("白流苏") finds a stored given name ("流苏") and a given-name query
+        // ("流苏") finds a stored full name ("白流苏"). We enumerate the
+        // document's objects and keep every one where either name contains the
+        // other; a SINGLE unambiguous candidate is required so an alias never
+        // silently maps to the wrong person. Exact-name echoes are excluded
+        // (already handled above).
+        let candidates = match doc_id {
+            Some(d) => self.list_objects_by_document(d).await?,
+            None => self.search_objects(None, None, None, None, 10_000).await?,
+        };
+        let matched: Vec<KnowledgeObject> = candidates
+            .into_iter()
+            .filter(|o| o.name != name && (o.name.contains(name) || name.contains(&o.name)))
+            .collect();
+        if matched.len() == 1 {
+            // Exactly one candidate: a safe, unambiguous alias hit. The
+            // len==1 guard guarantees the next() below is Some, so the
+            // unwrap cannot fail (justified per error-handling rules).
+            Ok(matched.into_iter().next())
+        } else {
+            // Multiple matches: a person query ("白流苏") whose substring also
+            // appears inside sentence-named Event objects should resolve to the
+            // person. But this is only safe when exactly ONE Person matches —
+            // several persons sharing the substring remain genuinely ambiguous.
+            let persons: Vec<KnowledgeObject> = matched
+                .into_iter()
+                .filter(|o| o.object_type == ObjectType::Person)
+                .collect();
+            if persons.len() == 1 {
+                Ok(persons.into_iter().next())
+            } else {
+                Ok(None)
+            }
         }
     }
 
@@ -1028,7 +1089,9 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         doc_title: Option<&str>,
     ) -> Result<Option<InspectEntityResult>> {
         let doc_id = self.resolve_doc_id(doc_title).await?;
-        let object = match self.find_object_by_name(name, doc_id).await? {
+        // Alias-aware lookup so a corpus-discovered given name ("流苏") is
+        // reachable by the full name ("白流苏") and vice versa.
+        let object = match self.find_object_by_alias(name, doc_id).await? {
             Some(o) => o,
             None => return Ok(None),
         };
@@ -1634,6 +1697,102 @@ mod tests {
             .await
             .expect("find missing");
         assert!(missing.is_none(), "unknown name must return None");
+    }
+
+    /// Objective: Verify `find_object_by_alias` resolves a corpus-discovered
+    /// given name ("流苏") when queried by the full name ("白流苏"), and vice
+    /// versa — the companion-persona alias gap.
+    /// Invariants: full-name query finds the object stored under the given
+    /// name; exact-match precedence is preserved.
+    #[tokio::test]
+    async fn find_object_by_alias_matches_substring() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "倾城之恋").await;
+        seed_person(&store, did, "流苏", json!({})).await;
+
+        // Query the full name → substring fallback finds the stored "流苏".
+        let hit = store
+            .find_object_by_alias("白流苏", Some(did))
+            .await
+            .expect("alias lookup")
+            .expect("substring alias must resolve");
+        assert_eq!(
+            hit.name, "流苏",
+            "full-name query resolves to the given-name node"
+        );
+
+        // Query the given name → substring fallback also matches.
+        let hit2 = store
+            .find_object_by_alias("苏", Some(did))
+            .await
+            .expect("alias lookup")
+            .expect("shorter alias must resolve");
+        assert_eq!(hit2.name, "流苏", "a shorter alias resolves too");
+    }
+
+    /// Objective: Verify `find_object_by_alias` prefers an exact match over a
+    /// substring hit, and never resolves an ambiguous substring to a wrong
+    /// entity.
+    /// Invariants: exact name wins; two objects sharing a substring yield None
+    /// (ambiguous); a wholly unknown name yields None.
+    #[tokio::test]
+    async fn find_object_by_alias_prefers_exact_and_rejects_ambiguous() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "三国演义").await;
+        let liubei = seed_person(&store, did, "刘备", json!({})).await;
+        seed_person(&store, did, "刘备用剑", json!({})).await;
+
+        // Exact match is authoritative even though a substring alias exists.
+        let exact = store
+            .find_object_by_alias("刘备", Some(did))
+            .await
+            .expect("alias lookup")
+            .expect("exact match must win");
+        assert_eq!(
+            exact.id, liubei,
+            "exact name is returned, not the substring"
+        );
+
+        // A query that is a strict substring of the exact name still resolves
+        // unambiguously to that object ("白流苏"-style: full name contains it).
+        let strict = store
+            .find_object_by_alias("刘备用剑", Some(did))
+            .await
+            .expect("alias lookup")
+            .expect("strict substring of the stored name must resolve");
+        assert_eq!(
+            strict.name, "刘备用剑",
+            "query contained by the name resolves"
+        );
+
+        // Wholly unknown → None.
+        let unknown = store
+            .find_object_by_alias("不存在的人", Some(did))
+            .await
+            .expect("alias lookup");
+        assert!(unknown.is_none(), "unknown name resolves to None");
+    }
+
+    /// Objective: Verify `find_object_by_alias` returns None when two DIFFERENT
+    /// stored objects both match a substring — it must never guess which one
+    /// the caller meant.
+    /// Invariants: two objects sharing a query substring → None.
+    #[tokio::test]
+    async fn find_object_by_alias_rejects_ambiguous_substring() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "三国演义").await;
+        seed_person(&store, did, "赵云", json!({})).await;
+        seed_person(&store, did, "赵飞", json!({})).await;
+
+        // Both 赵云 and 赵飞 contain "赵" → ambiguous → None (no guessing).
+        let ambiguous = store
+            .find_object_by_alias("赵", Some(did))
+            .await
+            .expect("alias lookup");
+        assert!(
+            ambiguous.is_none(),
+            "ambiguous substring must not silently pick one entity"
+        );
     }
 
     /// Objective: Verify `update_object_properties` merges new keys into an

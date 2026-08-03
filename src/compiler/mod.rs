@@ -23,6 +23,7 @@ pub mod pipeline;
 pub mod profile;
 pub mod resolver;
 pub mod sentence;
+pub mod story_events;
 pub mod timeline;
 pub mod writer;
 

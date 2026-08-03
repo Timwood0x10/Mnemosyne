@@ -105,7 +105,9 @@ pub async fn extract_key_events(
         },
         None => None,
     };
-    let Some(object) = store.find_object_by_name(name, doc_id).await? else {
+    // Resolve through the alias-aware lookup so a corpus-discovered given name
+    // ("流苏") is reachable by the full name ("白流苏") and vice versa.
+    let Some(object) = store.find_object_by_alias(name, doc_id).await? else {
         return Ok(KeyEventsResult {
             entity: name.to_string(),
             source: doc_title.unwrap_or("").to_string(),

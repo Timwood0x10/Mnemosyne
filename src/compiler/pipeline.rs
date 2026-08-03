@@ -227,6 +227,7 @@ pub async fn compile_source(
         //     skipped (no duplication).
         if !(doc.doc_type.contains("dialog") || doc.doc_type.contains("conversation")) {
             let corpus = CorpusEntityProvider::from_text(&doc.title, &doc.text, 1);
+            let mut cast: Vec<String> = vec![doc.title.clone()];
             for entry in corpus.entries() {
                 if entry.canonical_name == doc.title {
                     continue;
@@ -236,6 +237,7 @@ pub async fn compile_source(
                     .await?
                     .is_some()
                 {
+                    cast.push(entry.canonical_name.clone());
                     continue;
                 }
                 store
@@ -261,6 +263,17 @@ pub async fn compile_source(
                     .upsert_world_entity(&entry.canonical_name, "person", 0.6)
                     .await?;
                 stats.objects += 1;
+                cast.push(entry.canonical_name.clone());
+            }
+            // ③e Story-event extraction: turn narrative sentences into Event
+            //     objects + `participated_in` edges so `person_key_events` has a
+            //     real trajectory to distill (never invoked for dialog).
+            if !cast.is_empty() {
+                let events = crate::compiler::story_events::materialize_story_events(
+                    store, doc_id, chapter_id, &cast, &doc.text,
+                )
+                .await?;
+                stats.edges += events;
             }
         }
 
