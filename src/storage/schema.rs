@@ -2,13 +2,18 @@
 //!
 //! ## Core tables (V7 Entity-centric model)
 //!
+//! V7 tables use the `world_` prefix to stay isolated from the fact-store's
+//! bare `entities` table (which carries `tenant_id`/`external_key` columns and
+//! lives in the same database file). Prefixing avoids a silent column/table
+//! collision so the world model and the fact store never interfere.
+//!
 //! | Table | Purpose |
 //! |-------|---------|
-//! | `entities` | World entity nodes (person/place/org) |
-//! | `entity_profiles` | Entity attributes (字, 籍贯, 外貌, ...) |
+//! | `world_entities` | World entity nodes (person/place/org) |
+//! | `world_entity_profiles` | Entity attributes (字, 籍贯, 外貌, ...) |
 //! | `events` | World state changes |
 //! | `event_participants` | Who participated in each event |
-//! | `relations` | Long-term entity relationships |
+//! | `world_relations` | Long-term entity relationships |
 //! | `timeline` | Chronological event index |
 //!
 //! ## Legacy tables (V6 general model, retained for backward compatibility)
@@ -25,8 +30,10 @@
 /// DDL for the V7 entity-centric world model — executed idempotently by
 /// [`crate::knowledge::SQLiteKnowledgeStore::init`].
 pub const WORLD_SCHEMA: &str = "
--- ── entities ────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS entities (
+-- ── world_entities ─────────────────────────────────────────
+-- Named `world_` to avoid clashing with the fact-store's bare `entities`
+-- table (tenant_id/external_key columns) which shares this database file.
+CREATE TABLE IF NOT EXISTS world_entities (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL,
     entity_type TEXT NOT NULL DEFAULT 'person',      -- person / place / org / concept
@@ -35,32 +42,32 @@ CREATE TABLE IF NOT EXISTS entities (
     created_at  INTEGER DEFAULT (strftime('%s','localtime')),
     updated_at  INTEGER DEFAULT (strftime('%s','localtime'))
 );
-CREATE INDEX IF NOT EXISTS idx_entities_name ON entities(name);
-CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
+CREATE INDEX IF NOT EXISTS idx_world_entities_name ON world_entities(name);
+CREATE INDEX IF NOT EXISTS idx_world_entities_type ON world_entities(entity_type);
 
--- ── entity_aliases (V7 new) ──────────────────────────────
-CREATE TABLE IF NOT EXISTS entity_aliases (
+-- ── world_entity_aliases ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS world_entity_aliases (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    entity_id   INTEGER NOT NULL REFERENCES world_entities(id),
     alias       TEXT NOT NULL,                       -- courtesy_name / title / nickname
     alias_type  TEXT NOT NULL DEFAULT 'known_as',    -- courtesy / title / name / nickname
     confidence  REAL DEFAULT 1.0,
     UNIQUE(entity_id, alias)
 );
-CREATE INDEX IF NOT EXISTS idx_aliases_entity ON entity_aliases(entity_id);
-CREATE INDEX IF NOT EXISTS idx_aliases_alias ON entity_aliases(alias);
+CREATE INDEX IF NOT EXISTS idx_world_aliases_entity ON world_entity_aliases(entity_id);
+CREATE INDEX IF NOT EXISTS idx_world_aliases_alias ON world_entity_aliases(alias);
 
--- ── entity_profiles ─────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS entity_profiles (
+-- ── world_entity_profiles ─────────────────────────────────
+CREATE TABLE IF NOT EXISTS world_entity_profiles (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    entity_id   INTEGER NOT NULL REFERENCES world_entities(id),
     key         TEXT NOT NULL,                   -- courtesy_name / birthplace / appearance / occupation
     value       TEXT NOT NULL,
     confidence  REAL DEFAULT 1.0,
     evidence_id INTEGER REFERENCES evidence(id),
     UNIQUE(entity_id, key)
 );
-CREATE INDEX IF NOT EXISTS idx_profiles_entity ON entity_profiles(entity_id);
+CREATE INDEX IF NOT EXISTS idx_world_profiles_entity ON world_entity_profiles(entity_id);
 
 -- ── events ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS events (
@@ -79,7 +86,7 @@ CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 CREATE TABLE IF NOT EXISTS event_participants (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id    INTEGER NOT NULL REFERENCES events(id),
-    entity_id   INTEGER NOT NULL REFERENCES entities(id),
+    entity_id   INTEGER NOT NULL REFERENCES world_entities(id),
     role        TEXT DEFAULT 'participant',      -- protagonist / antagonist / witness
     side        TEXT,                            -- faction / alignment
     UNIQUE(event_id, entity_id)
@@ -87,11 +94,11 @@ CREATE TABLE IF NOT EXISTS event_participants (
 CREATE INDEX IF NOT EXISTS idx_participants_event ON event_participants(event_id);
 CREATE INDEX IF NOT EXISTS idx_participants_entity ON event_participants(entity_id);
 
--- ── relations ───────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS relations (
+-- ── world_relations ─────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS world_relations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    source_id       INTEGER NOT NULL REFERENCES entities(id),
-    target_id       INTEGER NOT NULL REFERENCES entities(id),
+    source_id       INTEGER NOT NULL REFERENCES world_entities(id),
+    target_id       INTEGER NOT NULL REFERENCES world_entities(id),
     relation_type   TEXT NOT NULL,               -- brother / enemy / teacher / spouse
     valid_from      INTEGER,                     -- event id where relation started
     valid_to        INTEGER,                     -- event id where relation ended (NULL=ongoing)
@@ -99,8 +106,8 @@ CREATE TABLE IF NOT EXISTS relations (
     created_at      INTEGER DEFAULT (strftime('%s','localtime')),
     UNIQUE(source_id, target_id, relation_type)
 );
-CREATE INDEX IF NOT EXISTS idx_relations_source ON relations(source_id);
-CREATE INDEX IF NOT EXISTS idx_relations_target ON relations(target_id);
+CREATE INDEX IF NOT EXISTS idx_world_relations_source ON world_relations(source_id);
+CREATE INDEX IF NOT EXISTS idx_world_relations_target ON world_relations(target_id);
 ";
 
 /// Legacy V6 DDL (retained for backward compatibility).

@@ -23,6 +23,7 @@ use lore_scope::embed::{EmbeddingService, NullEmbedder};
 use lore_scope::error::Error;
 use lore_scope::fact_store::SqliteFactStore;
 use lore_scope::ingest::IngestionPipeline;
+use lore_scope::knowledge::store::KnowledgeStore;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
@@ -30,7 +31,10 @@ use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definiti
 use lore_scope::mcp::portrait_tool::{PortraitTool, portrait_extract_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_generalize_tool;
+use lore_scope::mcp::register_graph_search_tool;
 use lore_scope::mcp::register_knowledge_tools;
+use lore_scope::mcp::register_memory_transfer_tools;
+use lore_scope::mcp::register_trace_path_tool;
 use lore_scope::mcp::serve_http_addr;
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
@@ -169,9 +173,14 @@ impl ToolHandler for MemoryFeedbackTool {
     }
 }
 
-/// Tool: aggregate stats for a tenant (`memory_stats`).
+/// Tool: aggregate memory health for a tenant (`memory_stats`).
+///
+/// Reports both the distilled-memory store (by type) and the knowledge-graph
+/// health (documents / entities / relations / evidence), so an agent can
+/// gauge at a glance how complete the persona's memory is.
 struct MemoryStatsTool {
     store: Arc<dyn ExperienceRepository>,
+    kgraph: Arc<SQLiteKnowledgeStore>,
 }
 
 #[async_trait::async_trait]
@@ -187,9 +196,16 @@ impl ToolHandler for MemoryStatsTool {
         for (mt, count) in counts {
             by_type.insert(mt.as_str().to_string(), Value::from(count));
         }
+        let graph = self.kgraph.graph_counts().await?;
         let payload = serde_json::json!({
             "total_memories": total,
             "by_type": by_type,
+            "knowledge_graph": {
+                "documents": graph.documents,
+                "entities": graph.objects,
+                "relations": graph.edges,
+                "evidence": graph.evidence,
+            },
         });
         Ok(ToolCallResult::text(payload.to_string()))
     }
@@ -679,25 +695,6 @@ async fn build_server(
         )
         .await;
 
-    // memory_stats
-    builder = builder
-        .tool(
-            ToolDefinition {
-                name: "memory_stats".into(),
-                description: "Aggregate memory stats for a tenant".into(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "tenant_id": {"type": "string", "default": "default"}
-                    }
-                }),
-            },
-            Arc::new(MemoryStatsTool {
-                store: store.clone(),
-            }),
-        )
-        .await;
-
     // memory_compile
     let compile_fact_store =
         Arc::new(SqliteFactStore::open(&cfg.db_path).context("open fact store for compile tool")?);
@@ -736,7 +733,7 @@ async fn build_server(
         .tool(
             ToolDefinition {
                 name: "character_search".into(),
-                description: "Search characters by name/attribute/novel in the knowledge graph".into(),
+                description: "[LEGACY novel-domain tool] Search characters in the classical-novel graph. Prefer the general `search_graph` tool, which searches all entity types across the unified graph.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -761,7 +758,7 @@ async fn build_server(
         .tool(
             ToolDefinition {
                 name: "character_network".into(),
-                description: "Traverse the character knowledge graph: character → events → related characters → their events (BFS up to depth)".into(),
+                description: "[LEGACY novel-domain tool] Traverse the classical-novel character graph via BFS. Prefer the general `relation_graph` tool for the unified graph.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -784,7 +781,7 @@ async fn build_server(
         .tool(
             ToolDefinition {
                 name: "character_ingest".into(),
-                description: "Distill character knowledge graph from classical novel corpus text files. Extracts characters, events, descriptions, and relationships. Heavy operation (30-60s).".into(),
+                description: "[LEGACY novel-domain tool] Distill the classical-novel character graph from corpus text files. Prefer `generalize_compile`, which ingests arbitrary data (dialog or prose) into the unified graph.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -803,7 +800,7 @@ async fn build_server(
         .tool(
             ToolDefinition {
                 name: "character_graph".into(),
-                description: "Export the 3D character relationship graph as structured JSON: nodes (characters with appearance/personality/action dimensions) + edges (relations with weights) for visualization".into(),
+                description: "[LEGACY novel-domain tool] Export the classical-novel character relationship graph as structured JSON for visualization. For the unified graph use `relation_graph` or `search_graph`.".into(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -832,6 +829,28 @@ async fn build_server(
             .await
             .context("open knowledge store")?,
     );
+    // memory_stats — memory health for a tenant: distilled memories by type
+    // plus knowledge-graph health (documents / entities / relations /
+    // evidence), so an agent can gauge persona-memory completeness at a
+    // glance. Registered here (after kstore) because it reports both stores.
+    builder = builder
+        .tool(
+            ToolDefinition {
+                name: "memory_stats".into(),
+                description: "Aggregate memory health for a tenant: distilled memories by type plus knowledge-graph counts (documents/entities/relations/evidence)".into(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "tenant_id": {"type": "string", "default": "default"}
+                    }
+                }),
+            },
+            Arc::new(MemoryStatsTool {
+                store: store.clone(),
+                kgraph: kstore.clone(),
+            }),
+        )
+        .await;
     let fact_store_knowledge = Arc::new(
         SqliteFactStore::open(&cfg.db_path).context("open fact store for knowledge tools")?,
     );
@@ -875,6 +894,27 @@ async fn build_server(
     // external data can be ingested and later retrieved to sustain the AI
     // persona.
     builder = register_generalize_tool(builder, kstore.clone()).await;
+
+    // ── Memory transfer tools (memory migration) ──────────────────────
+    //
+    // `memory_export` / `memory_import` — serialize the whole knowledge graph
+    // into a portable JSON snapshot and replay it back, so a persona's memory
+    // can be backed up, moved between machines, or shared and restored intact
+    // (the "memory is never lost" guarantee made concrete).
+    builder = register_memory_transfer_tools(builder, kstore.clone()).await;
+
+    // ── Structured graph search ──────────────────────────────────────
+    //
+    // `search_graph` — one structured query (by name/type/attribute) returns
+    // matched entities with their document, confidence, and relation count,
+    // replacing many single-entity lookups for the agent.
+    builder = register_graph_search_tool(builder, kstore.clone()).await;
+
+    // ── Relationship-path tracing ──────────────────────────────────
+    //
+    // `trace_path` — shortest hop-by-hop path between two entities (BFS over
+    // graph edges), answering "how are these two connected?" in one call.
+    builder = register_trace_path_tool(builder, kstore.clone()).await;
 
     // portrait_extract — deterministic resume/person-document portrait via
     // rules (no LLM). Stateless; no store dependency.

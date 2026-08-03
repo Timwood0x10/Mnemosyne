@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result, StorageError};
@@ -21,8 +22,8 @@ use crate::storage::{KNOWLEDGE_SCHEMA, WORLD_SCHEMA};
 
 use super::{
     Chapter, CompilerRun, Document, EntityProfileEntry, Evidence, EvidenceHit, EvidenceSourceType,
-    GraphEdge, GraphNode, InspectEntityResult, KnowledgeEdge, KnowledgeObject, Mention, ObjectType,
-    Origin, RelationGraphResult, TimelineEntry,
+    GraphEdge, GraphNode, InspectEntityResult, KnowledgeEdge, KnowledgeEvidenceLink,
+    KnowledgeObject, Mention, ObjectType, Origin, RelationGraphResult, TimelineEntry,
 };
 
 /// Convert a rusqlite row into a [`Document`].
@@ -136,6 +137,42 @@ fn json_to_string(v: &serde_json::Value) -> String {
     }
 }
 
+/// Aggregate counts over the knowledge graph, for memory-health reporting.
+#[derive(Debug, Clone, Serialize)]
+pub struct GraphCounts {
+    pub documents: usize,
+    pub objects: usize,
+    pub edges: usize,
+    pub evidence: usize,
+}
+
+/// A V7 world-model entity row (`world_entities`).
+#[derive(Debug, Clone)]
+pub struct WorldEntity {
+    pub id: i64,
+    pub name: String,
+    pub entity_type: String,
+    pub importance: f64,
+}
+
+/// A V7 world-model profile row (`world_entity_profiles`).
+#[derive(Debug, Clone)]
+pub struct WorldProfile {
+    pub entity_id: i64,
+    pub key: String,
+    pub value: String,
+    pub confidence: f64,
+}
+
+/// A V7 world-model relation row (`world_relations`).
+#[derive(Debug, Clone)]
+pub struct WorldRelation {
+    pub source_id: i64,
+    pub target_id: i64,
+    pub relation_type: String,
+    pub confidence: f64,
+}
+
 /// Backend-agnostic knowledge store contract.
 ///
 /// All create methods return the new row's `id` so callers can chain inserts
@@ -199,6 +236,68 @@ pub trait KnowledgeStore: Send + Sync {
     async fn create_run(&self, r: &CompilerRun) -> Result<i64>;
     async fn finish_run(&self, id: i64, status: &str, statistics: &serde_json::Value)
     -> Result<()>;
+
+    // ── traversal (memory export/import) ──────────────────────
+    /// List every document (used to snapshot the whole graph for export).
+    async fn list_documents(&self) -> Result<Vec<Document>>;
+    /// List all objects belonging to a document.
+    async fn list_objects_by_document(&self, doc_id: i64) -> Result<Vec<KnowledgeObject>>;
+    /// List all edges belonging to a document (edges whose source object
+    /// lives in that document).
+    async fn list_edges_by_document(&self, doc_id: i64) -> Result<Vec<KnowledgeEdge>>;
+    /// List all evidence rows belonging to a document.
+    async fn list_evidence_by_document(&self, doc_id: i64) -> Result<Vec<Evidence>>;
+    /// List every (source_type, source_id, evidence_id) link, for re-linking
+    /// evidence during import.
+    async fn list_evidence_links(&self) -> Result<Vec<KnowledgeEvidenceLink>>;
+    /// Structured object search: filter by optional name substring, object
+    /// type, property substring, and document scope. An absent filter is a
+    /// wildcard; results are ordered by id (stable) and capped at `limit`.
+    async fn search_objects(
+        &self,
+        name_contains: Option<&str>,
+        object_type: Option<&str>,
+        property_contains: Option<&str>,
+        doc_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeObject>>;
+    /// Aggregate row counts across the knowledge graph, for memory-health
+    /// reporting (one lightweight query per table).
+    async fn graph_counts(&self) -> Result<GraphCounts>;
+    /// Find a V7 world entity by exact name.
+    async fn find_world_entity(&self, name: &str) -> Result<Option<WorldEntity>>;
+    /// Insert a V7 world entity, or return the existing id when a same-named
+    /// entity already exists (upsert by `name`). Returns the entity id.
+    async fn upsert_world_entity(
+        &self,
+        name: &str,
+        entity_type: &str,
+        importance: f64,
+    ) -> Result<i64>;
+    /// Insert a V7 entity profile key/value, or update the value when the key
+    /// already exists for this entity (upsert by `(entity_id, key)`).
+    async fn upsert_world_profile(
+        &self,
+        entity_id: i64,
+        key: &str,
+        value: &str,
+        confidence: f64,
+    ) -> Result<()>;
+    /// Insert a V7 relation, deduplicating by `(source_id, target_id,
+    /// relation_type)` — re-inserting the same edge is a no-op.
+    async fn upsert_world_relation(
+        &self,
+        source_id: i64,
+        target_id: i64,
+        relation_type: &str,
+        confidence: f64,
+    ) -> Result<()>;
+    /// List all V7 world entities (id, name, type, importance), for export.
+    async fn list_world_entities(&self) -> Result<Vec<WorldEntity>>;
+    /// List all V7 entity profiles, for export.
+    async fn list_world_profiles(&self) -> Result<Vec<WorldProfile>>;
+    /// List all V7 world relations, for export.
+    async fn list_world_relations(&self) -> Result<Vec<WorldRelation>>;
 
     // ── high-level queries (dev_guide §5) ─────────────────────
     async fn inspect_entity(
@@ -611,6 +710,269 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         let mut stmt =
             conn.prepare("SELECT * FROM mentions WHERE object_id = ?1 ORDER BY chapter_id ASC")?;
         let rows = stmt.query_map(params![object_id], row_to_mention)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_documents(&self) -> Result<Vec<Document>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT * FROM documents ORDER BY id ASC")?;
+        let rows = stmt.query_map([], row_to_document)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_objects_by_document(&self, doc_id: i64) -> Result<Vec<KnowledgeObject>> {
+        let conn = self.conn.lock().await;
+        let mut stmt =
+            conn.prepare("SELECT * FROM knowledge_objects WHERE doc_id = ?1 ORDER BY id ASC")?;
+        let rows = stmt.query_map(params![doc_id], row_to_object)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_edges_by_document(&self, doc_id: i64) -> Result<Vec<KnowledgeEdge>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT ke.* FROM knowledge_edges ke \
+             JOIN knowledge_objects src ON ke.source_id = src.id \
+             WHERE src.doc_id = ?1 ORDER BY ke.id ASC",
+        )?;
+        let rows = stmt.query_map(params![doc_id], row_to_edge)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_evidence_by_document(&self, doc_id: i64) -> Result<Vec<Evidence>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare("SELECT * FROM evidence WHERE doc_id = ?1 ORDER BY id ASC")?;
+        let rows = stmt.query_map(params![doc_id], row_to_evidence)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_evidence_links(&self) -> Result<Vec<KnowledgeEvidenceLink>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, source_type, source_id, evidence_id FROM knowledge_evidence ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(KnowledgeEvidenceLink {
+                id: row.get("id")?,
+                source_type: std::str::FromStr::from_str(&row.get::<_, String>("source_type")?)
+                    .unwrap_or(EvidenceSourceType::Object),
+                source_id: row.get("source_id")?,
+                evidence_id: row.get("evidence_id")?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn search_objects(
+        &self,
+        name_contains: Option<&str>,
+        object_type: Option<&str>,
+        property_contains: Option<&str>,
+        doc_id: Option<i64>,
+        limit: usize,
+    ) -> Result<Vec<KnowledgeObject>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT * FROM knowledge_objects \
+             WHERE (?1 IS NULL OR name LIKE '%' || ?1 || '%') \
+               AND (?2 IS NULL OR object_type = ?2) \
+               AND (?3 IS NULL OR properties LIKE '%' || ?3 || '%') \
+               AND (?4 IS NULL OR doc_id = ?4) \
+             ORDER BY id ASC LIMIT ?5",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                name_contains,
+                object_type,
+                property_contains,
+                doc_id,
+                limit as i64,
+            ],
+            row_to_object,
+        )?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn graph_counts(&self) -> Result<GraphCounts> {
+        let conn = self.conn.lock().await;
+        let documents =
+            conn.query_row("SELECT COUNT(*) FROM documents", [], |r| r.get::<_, i64>(0))?;
+        let objects = conn.query_row("SELECT COUNT(*) FROM knowledge_objects", [], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        let edges = conn.query_row("SELECT COUNT(*) FROM knowledge_edges", [], |r| {
+            r.get::<_, i64>(0)
+        })?;
+        let evidence =
+            conn.query_row("SELECT COUNT(*) FROM evidence", [], |r| r.get::<_, i64>(0))?;
+        Ok(GraphCounts {
+            documents: documents as usize,
+            objects: objects as usize,
+            edges: edges as usize,
+            evidence: evidence as usize,
+        })
+    }
+
+    async fn find_world_entity(&self, name: &str) -> Result<Option<WorldEntity>> {
+        let conn = self.conn.lock().await;
+        let row = conn
+            .query_row(
+                "SELECT id, name, entity_type, importance FROM world_entities WHERE name = ?1",
+                params![name],
+                |r| {
+                    Ok(WorldEntity {
+                        id: r.get(0)?,
+                        name: r.get(1)?,
+                        entity_type: r.get(2)?,
+                        importance: r.get(3)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    async fn upsert_world_entity(
+        &self,
+        name: &str,
+        entity_type: &str,
+        importance: f64,
+    ) -> Result<i64> {
+        let conn = self.conn.lock().await;
+        if let Some(existing) = conn
+            .query_row(
+                "SELECT id FROM world_entities WHERE name = ?1",
+                params![name],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?
+        {
+            return Ok(existing);
+        }
+        conn.execute(
+            "INSERT INTO world_entities (name, entity_type, importance) VALUES (?1, ?2, ?3)",
+            params![name, entity_type, importance],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    async fn upsert_world_profile(
+        &self,
+        entity_id: i64,
+        key: &str,
+        value: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO world_entity_profiles (entity_id, key, value, confidence) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(entity_id, key) DO UPDATE SET value = excluded.value, \
+                 confidence = excluded.confidence",
+            params![entity_id, key, value, confidence],
+        )?;
+        Ok(())
+    }
+
+    async fn upsert_world_relation(
+        &self,
+        source_id: i64,
+        target_id: i64,
+        relation_type: &str,
+        confidence: f64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute(
+            "INSERT INTO world_relations (source_id, target_id, relation_type, confidence) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET \
+                 confidence = excluded.confidence",
+            params![source_id, target_id, relation_type, confidence],
+        )?;
+        Ok(())
+    }
+
+    async fn list_world_entities(&self) -> Result<Vec<WorldEntity>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, entity_type, importance FROM world_entities ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorldEntity {
+                id: r.get("id")?,
+                name: r.get("name")?,
+                entity_type: r.get("entity_type")?,
+                importance: r.get("importance")?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_world_profiles(&self) -> Result<Vec<WorldProfile>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT entity_id, key, value, confidence FROM world_entity_profiles ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorldProfile {
+                entity_id: r.get("entity_id")?,
+                key: r.get("key")?,
+                value: r.get("value")?,
+                confidence: r.get("confidence")?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn list_world_relations(&self) -> Result<Vec<WorldRelation>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT source_id, target_id, relation_type, confidence FROM world_relations ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(WorldRelation {
+                source_id: r.get("source_id")?,
+                target_id: r.get("target_id")?,
+                relation_type: r.get("relation_type")?,
+                confidence: r.get("confidence")?,
+            })
+        })?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1104,14 +1466,21 @@ mod tests {
 
     /// Objective: Verify `WORLD_SCHEMA` (V7 entity-centric tables) is now
     /// executed by `init` — the dead-code wiring fix for C10.
-    /// Invariants: after `open_in_memory`, the V7 tables `entities`,
-    /// `entity_aliases`, `entity_profiles`, and `events` exist (a fresh
-    /// connection that never executed WORLD_SCHEMA would fail this query).
+    /// Invariants: after `open_in_memory`, the V7 `world_`-prefixed tables and
+    /// `events` exist (a fresh connection that never executed WORLD_SCHEMA
+    /// would fail this query). The prefix isolates the world model from the
+    /// fact-store's bare `entities` table sharing the same database file.
     #[tokio::test]
     async fn world_schema_tables_are_created() {
         let store = fresh().await;
         let conn = store.conn.lock().await;
-        for table in ["entities", "entity_aliases", "entity_profiles", "events"] {
+        for table in [
+            "world_entities",
+            "world_entity_aliases",
+            "world_entity_profiles",
+            "world_relations",
+            "events",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -1260,6 +1629,120 @@ mod tests {
             .await
             .expect("update");
         assert_eq!(n, 0, "unknown id → zero rows updated");
+    }
+
+    /// Objective: Verify `search_objects` filters by type, name substring,
+    /// property value, and document scope, and honors the limit.
+    /// Invariants: type=person → only persons; query=张 → 张三;
+    /// property=围棋 → 张三; doc-scoped filters; limit caps results.
+    #[tokio::test]
+    async fn search_objects_filters_and_limits() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "人物志").await;
+        let p1 = seed_person(&store, did, "张三", json!({"偏好": "围棋"})).await;
+        let p2 = seed_person(&store, did, "李四", json!({"偏好": "象棋"})).await;
+        // A place-typed object, so type filtering is exercised meaningfully.
+        store
+            .create_object(&KnowledgeObject {
+                id: 0,
+                doc_id: did,
+                object_type: ObjectType::Place,
+                name: "江南".into(),
+                properties: json!({}),
+                confidence: 0.7,
+                created_at: 0,
+            })
+            .await
+            .expect("create place");
+
+        // By type: only the two persons.
+        let persons = store
+            .search_objects(None, Some("person"), None, None, 20)
+            .await
+            .expect("search by type");
+        let person_names: Vec<&str> = persons.iter().map(|o| o.name.as_str()).collect();
+        assert!(person_names.contains(&"张三") && person_names.contains(&"李四"));
+        assert!(!person_names.contains(&"江南"), "place excluded");
+
+        // By name substring.
+        let zhang = store
+            .search_objects(Some("张"), None, None, None, 20)
+            .await
+            .expect("search by name");
+        assert_eq!(zhang.len(), 1, "one name match");
+        assert_eq!(zhang[0].name, "张三");
+
+        // By property value.
+        let go = store
+            .search_objects(None, None, Some("围棋"), None, 20)
+            .await
+            .expect("search by property");
+        assert_eq!(go.len(), 1, "one property match");
+        assert_eq!(go[0].id, p1, "property match is the right object");
+
+        // By document scope.
+        let scoped = store
+            .search_objects(None, None, None, Some(did), 20)
+            .await
+            .expect("search by doc");
+        assert_eq!(scoped.len(), 3, "all three objects in the document");
+
+        // Unknown doc scope → empty.
+        let empty = store
+            .search_objects(None, None, None, Some(999_999), 20)
+            .await
+            .expect("search unknown doc");
+        assert!(empty.is_empty(), "unknown doc → no results");
+
+        // Limit.
+        let limited = store
+            .search_objects(None, None, None, None, 1)
+            .await
+            .expect("search with limit");
+        assert_eq!(limited.len(), 1, "limit honored");
+
+        // No filters → everything, ordered by id (p2 present).
+        let all = store
+            .search_objects(None, None, None, None, 20)
+            .await
+            .expect("search all");
+        assert!(all.iter().any(|o| o.id == p2), "unfiltered returns all");
+    }
+
+    /// Objective: Verify `graph_counts` reports accurate row counts.
+    /// Invariants: after seeding one doc + three objects, counts match;
+    /// an empty fresh store reports all-zero.
+    #[tokio::test]
+    async fn graph_counts_matches_seeded_rows() {
+        let empty = fresh().await;
+        let e0 = empty.graph_counts().await.expect("empty counts");
+        assert_eq!(e0.documents, 0, "no documents yet");
+        assert_eq!(e0.objects, 0, "no objects yet");
+        assert_eq!(e0.edges, 0, "no edges yet");
+        assert_eq!(e0.evidence, 0, "no evidence yet");
+
+        let store = fresh().await;
+        let did = seed_doc(&store, "人物志").await;
+        seed_person(&store, did, "张三", json!({"偏好": "围棋"})).await;
+        seed_person(&store, did, "李四", json!({"偏好": "象棋"})).await;
+        store
+            .create_object(&KnowledgeObject {
+                id: 0,
+                doc_id: did,
+                object_type: ObjectType::Place,
+                name: "江南".into(),
+                properties: json!({}),
+                confidence: 0.7,
+                created_at: 0,
+            })
+            .await
+            .expect("create place");
+
+        let counts = store.graph_counts().await.expect("counts");
+        assert_eq!(counts.documents, 1, "one document");
+        assert_eq!(counts.objects, 3, "three objects");
+        assert_eq!(counts.edges, 0, "no edges seeded");
+        assert_eq!(counts.evidence, 0, "no evidence seeded");
     }
 
     /// Objective: Verify edge creation + `get_edges_touching` returns both

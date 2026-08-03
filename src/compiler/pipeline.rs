@@ -205,6 +205,18 @@ pub async fn compile_source(
             }
         };
 
+        // ③c Sync the entity into the V7 world model (`world_entities` +
+        //     `world_entity_profiles`), so the general pipeline also lands in
+        //     the entity-centric tables that were previously left empty
+        //     ("V7 integration"). Attributes become key/value profiles;
+        //     upsert is idempotent by entity name and by (entity_id, key).
+        let world_entity_id = store.upsert_world_entity(&doc.title, "person", 0.5).await?;
+        for (key, value) in &attributes {
+            store
+                .upsert_world_profile(world_entity_id, key, value, 0.8)
+                .await?;
+        }
+
         // ④ Persist evidence (original sentences, for traceability).
         for text in &evidence_texts {
             let ev = Evidence {
@@ -382,5 +394,33 @@ mod tests {
             .and_then(|r| r.as_array())
             .expect("relations array present");
         assert!(!rels.is_empty(), "relation sentences recorded on entity");
+    }
+
+    /// Objective: Verify the general pipeline also lands in the V7 world model
+    /// (`world_entities` + `world_entity_profiles`), which were previously
+    /// left empty ("V7 integration").
+    /// Invariants: after compile, a `world_entities` row exists named after
+    /// the document, with at least one profile when hints were extracted.
+    #[tokio::test]
+    async fn compile_writes_v7_world_entities() {
+        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
+        let source = DialogSource::new(
+            "session-v7",
+            "export.json",
+            vec![Message::new("user", "我喜欢简洁架构，目标是长期稳定。")],
+        );
+
+        let stats = compile_source(&source, &profile(), &store, "t1")
+            .await
+            .expect("compile");
+        assert_eq!(stats.documents, 1, "one document compiled");
+
+        let world = store
+            .find_world_entity("session-v7")
+            .await
+            .expect("query world entity")
+            .expect("world_entities row must be written by compile");
+        assert_eq!(world.entity_type, "person", "default entity type");
+        assert_eq!(world.name, "session-v7", "entity name matches document");
     }
 }

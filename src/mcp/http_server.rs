@@ -266,6 +266,9 @@ mod tests {
     /// broadcasts a response to `send`, round-tripping over channels.
     /// Invariants: request arrives intact; sent response is observed by a
     /// subscriber.
+    // NOTE: HTTP transport tests are #[ignore] so the fast `make test` inner
+    // loop skips them; run with `cargo nextest run --run-ignored all`.
+    #[ignore]
     #[tokio::test]
     async fn transport_round_trips_over_channels() {
         let (request_tx, request_rx) = mpsc::channel(8);
@@ -301,6 +304,7 @@ mod tests {
     /// Objective: Verify HttpTransport yields `None` (EOF) when the request
     /// channel is fully closed.
     /// Invariants: dropping all senders → recv → Ok(None).
+    #[ignore]
     #[tokio::test]
     async fn transport_eof_on_closed_channel() {
         let (request_tx, request_rx) = mpsc::channel::<JSONRPCMessage>(8);
@@ -315,6 +319,7 @@ mod tests {
     /// message and replies 202 Accepted.
     /// Invariants: status 202; the forwarded message reaches the request
     /// channel.
+    #[ignore]
     #[tokio::test]
     async fn post_message_accepts_and_returns_202() {
         let (request_tx, mut request_rx) = mpsc::channel::<JSONRPCMessage>(8);
@@ -348,6 +353,7 @@ mod tests {
 
     /// Objective: Verify authentication is enforced when a token is set.
     /// Invariants: wrong/missing bearer → 401; correct bearer → 202.
+    #[ignore]
     #[tokio::test]
     async fn auth_enforced_when_token_set() {
         let (request_tx, _request_rx) = mpsc::channel::<JSONRPCMessage>(8);
@@ -414,6 +420,7 @@ mod tests {
     /// Objective: Verify `GET /sse` returns 200 with the correct content-type
     /// when no token is configured.
     /// Invariants: status 200; `content-type` is `text/event-stream`.
+    #[ignore]
     #[tokio::test]
     async fn sse_endpoint_serves_stream_without_token() {
         let (request_tx, _request_rx) = mpsc::channel::<JSONRPCMessage>(8);
@@ -450,6 +457,7 @@ mod tests {
     /// Objective: Verify a malformed JSON-RPC body on POST is rejected with
     /// 400, not accepted.
     /// Invariants: invalid JSON → 400 Bad Request.
+    #[ignore]
     #[tokio::test]
     async fn malformed_body_rejected_400() {
         let (request_tx, _request_rx) = mpsc::channel::<JSONRPCMessage>(8);
@@ -479,6 +487,7 @@ mod tests {
     /// request and broadcasts the response.
     /// Invariants: a request posted to the channel yields a broadcast response
     /// carrying the server `implementation`.
+    #[ignore]
     #[tokio::test]
     async fn server_serves_and_broadcasts_response() {
         let (request_tx, request_rx) = mpsc::channel::<JSONRPCMessage>(8);

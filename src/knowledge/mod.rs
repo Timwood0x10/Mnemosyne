@@ -26,11 +26,13 @@ pub mod entity_linker;
 pub mod external;
 pub mod format;
 pub mod key_events;
+pub mod memory_export;
 pub mod migration;
 pub mod pdf;
 pub mod portrait;
 pub mod store;
 
+pub use memory_export::{ExportBundle, ImportStats, export_store, import_bundle};
 pub use migration::{MigrationStats, Migrator};
 pub use store::{KnowledgeStore, SQLiteKnowledgeStore};
 
