@@ -22,6 +22,7 @@
 //!   or transitioning facts and [`ReconcileDecision::Noop`] only for exact
 //!   semantic duplicates.
 
+pub mod check;
 pub mod embedding_extractor;
 pub mod keyword_extractor;
 pub mod prototype;
@@ -31,10 +32,12 @@ pub mod speaker_attribution;
 #[cfg(test)]
 mod integration_tests;
 
+pub use check::{PersonaCheckEngine, PersonaCheckResult, filter_persona_facts, is_persona_fact};
 pub use embedding_extractor::EmbeddingPersonaExtractor;
 pub use keyword_extractor::KeywordPersonaExtractor;
 pub use prototype::{
-    PersonaPrototypeConfig, PersonaPrototypeEntry, PersonaPrototypes, PrototypeVectorCache,
+    PersonaPrototypeConfig, PersonaPrototypeEntry, PersonaPrototypes, PersonaThresholds,
+    PrototypeVectorCache, load_prototype_config,
 };
 pub use reconciler::{
     ReconcileDecision, ReconcileOutcome, Reconciler, ReconcilerConfig, TransitionMeta,

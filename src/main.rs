@@ -28,6 +28,7 @@ use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
+use lore_scope::mcp::persona_check_tool::{PersonaCheckTool, persona_check_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_generalize_tool;
 use lore_scope::mcp::register_graph_search_tool;
@@ -738,6 +739,22 @@ async fn build_server(
                 Some(distiller.clone()),
                 compile_fact_store,
             )),
+        )
+        .await;
+
+    // ── Persona consistency guard (persona_check) ─────────────
+    //
+    // `persona_check` — the "人设不崩" guard. Given an agent's draft reply and
+    // the accumulated `agent_personality` facts for that agent entity, it
+    // reports contradictions (conflicts) and unanchored statements (drift).
+    // No LLM: embedding semantic match with keyword fallback; read-only.
+    let persona_fact_store = Arc::new(
+        SqliteFactStore::open(&cfg.db_path).context("open fact store for persona_check tool")?,
+    );
+    builder = builder
+        .tool(
+            persona_check_definition(),
+            Arc::new(PersonaCheckTool::new(persona_fact_store, embedder.clone()).await),
         )
         .await;
 

@@ -145,6 +145,10 @@ pub const TEMPORAL_DECAY_LAMBDA_PER_SEC: f64 = 1.157e-7;
 /// memory injection in `memory_context_check`. Configurable per call via the
 /// `threshold` argument; this is the fallback when none is supplied.
 pub const CONTEXT_INJECT_THRESHOLD: f64 = 40.0;
+/// Path (relative to the working directory) to the persona prototype library
+/// JSON used by the semantic persona-extraction path. Overridable at runtime
+/// via the `PERSONA_PROTOTYPES_PATH` environment variable.
+pub const PERSONA_PROTOTYPES_PATH: &str = "config/persona_prototypes.json";
 /// Grayscale gate for the pure-embedding memory features (plan
 /// `embedding-memory-plan.md`, P0–P3).
 ///
