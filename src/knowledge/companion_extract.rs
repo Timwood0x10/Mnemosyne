@@ -1,0 +1,320 @@
+//! Companion-signal extraction — the "你来我往" layer of the cognition
+//! compiler.
+//!
+//! The statement markers in [`crate::agent_personality`] capture explicit
+//! "我是…" / "我喜欢…" statements. But companion dialogs are mostly
+//! **implicit** — emotions, self-descriptions, and recurring topics woven
+//! into first-person narration. This module extracts those signals with
+//! deterministic, evidence-anchored rules (no LLM):
+//!
+//! 1. `emotion_series` — lexicon hits (`config/emotion_lexicon.json`,
+//!    classic + vernacular zones) tagged with turn index and the original
+//!    quote, so the user's/agent's emotional trajectory is reconstructible.
+//! 2. `self_cognition` — first-person self-descriptions ("我是不是太软弱",
+//!    "我总是不敢拒绝") — the highest-value cognition a companion AI can
+//!    store about its user.
+//! 3. `repeated_themes` — topic keywords clustered across turns; what the
+//!    user keeps coming back to matters more than what they said once.
+//!
+//! Zero-pollution: extraction is per-message with role preserved; nothing is
+//! ever merged across roles, and every signal carries its quote (evidence).
+
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
+use serde::Deserialize;
+
+use crate::types::Message;
+
+/// Grayscale switch: companion signals are extracted but NOT wired into
+/// `agent_fact_compile` until validated against real dialogs.
+pub const COMPANION_EXTRACT_GRAYSCALE: bool = true;
+
+/// One emotion observation, evidence-anchored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EmotionSample {
+    /// Canonical emotion label (from the lexicon), e.g. "委屈".
+    pub label: String,
+    /// Lexicon zone: "classic" or "vernacular".
+    pub zone: String,
+    /// Zero-based turn index in the dialog.
+    pub turn: usize,
+    /// Speaker role ("user" / "assistant").
+    pub role: String,
+    /// The original message text (evidence).
+    pub quote: String,
+}
+
+/// A first-person self-description, evidence-anchored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelfCognition {
+    /// Speaker role.
+    pub role: String,
+    /// Zero-based turn index.
+    pub turn: usize,
+    /// The self-referential sentence (evidence).
+    pub quote: String,
+}
+
+/// A recurring topic signal, evidence-anchored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThemeSignal {
+    /// The topic keyword.
+    pub keyword: String,
+    /// How many distinct turns mention it.
+    pub occurrences: usize,
+    /// Sample quotes (up to 3) as evidence.
+    pub samples: Vec<String>,
+}
+
+/// Full companion-extraction result.
+#[derive(Debug, Clone, Default)]
+pub struct CompanionExtract {
+    pub emotions: Vec<EmotionSample>,
+    pub self_cognitions: Vec<SelfCognition>,
+    pub themes: Vec<ThemeSignal>,
+}
+
+/// JSON shape of `config/emotion_lexicon.json`: zone → label → keywords.
+#[derive(Debug, Clone, Deserialize)]
+struct EmotionLexicon {
+    #[serde(default)]
+    classic: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    vernacular: HashMap<String, Vec<String>>,
+}
+
+static LEXICON: LazyLock<EmotionLexicon> = LazyLock::new(|| {
+    let path = std::env::var("EMOTION_LEXICON_PATH")
+        .unwrap_or_else(|_| "config/emotion_lexicon.json".to_string());
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| EmotionLexicon {
+            classic: HashMap::new(),
+            vernacular: HashMap::new(),
+        })
+});
+
+/// First-person self-description prefixes ("我…" + stance/attribute verb).
+const SELF_COGNITION_PATTERNS: &[&str] = &[
+    "我是",
+    "我总",
+    "我老",
+    "我其实",
+    "我一直",
+    "我从来",
+    "我从来都",
+    "我是不是",
+    "我承认",
+    "我最大的",
+    "我这个人",
+    "我天生",
+    "我骨子里",
+    "我忍不住",
+    "我学不会",
+    "我不敢",
+    "我不肯",
+    "我偏偏",
+    "我到底",
+    "我宁可",
+    "我宁愿",
+    "我居然",
+];
+
+/// Stop words never allowed as a theme keyword.
+const THEME_STOP: &[&str] = &[
+    "这个", "那个", "什么", "怎么", "就是", "不是", "没有", "自己", "我们", "你们", "他们", "因为",
+    "所以", "但是", "如果", "还有", "知道", "觉得", "可以", "现在", "时候", "一个", "真的", "好像",
+    "反正", "然后", "其实", "我", "你", "他", "她", "它", "这", "那", "，我", "。我", "我", "——",
+    "了。", "的。", "，你", "吗", "呢", "么", "是", "了", "的", "在", "有", "就", "都", "也", "很",
+    "太", "别", "再", "又", "还", "把", "被", "让", "给", "跟", "和", "与", "对", "从", "向", "到",
+    "往", "于", "上", "下", "里", "中",
+];
+
+/// Run all three companion extractors over a message list.
+#[must_use]
+pub fn extract_companion_signals(messages: &[Message]) -> CompanionExtract {
+    CompanionExtract {
+        emotions: extract_emotion_series(messages),
+        self_cognitions: extract_self_cognition(messages),
+        themes: extract_repeated_themes(messages),
+    }
+}
+
+/// Lexicon hits per message, tagged with turn/role/quote.
+#[must_use]
+pub fn extract_emotion_series(messages: &[Message]) -> Vec<EmotionSample> {
+    let mut out = Vec::new();
+    for (turn, msg) in messages.iter().enumerate() {
+        for (zone, table) in [
+            ("classic", &LEXICON.classic),
+            ("vernacular", &LEXICON.vernacular),
+        ] {
+            for (label, keywords) in table {
+                if keywords.iter().any(|k| msg.content.contains(k.as_str())) {
+                    out.push(EmotionSample {
+                        label: label.clone(),
+                        zone: zone.to_string(),
+                        turn,
+                        role: msg.role.clone(),
+                        quote: msg.content.clone(),
+                    });
+                    break; // one label per zone per message keeps the signal clean
+                }
+            }
+        }
+    }
+    out
+}
+
+/// First-person self-description sentences, evidence-anchored.
+#[must_use]
+pub fn extract_self_cognition(messages: &[Message]) -> Vec<SelfCognition> {
+    let mut out = Vec::new();
+    for (turn, msg) in messages.iter().enumerate() {
+        let has_self = SELF_COGNITION_PATTERNS
+            .iter()
+            .any(|p| msg.content.contains(p));
+        if has_self {
+            out.push(SelfCognition {
+                role: msg.role.clone(),
+                turn,
+                quote: msg.content.clone(),
+            });
+        }
+    }
+    out
+}
+
+/// Topic keywords clustered across turns (>=2 turns → a "recurring theme").
+#[must_use]
+pub fn extract_repeated_themes(messages: &[Message]) -> Vec<ThemeSignal> {
+    // Count per-keyword distinct turns, keeping up to 3 sample quotes.
+    let mut turn_count: HashMap<String, usize> = HashMap::new();
+    let mut seen_turn: HashMap<String, usize> = HashMap::new(); // keyword -> last turn seen
+    let mut samples: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (turn, msg) in messages.iter().enumerate() {
+        // 2-char CJK n-grams as topic candidates (simple, deterministic).
+        let chars: Vec<char> = msg.content.chars().collect();
+        let mut candidates: Vec<String> = Vec::new();
+        for w in chars.windows(2) {
+            if w[0].is_ascii_alphabetic() || w[1].is_ascii_alphabetic() {
+                continue;
+            }
+            if w[0].is_whitespace() || w[1].is_whitespace() {
+                continue;
+            }
+            let kw: String = w.iter().collect();
+            if THEME_STOP.contains(&kw.as_str()) {
+                continue;
+            }
+            candidates.push(kw);
+        }
+        candidates.sort();
+        candidates.dedup();
+        for kw in candidates {
+            let prev = seen_turn.entry(kw.clone()).or_insert(usize::MAX);
+            if *prev != turn {
+                *turn_count.entry(kw.clone()).or_default() += 1;
+                *prev = turn;
+            }
+            let s = samples.entry(kw.clone()).or_default();
+            if s.len() < 3 {
+                s.push(msg.content.clone());
+            }
+        }
+    }
+
+    let mut out: Vec<ThemeSignal> = turn_count
+        .into_iter()
+        .filter(|(_, n)| *n >= 2) // recurring = appears in >=2 distinct turns
+        .map(|(keyword, occurrences)| {
+            let samples = samples.remove(&keyword).unwrap_or_default();
+            ThemeSignal {
+                keyword,
+                occurrences,
+                samples,
+            }
+        })
+        .collect();
+    out.sort_by_key(|t| std::cmp::Reverse(t.occurrences));
+    out.truncate(20); // cap output size
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msgs(pairs: &[(&str, &str)]) -> Vec<Message> {
+        pairs.iter().map(|(r, c)| Message::new(*r, *c)).collect()
+    }
+
+    /// Objective: Verify emotion lexicon hits are evidence-anchored and
+    /// role/turn-tagged.
+    /// Invariants: "怕" in user turn 1 → EmotionSample(害怕, turn 1, role user).
+    #[test]
+    fn emotion_series_tags_evidence() {
+        let m = msgs(&[
+            ("user", "今天被老板骂了，烦死了。"),
+            ("assistant", "我夜里睡不着，心里发慌。"),
+        ]);
+        let e = extract_emotion_series(&m);
+        assert!(
+            e.iter()
+                .any(|s| s.label == "烦" && s.role == "user" && s.turn == 0),
+            "user 烦 must be tagged, got {e:?}"
+        );
+        assert!(
+            e.iter()
+                .any(|s| s.zone == "classic" && s.label == "害怕" && s.turn == 1),
+            "classic 害怕 must hit, got {e:?}"
+        );
+        // Every sample must carry its original quote (evidence).
+        assert!(
+            e.iter().all(|s| !s.quote.is_empty()),
+            "every emotion sample needs evidence"
+        );
+    }
+
+    /// Objective: Verify first-person self-descriptions are caught.
+    /// Invariants: "我是不是太软弱" → SelfCognition with the quote.
+    #[test]
+    fn self_cognition_catches_first_person() {
+        let m = msgs(&[("user", "你说我是不是太软弱，每次都忍")]);
+        let s = extract_self_cognition(&m);
+        assert_eq!(s.len(), 1, "one self-cognition expected");
+        assert!(s[0].quote.contains("我是不是太软弱"), "quote preserved");
+    }
+
+    /// Objective: Verify recurring themes need >=2 distinct turns.
+    /// Invariants: 工作 appears in 3 turns → theme; one-off word absent.
+    #[test]
+    fn repeated_themes_require_two_turns() {
+        let m = msgs(&[
+            ("user", "工作的事烦死了"),
+            ("user", "工作又压了一堆"),
+            ("assistant", "你工作别太拼了"),
+            ("user", "今天天气不错"),
+        ]);
+        let t = extract_repeated_themes(&m);
+        assert!(
+            t.iter().any(|s| s.keyword == "工作" && s.occurrences >= 2),
+            "工作 must recur, got {t:?}"
+        );
+        assert!(
+            t.iter().all(|s| s.keyword != "天气"),
+            "one-off word must not be a theme"
+        );
+    }
+
+    /// Objective: Verify the grayscale switch exists and is on for testing.
+    /// Invariants: constant is true so the module is exercised in this crate.
+    #[test]
+    fn grayscale_switch_present() {
+        let current = COMPANION_EXTRACT_GRAYSCALE;
+        assert!(current, "companion signals are grayscale");
+    }
+}

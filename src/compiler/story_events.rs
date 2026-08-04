@@ -116,9 +116,18 @@ pub async fn materialize_story_events(
         }
         // The sentence must name at least one cast member AND carry a narrative
         // or dialogue verb — that combination is a story beat, not filler.
-        let Some(member) = cast.iter().find(|c| t.contains(c.as_str())) else {
+        // Link EVERY named cast member, not just the first: key_events reads
+        // the event object's neighbours for its participants signal, and a
+        // sentence like "流苏与三哥争执" that only linked 流苏 would make the
+        // centrality dimension permanently zero (participants always empty).
+        let members: Vec<&str> = cast
+            .iter()
+            .filter(|c| t.contains(c.as_str()))
+            .map(|c| c.as_str())
+            .collect();
+        if members.is_empty() {
             continue;
-        };
+        }
         if !NARRATIVE_VERBS
             .iter()
             .chain(DIALOG_VERBS.iter())
@@ -148,34 +157,37 @@ pub async fn materialize_story_events(
             }
         };
 
-        // Link the character → event. person object is the source; event the
-        // target. Deduplicate the same (person, event) pair on re-compile.
-        let person_id = store
-            .find_object_by_name(member, Some(doc_id))
-            .await?
-            .map(|o| o.id);
-        if let Some(person_id) = person_id {
-            let exists = store
-                .get_edges_touching(person_id)
+        // Link each named character → event. person object is the source;
+        // event the target. Deduplicate the same (person, event) pair on
+        // re-compile.
+        for member in members {
+            let person_id = store
+                .find_object_by_name(member, Some(doc_id))
                 .await?
-                .iter()
-                .any(|e| e.predicate == "participated_in" && e.target_id == event_id);
-            if !exists {
-                store
-                    .create_edge(&KnowledgeEdge {
-                        id: 0,
-                        source_id: person_id,
-                        target_id: event_id,
-                        predicate: "participated_in".into(),
-                        properties: serde_json::json!({}),
-                        origin: Origin::Observed,
-                        confidence: 0.7,
-                        valid_from: None,
-                        valid_to: None,
-                        created_at: now,
-                    })
-                    .await?;
-                edges_created += 1;
+                .map(|o| o.id);
+            if let Some(person_id) = person_id {
+                let exists = store
+                    .get_edges_touching(person_id)
+                    .await?
+                    .iter()
+                    .any(|e| e.predicate == "participated_in" && e.target_id == event_id);
+                if !exists {
+                    store
+                        .create_edge(&KnowledgeEdge {
+                            id: 0,
+                            source_id: person_id,
+                            target_id: event_id,
+                            predicate: "participated_in".into(),
+                            properties: serde_json::json!({}),
+                            origin: Origin::Observed,
+                            confidence: 0.7,
+                            valid_from: None,
+                            valid_to: None,
+                            created_at: now,
+                        })
+                        .await?;
+                    edges_created += 1;
+                }
             }
         }
 
@@ -224,7 +236,7 @@ mod tests {
             "流苏说道：我一个人惯了。范柳原笑道：你何苦这样。流苏又说道：我宁可一个人走夜路。",
             "text",
         );
-        let stats = compile_source(&source, &conversation_profile(), &store, "t1")
+        let stats = compile_source(&source, conversation_profile(), &store, "t1")
             .await
             .expect("compile");
         // Events were materialized: prose with a discovered cast produces
@@ -286,10 +298,10 @@ mod tests {
             "流苏说道：我一个人惯了。范柳原笑道：你何苦这样。",
             "text",
         );
-        let first = compile_source(&source, &conversation_profile(), &store, "t1")
+        let first = compile_source(&source, conversation_profile(), &store, "t1")
             .await
             .expect("first");
-        let second = compile_source(&source, &conversation_profile(), &store, "t1")
+        let second = compile_source(&source, conversation_profile(), &store, "t1")
             .await
             .expect("second");
         assert_eq!(

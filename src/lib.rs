@@ -59,6 +59,7 @@ pub mod language;
 pub mod lexicon;
 pub mod mcp;
 pub mod observation_compiler;
+pub mod persona;
 pub mod personality;
 pub mod prompt;
 pub mod resolver;

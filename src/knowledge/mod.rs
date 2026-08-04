@@ -20,6 +20,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod adapter;
+pub mod companion_extract;
 pub mod document_source;
 pub mod domain_profile;
 pub mod entity_linker;

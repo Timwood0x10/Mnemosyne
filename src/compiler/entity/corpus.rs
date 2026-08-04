@@ -173,7 +173,7 @@ mod tests {
             "both speakers discovered, got {names:?}"
         );
         assert!(
-            !names.iter().any(|n| n.contains(&"众人")),
+            !names.iter().any(|n| n.contains("众人")),
             "common non-name excluded, got {names:?}"
         );
         // 刘备 appears twice, 关羽 twice; frequency is recorded.

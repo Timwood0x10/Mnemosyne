@@ -4,13 +4,13 @@
 //! drives the **real MCP tools** over JSON-RPC (not the internals) through
 //! four stages:
 //!
-//!   0. Static persona  — compile `corpus/倾城之恋.txt` into the knowledge
-//!                        graph, then `inspect_entity("白流苏")`.
-//!   1. Conversation    — simulate 200 turns of user ↔ 白流苏 chat; every 50
-//!                        turns call `agent_fact_compile` (incremental archive).
-//!   2. Key events      — `person_key_events("白流苏")` from the novel graph.
-//!   3. Portrait drift  — read the fact store at turn 50 vs turn 200 and show
-//!                        whether 白流苏's/用户's portrait actually evolved.
+//! 0. Static persona  — compile `corpus/倾城之恋.txt` into the knowledge
+//!    graph, then `inspect_entity("白流苏")`.
+//! 1. Conversation    — simulate 200 turns of user ↔ 白流苏 chat; every 50
+//!    turns call `agent_fact_compile` (incremental archive).
+//! 2. Key events      — `person_key_events("白流苏")` from the novel graph.
+//! 3. Portrait drift  — read the fact store at turn 50 vs turn 200 and show
+//!    whether 白流苏's/用户's portrait actually evolved.
 //!
 //! Run: cargo test --test companion_demo -- --nocapture
 //!
@@ -443,14 +443,9 @@ async fn companion_demo_end_to_end() {
         for (k, v) in type_counts {
             println!("     {k}: {v} 条");
         }
-        let mut shown = 0;
         for f in facts.iter().take(6) {
-            if shown >= 6 {
-                break;
-            }
             let preview: String = f.payload.to_string().chars().take(80).collect();
             println!("     · [{:?}] {}", f.fact_type, preview);
-            shown += 1;
         }
         println!(
             "     （快照 JSON: {}）",

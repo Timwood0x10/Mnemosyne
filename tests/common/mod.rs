@@ -3,6 +3,12 @@
 //! Provides `ensure_sanguo_db()` which lazily creates and populates the
 //! 三国演义 knowledge database. Tests sharing this DB MUST run serially
 //! (configured via `.config/nextest.toml` test-group `serial-db`).
+//!
+//! Not every helper is used by every test binary — unused symbols would
+//! trigger `dead_code` warnings per binary. We allow that at the module
+//! level rather than deleting helpers that other binaries need.
+
+#![allow(dead_code)]
 
 use std::path::Path;
 use std::sync::Arc;

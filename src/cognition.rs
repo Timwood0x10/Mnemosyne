@@ -65,7 +65,7 @@ pub struct EvidenceRef {
 // Fact — the only stored unit (Event Sourcing)
 // ═══════════════════════════════════════════════════════════════════════════
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FactType {
     Identity,
     Preference,
