@@ -74,6 +74,22 @@ Compile any long-term interaction into an **evolving human cognitive model**: id
 | `correct_relation` | Correct erroneous relations in knowledge graph | `source`, `predicate`, `old_target`, `new_target` |
 | `person_key_events` | Distill a person's trajectory into key events (score + evidence) | `name` |
 
+### Companion Persona Tools
+
+Persona-consistency tools for companion AIs ("陪伴型AI维护人设不崩"): inject a structured
+persona card, guard a draft reply against the stored persona, track the agent↔user
+relationship, and rebuild the persona's evolution timeline.
+
+| Tool | Function | Required Params |
+|------|----------|-----------------|
+| `persona_inject` | Inject a structured, deterministic persona card (identity / persona / style / taboos / relationship) into the system prompt; multi-tenancy by `tenant_id` | `agent_id` |
+| `persona_check` | Guard the agent's draft reply against the accumulated persona facts; report `conflicts` + `drift` (no LLM, keyword fallback) | `agent_id`, `draft` |
+| `relationship_update` | Incrementally update the agent↔user relationship state from message emotion signals (intimacy / stage / trend / recent topics) | `agent_id`, `user_id`, `messages[]` |
+| `relationship_query` | Read the current relationship snapshot for a tenant/agent/user triple | `agent_id`, `user_id` |
+| `persona_timeline` | Rebuild an entity's persona evolution timeline (`起点 → 关键转变点 → 现状`) from accumulated facts (mem0 v3 ADD-only) | `entity_id` |
+| `story_bridge` | Novel-character bridge: compile a protagonist's knowledge-graph story events into fact-store persona facts, providing cold-start baseline for `persona_timeline`/`persona_check` | `name` |
+| `memory_decay` | Deterministic memory decay / forgetting: down-weight and archive stale facts, never delete (protects high-value persona facts) | — |
+
 ### V1 Legacy Character Tools
 
 | Tool | Function | Note |

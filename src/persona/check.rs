@@ -314,7 +314,7 @@ pub fn is_persona_fact(fact: &Fact) -> bool {
 
 /// Filter `facts` down to persona facts only.
 #[must_use]
-pub fn filter_persona_facts<'a>(facts: &'a [Fact]) -> Vec<&'a Fact> {
+pub fn filter_persona_facts(facts: &[Fact]) -> Vec<&Fact> {
     facts.iter().filter(|f| is_persona_fact(f)).collect()
 }
 

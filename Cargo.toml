@@ -37,7 +37,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
 # Async runtime: keep only the features used by the server.
-tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "io-util", "io-std", "net"] }
+# `time` powers the background memory-decay interval (plan D2).
+tokio = { version = "1.45", features = ["macros", "rt-multi-thread", "sync", "io-util", "io-std", "net", "time"] }
 
 # HTTP server for the MCP Streamable HTTP transport (remote serving).
 axum = { version = "0.8", features = ["http1"] }

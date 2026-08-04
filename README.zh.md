@@ -73,6 +73,20 @@
 | `evidence` | 原文证据搜索（关键字匹配） | `query` |
 | `correct_relation` | 校正知识图中的错误关系 | `source, predicate, old_target, new_target` |
 
+### 陪伴人设工具（Companion Persona）
+
+面向陪伴型 AI 维护「人设不崩」的一致性工具：注入结构化人设卡、守卫草稿回复与已存人设的一致性、跟踪 agent↔user 关系状态、重建人设演进时间线。
+
+| 工具 | 功能 | 必填参数 |
+|------|------|---------|
+| `persona_inject` | 注入结构化、确定性的「人设卡」（identity / persona / style / taboos / relationship）拼进 system prompt；支持按 `tenant_id` 多角色切换 | `agent_id` |
+| `persona_check` | 人设冲突守卫：对 agent 草稿回复与已存人设事实比对，输出 `conflicts` + `drift`（无 LLM，关键词回退） | `agent_id`, `draft` |
+| `relationship_update` | 根据对话情绪信号增量更新关系状态（亲密度 / 阶段 / 情绪趋势 / 最近共同话题） | `agent_id`, `user_id`, `messages[]` |
+| `relationship_query` | 读取当前关系状态快照（tenant/agent/user 三元组） | `agent_id`, `user_id` |
+| `persona_timeline` | 重建「一个人的完整变化过程」演进时间线（起点 → 关键转变点 → 现状），遵循 mem0 v3 ADD-only 累积 | `entity_id` |
+| `story_bridge` | 小说人物桥梁：把知识图谱里该角色的故事事件编译成 fact-store 人设事实，给 `persona_timeline`/`persona_check` 提供冷启动基线 | `name` |
+| `memory_decay` | 记忆衰减 / 遗忘管理：只降权归档不删除历史 fact（保护高价值人设事实），保证演进时间线可重建 | — |
+
 ---
 
 ### 使用示例：编译一段对话

@@ -16,6 +16,7 @@ use tracing_subscriber::EnvFilter;
 
 use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
 use lore_scope::config::{CliArgs, Command, EmbeddingProvider};
+use lore_scope::decay::{DecayConfig, run_decay_loop};
 use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 #[cfg(feature = "remote-embed")]
 use lore_scope::embed::RemoteEmbedder;
@@ -26,16 +27,23 @@ use lore_scope::ingest::IngestionPipeline;
 use lore_scope::knowledge::store::KnowledgeStore;
 use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
 use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
+use lore_scope::mcp::decay_tool::{MemoryDecayTool, memory_decay_definition};
 use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use lore_scope::mcp::persona_check_tool::{PersonaCheckTool, persona_check_definition};
+use lore_scope::mcp::persona_inject_tool::{PersonaInjectTool, persona_inject_definition};
 use lore_scope::mcp::register_external_knowledge_tools;
 use lore_scope::mcp::register_generalize_tool;
 use lore_scope::mcp::register_graph_search_tool;
 use lore_scope::mcp::register_knowledge_tools;
 use lore_scope::mcp::register_memory_transfer_tools;
 use lore_scope::mcp::register_trace_path_tool;
+use lore_scope::mcp::relationship_tool::{
+    PersonaTimelineTool, RelationshipQueryTool, RelationshipUpdateTool,
+    persona_timeline_definition, relationship_query_definition, relationship_update_definition,
+};
 use lore_scope::mcp::serve_http_addr;
+use lore_scope::mcp::story_bridge_tool::{StoryBridgeTool, story_bridge_definition};
 use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
 use lore_scope::retrieval::RetrievalEngine;
@@ -717,15 +725,20 @@ async fn build_server(
         )
         .await;
 
+    // ── Shared fact store for all cognition / persona / relationship / decay
+    //    tools. A single connection is opened once and shared by value (Arc)
+    //    so the HTTP server never opens a fresh SQLite handle per tool, which
+    //    avoids write-lock contention across concurrent requests.
+    let shared_fact_store =
+        Arc::new(SqliteFactStore::open(&cfg.db_path).context("open shared fact store")?);
+
     // memory_compile
-    let compile_fact_store =
-        Arc::new(SqliteFactStore::open(&cfg.db_path).context("open fact store for compile tool")?);
     builder = builder
         .tool(
             memory_compile_definition(),
             Arc::new(MemoryCompileTool::new(
                 Some(distiller.clone()),
-                compile_fact_store.clone(),
+                shared_fact_store.clone(),
             )),
         )
         .await;
@@ -737,7 +750,7 @@ async fn build_server(
             context_check_definition(),
             Arc::new(ContextCheckTool::new(
                 Some(distiller.clone()),
-                compile_fact_store,
+                shared_fact_store.clone(),
             )),
         )
         .await;
@@ -748,15 +761,89 @@ async fn build_server(
     // the accumulated `agent_personality` facts for that agent entity, it
     // reports contradictions (conflicts) and unanchored statements (drift).
     // No LLM: embedding semantic match with keyword fallback; read-only.
-    let persona_fact_store = Arc::new(
-        SqliteFactStore::open(&cfg.db_path).context("open fact store for persona_check tool")?,
-    );
     builder = builder
         .tool(
             persona_check_definition(),
-            Arc::new(PersonaCheckTool::new(persona_fact_store, embedder.clone()).await),
+            Arc::new(PersonaCheckTool::new(shared_fact_store.clone(), embedder.clone()).await),
         )
         .await;
+
+    // ── Persona injection (persona_inject) ───────────────────
+    //
+    // `persona_inject` — the companion entry point. Builds a structured
+    // persona card (identity / persona / style / taboos / relationship) for
+    // an agent either from the accumulated `agent_personality` facts or from
+    // an imported JSON persona-card file, and returns it as text or JSON to
+    // be spliced into the host's system prompt. No LLM — deterministic.
+    builder = builder
+        .tool(
+            persona_inject_definition(),
+            Arc::new(PersonaInjectTool::new(shared_fact_store.clone())),
+        )
+        .await;
+
+    // ── Relationship state + evolution timeline ──────────────
+    //
+    // `relationship_update` — incrementally updates the intimacy/stage/emotion
+    //   trend/recent-topics state from a dialog's emotion signals.
+    // `relationship_query` — reads the current relationship snapshot.
+    // `persona_timeline` — rebuilds a person's full evolution trajectory
+    //   (起点 → 关键转变点 → 现状) under mem0 v3 ADD-only accumulation.
+    builder = builder
+        .tool(
+            relationship_update_definition(),
+            Arc::new(RelationshipUpdateTool::new(shared_fact_store.clone())),
+        )
+        .await
+        .tool(
+            relationship_query_definition(),
+            Arc::new(RelationshipQueryTool::new(shared_fact_store.clone())),
+        )
+        .await
+        .tool(
+            persona_timeline_definition(),
+            Arc::new(PersonaTimelineTool::new(shared_fact_store.clone())),
+        )
+        .await;
+
+    // ── Memory decay / forgetting (memory_decay) ─────────────
+    //
+    // `memory_decay` — applies configurable decay (time / importance / access
+    //   frequency / hybrid) to accumulated facts. It only downweights (writes
+    //   `weight`/`archived`) and NEVER deletes historical facts, so the
+    //   persona evolution timeline stays fully reconstructible.
+    builder = builder
+        .tool(
+            memory_decay_definition(),
+            Arc::new(MemoryDecayTool::new(shared_fact_store.clone())),
+        )
+        .await;
+
+    // ── Background memory decay (plan D2, opt-in) ─────────────
+    //
+    // The MCP `memory_decay` tool above is the manual on-demand entry point.
+    // When `MEMORY_DECAY_INTERVAL_SECS` is set to a positive integer, a
+    // tokio task runs a decay pass every interval over all entities. Disabled
+    // by default so the server's behaviour is unchanged unless asked for.
+    if let Some(interval_secs) = std::env::var("MEMORY_DECAY_INTERVAL_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+    {
+        let decay_store = shared_fact_store.clone();
+        let decay_config = Arc::new(DecayConfig::load());
+        let decay_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        tokio::spawn(async move {
+            let _ = run_decay_loop(
+                decay_store.clone(),
+                decay_config,
+                std::time::Duration::from_secs(interval_secs),
+                decay_stop,
+            )
+            .await;
+        });
+        tracing::info!("background memory decay enabled: every {interval_secs}s");
+    }
 
     // ── Character knowledge tools ─────────────────────────────
 
@@ -960,7 +1047,20 @@ async fn build_server(
     builder = builder
         .tool(
             key_events_definition(),
-            Arc::new(KeyEventsTool::new(kstore)),
+            Arc::new(KeyEventsTool::new(kstore.clone())),
+        )
+        .await;
+
+    // story_bridge — bridge a novel character's story events (knowledge graph)
+    // into fact-store persona facts so `persona_timeline` works on novel corpus
+    // (acceptance item 8, novel side). Reads the knowledge graph, writes facts.
+    builder = builder
+        .tool(
+            story_bridge_definition(),
+            Arc::new(StoryBridgeTool::new(
+                kstore.clone(),
+                shared_fact_store.clone(),
+            )),
         )
         .await;
 

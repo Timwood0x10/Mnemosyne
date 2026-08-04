@@ -24,11 +24,14 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
+use crate::agent_personality::AGENT_PERSONALITY_ATTRIBUTION;
+use crate::cognition::{Fact, FactType};
 use crate::types::Message;
 
-/// Grayscale switch: companion signals are extracted but NOT wired into
-/// `agent_fact_compile` until validated against real dialogs.
-pub const COMPANION_EXTRACT_GRAYSCALE: bool = true;
+/// Grayscale switch: `false` now means companion signals are wired into the
+/// `agent_fact_compile` production chain (graduated from grayscale). Flip back
+/// to `true` to revert to grayscale: extract signals but do not wire them.
+pub const COMPANION_EXTRACT_GRAYSCALE: bool = false;
 
 /// One emotion observation, evidence-anchored.
 #[derive(Debug, Clone, PartialEq)]
@@ -140,6 +143,133 @@ pub fn extract_companion_signals(messages: &[Message]) -> CompanionExtract {
         self_cognitions: extract_self_cognition(messages),
         themes: extract_repeated_themes(messages),
     }
+}
+
+/// Convert a [`CompanionExtract`] into two fact groups keyed by speaker role.
+///
+/// Returns `(user_facts, agent_facts)`:
+/// - user-side signals (emotion / identity / preference) are attributed to
+///   `user_entity_id` and carry NO attribution marker, preserving the
+///   zero-pollution invariant of the `user_facts` channel.
+/// - assistant-side signals are attributed to `agent_entity_id` and tagged
+///   `attribution = "agent_personality"` so the persona layer can recognize them.
+///
+/// `messages` is needed only to resolve the speaker role of recurring themes
+/// (a [`ThemeSignal`] carries no role of its own — its side is inferred from the
+/// first sample quote).
+#[must_use]
+pub fn companion_facts_from_extract(
+    extract: &CompanionExtract,
+    messages: &[Message],
+    user_entity_id: i64,
+    agent_entity_id: i64,
+    logical_time: i32,
+) -> (Vec<Fact>, Vec<Fact>) {
+    let mut user_facts = Vec::new();
+    let mut agent_facts = Vec::new();
+
+    for emotion in &extract.emotions {
+        let fact = Fact {
+            id: None,
+            entity_id: if emotion.role == "user" {
+                user_entity_id
+            } else {
+                agent_entity_id
+            },
+            fact_type: FactType::Emotion,
+            time: logical_time,
+            payload: serde_json::json!({
+                "content": emotion.quote,
+                "emotion": emotion.label,
+                "zone": emotion.zone,
+                "turn": emotion.turn,
+            }),
+            evidence_id: None,
+            created_at: i64::from(logical_time),
+        };
+        push_companion_fact(fact, &emotion.role, &mut user_facts, &mut agent_facts);
+    }
+
+    for cognition in &extract.self_cognitions {
+        let fact = Fact {
+            id: None,
+            entity_id: if cognition.role == "user" {
+                user_entity_id
+            } else {
+                agent_entity_id
+            },
+            fact_type: FactType::Identity,
+            time: logical_time,
+            payload: serde_json::json!({
+                "content": cognition.quote,
+                "turn": cognition.turn,
+            }),
+            evidence_id: None,
+            created_at: i64::from(logical_time),
+        };
+        push_companion_fact(fact, &cognition.role, &mut user_facts, &mut agent_facts);
+    }
+
+    for theme in &extract.themes {
+        let role = theme_role(theme, messages);
+        let fact = Fact {
+            id: None,
+            entity_id: if role == "user" {
+                user_entity_id
+            } else {
+                agent_entity_id
+            },
+            fact_type: FactType::Preference,
+            time: logical_time,
+            payload: serde_json::json!({
+                "keyword": theme.keyword,
+                "occurrences": theme.occurrences,
+                "samples": theme.samples,
+            }),
+            evidence_id: None,
+            created_at: i64::from(logical_time),
+        };
+        push_companion_fact(fact, role, &mut user_facts, &mut agent_facts);
+    }
+
+    (user_facts, agent_facts)
+}
+
+/// Route a companion fact to the user or agent channel by speaker role.
+///
+/// User-side facts keep the channel free of any attribution marker (the
+/// zero-pollution invariant); assistant-side facts are tagged
+/// `agent_personality` so the persona layer can recognize them.
+fn push_companion_fact(
+    mut fact: Fact,
+    role: &str,
+    user_facts: &mut Vec<Fact>,
+    agent_facts: &mut Vec<Fact>,
+) {
+    if role == "user" {
+        user_facts.push(fact);
+    } else {
+        fact.payload["attribution"] =
+            serde_json::Value::String(AGENT_PERSONALITY_ATTRIBUTION.to_string());
+        agent_facts.push(fact);
+    }
+}
+
+/// Resolve the speaker role of a recurring theme from its first sample quote.
+fn theme_role<'a>(theme: &ThemeSignal, messages: &'a [Message]) -> &'a str {
+    let role = messages
+        .iter()
+        .find(|m| {
+            theme
+                .samples
+                .first()
+                .is_some_and(|sample| m.content.contains(sample))
+        })
+        .map(|m| m.role.as_str())
+        .unwrap_or("user");
+    // The returned slice borrows from a message, not from `theme`, so the
+    // lifetime is tied to `messages` as the caller expects.
+    role
 }
 
 /// Lexicon hits per message, tagged with turn/role/quote.
@@ -310,11 +440,12 @@ mod tests {
         );
     }
 
-    /// Objective: Verify the grayscale switch exists and is on for testing.
-    /// Invariants: constant is true so the module is exercised in this crate.
+    /// Objective: Verify the grayscale switch is now connected to production.
+    /// Invariants: companion signals feed `agent_fact_compile`, so the switch
+    /// is `false`.
     #[test]
-    fn grayscale_switch_present() {
-        let current = COMPANION_EXTRACT_GRAYSCALE;
-        assert!(current, "companion signals are grayscale");
+    fn grayscale_switch_connected_to_production() {
+        let connected = !COMPANION_EXTRACT_GRAYSCALE;
+        assert!(connected, "companion signals are connected to production");
     }
 }

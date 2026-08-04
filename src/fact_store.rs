@@ -4,12 +4,14 @@
 //! crate-wide storage error type. No database or serialization failure is
 //! converted into a successful-looking zero or empty result.
 
+use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cognition::{Fact, FactStore, FactType};
 use crate::error::{Error, Result, StorageError};
+use crate::relationship::{EmotionTrend, RelationshipStage, RelationshipState};
 
 const CORE_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS entities (
@@ -30,7 +32,9 @@ CREATE TABLE IF NOT EXISTS facts (
     time         INTEGER NOT NULL,
     payload      TEXT NOT NULL,
     evidence_id  INTEGER,
-    created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+    created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    weight       REAL DEFAULT 1.0,
+    archived     INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS evidence (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -55,6 +59,19 @@ CREATE INDEX IF NOT EXISTS idx_facts_type ON facts(entity_id, fact_type);
 CREATE INDEX IF NOT EXISTS idx_facts_time ON facts(entity_id, time);
 CREATE INDEX IF NOT EXISTS idx_aliases_core_entity ON aliases(entity_id);
 CREATE INDEX IF NOT EXISTS idx_aliases_core_alias ON aliases(alias);
+CREATE TABLE IF NOT EXISTS relationship_state (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    tenant_id       TEXT NOT NULL DEFAULT 'default',
+    agent_entity_id INTEGER NOT NULL,
+    user_entity_id  INTEGER NOT NULL,
+    intimacy        REAL NOT NULL DEFAULT 0.0,
+    stage           TEXT NOT NULL DEFAULT 'stranger',
+    emotion_trend   TEXT NOT NULL DEFAULT 'stable',
+    recent_topics   TEXT NOT NULL DEFAULT '[]',
+    updated_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    UNIQUE(tenant_id, agent_entity_id, user_entity_id)
+);
+CREATE INDEX IF NOT EXISTS idx_relationship_user ON relationship_state(tenant_id, user_entity_id);
 ";
 
 /// SQLite-backed fact store.
@@ -105,6 +122,10 @@ impl SqliteFactStore {
             "tenant_id",
             "TEXT NOT NULL DEFAULT 'default'",
         )?;
+        // Decay columns: down-weighting only ever writes these flags and never
+        // deletes the row, so the persona evolution timeline stays intact.
+        Self::ensure_column(conn, "facts", "weight", "REAL DEFAULT 1.0")?;
+        Self::ensure_column(conn, "facts", "archived", "INTEGER DEFAULT 0")?;
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_tenant_external
                  ON entities(tenant_id, external_key) WHERE external_key IS NOT NULL;
@@ -375,6 +396,178 @@ impl SqliteFactStore {
             facts.push(Self::row_to_fact(row)?);
         }
         Ok(facts)
+    }
+
+    /// Write back a decay score and archive flag for a fact. This is the only
+    /// decay write path and it never deletes the row — the fact stays readable
+    /// so the persona evolution timeline remains reconstructable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the update fails.
+    pub fn set_decay(&self, fact_id: i64, score: f64, archived: bool) -> Result<()> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "UPDATE facts SET weight = ?1, archived = ?2 WHERE id = ?3",
+            params![score, i64::from(archived), fact_id],
+        )?;
+        Ok(())
+    }
+
+    /// List the archived (down-weighted, still present) facts for an entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn list_archived(&self, entity_id: i64) -> Result<Vec<Fact>> {
+        self.read_facts(
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+             FROM facts WHERE entity_id = ?1 AND archived = 1 ORDER BY time, created_at, id",
+            entity_id,
+            None,
+        )
+    }
+
+    /// List every entity id in the store, used when a decay pass scans the
+    /// whole tenant instead of a single entity.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn all_entity_ids(&self) -> Result<Vec<i64>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM entities ORDER BY id")?;
+        let mut rows = stmt.query([])?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+        }
+        Ok(ids)
+    }
+
+    /// Read the current decay flags (`weight`, `archived`) for a fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn get_decay(&self, fact_id: i64) -> Result<(f64, bool)> {
+        let conn = self.lock_conn()?;
+        let row = conn.query_row(
+            "SELECT weight, archived FROM facts WHERE id = ?1",
+            params![fact_id],
+            |row| Ok((row.get::<_, f64>(0)?, row.get::<_, i64>(1)? != 0)),
+        )?;
+        Ok(row)
+    }
+
+    /// Persist (insert or replace) a relationship state row.
+    ///
+    /// The `(tenant_id, agent_entity_id, user_entity_id)` triple is the unique
+    /// identity of a relationship; an existing row is updated in place on
+    /// conflict. This is an upsert, not a delete — the latest snapshot always
+    /// wins, matching the ADD-only accumulation policy at the state layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the row cannot be written.
+    pub(crate) fn save_relationship(&self, rs: &RelationshipState) -> Result<i64> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO relationship_state
+                 (tenant_id, agent_entity_id, user_entity_id, intimacy, stage, emotion_trend, recent_topics, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(tenant_id, agent_entity_id, user_entity_id) DO UPDATE SET
+                 intimacy      = excluded.intimacy,
+                 stage         = excluded.stage,
+                 emotion_trend = excluded.emotion_trend,
+                 recent_topics = excluded.recent_topics,
+                 updated_at    = excluded.updated_at",
+            params![
+                rs.tenant_id,
+                rs.agent_entity_id,
+                rs.user_entity_id,
+                rs.intimacy,
+                rs.stage.as_str(),
+                rs.emotion_trend.as_str(),
+                serde_json::to_string(&rs.recent_topics)?,
+                rs.updated_at,
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Load a relationship state row by its identity triple.
+    ///
+    /// Returns `Ok(None)` when no relationship has been recorded yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the row cannot be read or decoded.
+    pub(crate) fn load_relationship(
+        &self,
+        tenant_id: &str,
+        agent_entity_id: i64,
+        user_entity_id: i64,
+    ) -> Result<Option<RelationshipState>> {
+        let conn = self.lock_conn()?;
+        let row = conn
+            .query_row(
+                "SELECT tenant_id, agent_entity_id, user_entity_id, intimacy, stage, emotion_trend, recent_topics, updated_at
+                 FROM relationship_state
+                 WHERE tenant_id = ?1 AND agent_entity_id = ?2 AND user_entity_id = ?3",
+                params![tenant_id, agent_entity_id, user_entity_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((
+            tenant_id,
+            agent_entity_id,
+            user_entity_id,
+            intimacy,
+            stage,
+            trend,
+            topics_json,
+            updated_at,
+        )) = row
+        else {
+            return Ok(None);
+        };
+        let recent_topics: Vec<String> = serde_json::from_str(&topics_json).map_err(|error| {
+            Error::Storage(StorageError::InvalidData(format!(
+                "relationship recent_topics is not valid JSON: {error}"
+            )))
+        })?;
+        let stage = RelationshipStage::from_str(&stage).map_err(|message| {
+            Error::Storage(StorageError::InvalidData(format!(
+                "relationship stage `{stage}` is invalid: {message}"
+            )))
+        })?;
+        let emotion_trend = EmotionTrend::from_str(&trend).map_err(|message| {
+            Error::Storage(StorageError::InvalidData(format!(
+                "relationship emotion_trend `{trend}` is invalid: {message}"
+            )))
+        })?;
+        Ok(Some(RelationshipState {
+            tenant_id,
+            agent_entity_id,
+            user_entity_id,
+            intimacy,
+            stage,
+            emotion_trend,
+            recent_topics,
+            updated_at,
+        }))
     }
 }
 

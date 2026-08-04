@@ -96,7 +96,7 @@ impl CognitionCompiler {
         agent_entity_id: i64,
         logical_time: i32,
     ) -> ConversationFacts {
-        let user_facts = crate::conversation_compiler::compile_user_facts(
+        let mut user_facts = crate::conversation_compiler::compile_user_facts(
             messages,
             user_entity_id,
             logical_time,
@@ -111,6 +111,26 @@ impl CognitionCompiler {
             logical_time,
         ));
         let derived_facts = derived_facts_from_messages(messages, user_entity_id, logical_time);
+
+        // Companion signals (C1): wire the deterministic companion extractor
+        // into the compile chain now that it has graduated from grayscale.
+        // User-side signals merge into the user channel (no attribution marker,
+        // preserving the zero-pollution invariant); assistant-side signals merge
+        // into the agent channel tagged `agent_personality`.
+        if !crate::knowledge::companion_extract::COMPANION_EXTRACT_GRAYSCALE {
+            let extract = crate::knowledge::companion_extract::extract_companion_signals(messages);
+            let (companion_user_facts, companion_agent_facts) =
+                crate::knowledge::companion_extract::companion_facts_from_extract(
+                    &extract,
+                    messages,
+                    user_entity_id,
+                    agent_entity_id,
+                    logical_time,
+                );
+            user_facts.extend(companion_user_facts);
+            agent_facts.extend(companion_agent_facts);
+        }
+
         ConversationFacts::from_channels(user_facts, agent_facts, derived_facts)
     }
 }
@@ -251,6 +271,84 @@ mod tests {
         assert!(
             result.derived_facts.is_empty(),
             "no assistant messages → no derived facts"
+        );
+    }
+
+    /// Objective: Verify a user-emitted companion emotion lands in the user
+    /// channel and carries NO attribution marker (zero-pollution invariant).
+    /// Invariants: the user Emotion fact targets user_entity_id; every
+    /// user_facts fact has no attribution key.
+    #[test]
+    fn companion_user_emotion_goes_to_user_facts_without_attribution() {
+        let messages = vec![Message::new("user", "今天被老板骂了，烦死了。")];
+        let result = CognitionCompiler::new().compile_conversation_facts(&messages, 42, 99, 100);
+        let companion_emotion: Vec<&Fact> = result
+            .user_facts
+            .iter()
+            .filter(|f| f.fact_type == FactType::Emotion)
+            .collect();
+        assert!(
+            !companion_emotion.is_empty(),
+            "user emotion companion fact must be produced"
+        );
+        assert!(
+            companion_emotion.iter().all(|f| f.entity_id == 42),
+            "user-side companion emotion targets the User entity"
+        );
+        assert!(
+            result
+                .user_facts
+                .iter()
+                .all(|f| f.payload.get("attribution").is_none()),
+            "user_facts carry no attribution marker (zero-pollution)"
+        );
+    }
+
+    /// Objective: Verify an assistant-emitted self-cognition lands in the agent
+    /// channel and is tagged `agent_personality` for the persona layer.
+    /// Invariants: the agent Identity fact targets agent_entity_id and carries
+    /// the agent_personality attribution marker.
+    #[test]
+    fn companion_assistant_self_cognition_goes_to_agent_facts_with_personality() {
+        let messages = vec![Message::new(
+            "assistant",
+            "我是白流苏，我这个人学不会低头。",
+        )];
+        let result = CognitionCompiler::new().compile_conversation_facts(&messages, 42, 99, 100);
+        let identity_facts: Vec<&Fact> = result
+            .agent_facts
+            .iter()
+            .filter(|f| f.fact_type == FactType::Identity)
+            .collect();
+        assert!(
+            !identity_facts.is_empty(),
+            "assistant self-cognition companion fact must be produced"
+        );
+        assert!(
+            identity_facts.iter().all(|f| f.payload.get("attribution")
+                == Some(&serde_json::Value::String("agent_personality".into()))),
+            "agent companion facts are tagged agent_personality"
+        );
+    }
+
+    /// Objective: Verify wiring the companion extractor into the compile chain
+    /// raises the total fact count above the non-companion baseline.
+    /// Invariants: total() after compile exceeds the sum of the three
+    /// non-companion channels.
+    #[test]
+    fn companion_compilation_increases_total_facts() {
+        let messages = vec![
+            Message::new("user", "今天被老板骂了，烦死了。你说我是不是太软弱。"),
+            Message::new("assistant", "我夜里睡不着，心里发慌。我是白流苏。"),
+        ];
+        let baseline = agent_facts_from_messages(&messages, 99, 100).len()
+            + agent_personality_facts_from_messages(&messages, 99, 100).len()
+            + derived_facts_from_messages(&messages, 42, 100).len()
+            + crate::conversation_compiler::compile_user_facts(&messages, 42, 100).len();
+        let result = CognitionCompiler::new().compile_conversation_facts(&messages, 42, 99, 100);
+        assert!(
+            result.total() > baseline,
+            "companion channels must raise the total above the baseline ({baseline})"
         );
     }
 }

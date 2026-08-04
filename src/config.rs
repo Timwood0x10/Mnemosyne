@@ -149,6 +149,11 @@ pub const CONTEXT_INJECT_THRESHOLD: f64 = 40.0;
 /// JSON used by the semantic persona-extraction path. Overridable at runtime
 /// via the `PERSONA_PROTOTYPES_PATH` environment variable.
 pub const PERSONA_PROTOTYPES_PATH: &str = "config/persona_prototypes.json";
+/// Path (relative to the working directory) to the structured persona card
+/// JSON used by the `persona_inject` MCP tool. Overridable at runtime via the
+/// `PERSONA_CARDS_PATH` environment variable. The file is optional: when it
+/// is absent the tool falls back to the aggregated persona card only.
+pub const PERSONA_CARDS_PATH: &str = "config/persona_cards.json";
 /// Grayscale gate for the pure-embedding memory features (plan
 /// `embedding-memory-plan.md`, P0–P3).
 ///

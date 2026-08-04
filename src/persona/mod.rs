@@ -24,16 +24,22 @@
 
 pub mod check;
 pub mod embedding_extractor;
+pub mod inject;
 pub mod keyword_extractor;
 pub mod prototype;
 pub mod reconciler;
 pub mod speaker_attribution;
+pub mod timeline;
 
 #[cfg(test)]
 mod integration_tests;
 
 pub use check::{PersonaCheckEngine, PersonaCheckResult, filter_persona_facts, is_persona_fact};
 pub use embedding_extractor::EmbeddingPersonaExtractor;
+pub use inject::{
+    PersonaCard, build_persona_card_from_facts, load_persona_cards, lookup_persona_card,
+    merge_persona_card_file,
+};
 pub use keyword_extractor::KeywordPersonaExtractor;
 pub use prototype::{
     PersonaPrototypeConfig, PersonaPrototypeEntry, PersonaPrototypes, PersonaThresholds,
@@ -43,6 +49,10 @@ pub use reconciler::{
     ReconcileDecision, ReconcileOutcome, Reconciler, ReconcilerConfig, TransitionMeta,
 };
 pub use speaker_attribution::{Speaker, SpeakerAttribution};
+pub use timeline::{
+    EvolutionTimeline, Milestone, MilestoneType, build_evolution_timeline,
+    build_timeline_for_entity,
+};
 
 use crate::cognition::{Fact, FactType};
 use crate::error::Result;
