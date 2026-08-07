@@ -60,10 +60,6 @@ struct Corpus {
     /// Novel-style dialogs (白流苏, 皮埃尔) do; the real coding-companion
     /// dialog may not — its assistant turns are operational, not self-ref.
     expect_persona_facts: bool,
-    /// Whether to also run the story_bridge stage (novel corpus only).
-    /// Real-dialog corpora compile via agent_fact_compile, not generalize_compile,
-    /// so they have no knowledge-graph story events to bridge.
-    run_story_bridge: bool,
 }
 
 const CORPORA: &[Corpus] = &[
@@ -73,7 +69,6 @@ const CORPORA: &[Corpus] = &[
         user_id: "helper",
         min_messages: 20,
         expect_persona_facts: true,
-        run_story_bridge: false,
     },
     Corpus {
         path: "corpus/warpeace_pierre.json",
@@ -81,7 +76,6 @@ const CORPORA: &[Corpus] = &[
         user_id: "listener",
         min_messages: 100,
         expect_persona_facts: true,
-        run_story_bridge: false,
     },
     Corpus {
         path: "corpus/conversation_export_2026-08-02.json",
@@ -89,7 +83,20 @@ const CORPORA: &[Corpus] = &[
         user_id: "developer",
         min_messages: 40,
         expect_persona_facts: false,
-        run_story_bridge: false,
+    },
+    Corpus {
+        path: "corpus/sonia_raskolnikov.json",
+        agent_id: "sonia",
+        user_id: "raskolnikov",
+        min_messages: 100,
+        expect_persona_facts: true,
+    },
+    Corpus {
+        path: "corpus/raskolnikov_porfiry.json",
+        agent_id: "porfiry",
+        user_id: "raskolnikov",
+        min_messages: 100,
+        expect_persona_facts: true,
     },
 ];
 
@@ -159,7 +166,7 @@ fn parse_json(result: &Value) -> Value {
     if txt.is_empty() {
         return Value::Null;
     }
-    serde_json::from_str(&txt).unwrap_or_else(|_| Value::Null)
+    serde_json::from_str(&txt).unwrap_or(Value::Null)
 }
 
 /// Build a server wired with the knowledge + fact + external tools so
@@ -462,4 +469,64 @@ async fn every_corpus_full_companion_loop() {
     println!("════════════════════════════════════════════════════════");
     println!("  全量 corpus/*.json 陪伴型完整闭环验证通过（8 阶段 × 3 语料）");
     println!("════════════════════════════════════════════════════════\n");
+}
+
+/// Objective: Verify the V7 wiring end-to-end over the real MCP tool path —
+/// `generalize_compile` (unified pipeline, incl. the NovelProvider cast
+/// registration) lands a character in the graph, and `inspect_entity`
+/// (`lore_scope` knowledge tool) reads it back with events/relations.
+/// Invariants: compile yields ≥1 object; inspect_entity("赵云") returns the
+/// entity with name 赵云 and a non-empty events list.
+#[tokio::test]
+async fn generalize_then_inspect_entity_e2e() {
+    println!("\n════════════════════════════════════════════════════════");
+    println!("  V7 端到端：generalize_compile → inspect_entity");
+    println!("════════════════════════════════════════════════════════\n");
+
+    let (server, _fact_store) = build_server().await;
+
+    // 1. Compile a 三国演义-style narrative via the production pipeline.
+    let text = "却说赵云字子龙，常山真定人也。其人身长八尺，姿颜雄伟。\
+                当日赵云在长坂坡杀入重围，救出阿斗。";
+    let compile_out = call_tool(
+        &server,
+        1,
+        "generalize_compile",
+        json!({
+            "title": "三国演义",
+            "text": text,
+            "doc_type": "text",
+            "source": "e2e",
+        }),
+    )
+    .await;
+    let compile_json = parse_json(&compile_out);
+    let objects = compile_json["stats"]["objects"].as_i64().unwrap_or(0);
+    let edges = compile_json["stats"]["edges"].as_i64().unwrap_or(0);
+    println!("  generalize_compile：objects={objects}, edges={edges}");
+    assert!(
+        objects >= 1,
+        "compile must register cast, got {compile_json}"
+    );
+
+    // 2. Read the character back through the knowledge MCP tool.
+    let inspect_out = call_tool(
+        &server,
+        2,
+        "inspect_entity",
+        json!({ "name": "赵云", "doc": "三国演义" }),
+    )
+    .await;
+    let inspect_json = parse_json(&inspect_out);
+    let name = inspect_json["object"]["name"].as_str().unwrap_or("");
+    let object_type = inspect_json["object"]["object_type"].as_str().unwrap_or("");
+    let events = inspect_json["events"].as_array().map_or(0, Vec::len);
+    println!("  inspect_entity(赵云)：name={name}, type={object_type}, events={events}");
+    assert_eq!(name, "赵云", "entity must be found by canonical name");
+    assert_eq!(object_type, "person", "object type must be person");
+    assert!(
+        events > 0,
+        "赵云 must have story events from the compile, got {inspect_json}"
+    );
+    println!("  ✓ V7 端到端链路成立（compile → graph → inspect_entity）\n");
 }

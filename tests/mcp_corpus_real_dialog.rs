@@ -142,7 +142,7 @@ fn parse_json(result: &Value) -> Value {
     if txt.is_empty() {
         return Value::Null;
     }
-    serde_json::from_str(&txt).unwrap_or_else(|_| Value::Null)
+    serde_json::from_str(&txt).unwrap_or(Value::Null)
 }
 
 /// Build a server wired with the knowledge + fact + persona tools, sharing one

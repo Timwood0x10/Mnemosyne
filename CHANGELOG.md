@@ -5,6 +5,29 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **V7 接线 sprint：清掉编译器死代码。** `src/compiler/` 下七个带 TODO 的模块
+  （`alias.rs` / `pronoun.rs` / `merge.rs` / `relation.rs` / `inference.rs` /
+  `entity/conversation.rs` / `entity/regex.rs`）从未在 `mod.rs` 声明且零引用，
+  已删除；`entity/mod.rs` 中对应的 `ConversationProvider` / `RegexProvider`
+  导出一并移除。
+- **NovelProvider 接入生产编译链路。** `compile_source`（`generalize_compile`
+  工具）现在会从小说角色字典注册"文本中实际出现（名称或别名）"的已知角色，
+  解决评审 NEW-C20（profile JSON `entities` 全空 + NovelProvider 从未实例化）；
+  角色带 `source=novel_dictionary` 标记与别名属性入库，并同步 V7 world 实体。
+- 新增端到端验证：`tests/mcp_corpus_full_loop.rs::generalize_then_inspect_entity_e2e`
+  走真实 MCP `tools/call` 路径（generalize_compile → inspect_entity），确认
+  V7 链路 compile → graph → 查询成立。
+- **迁移事务包裹（评审 H6）。** `Migrator::migrate` 现在把整轮 V1→general
+  迁移包在一个 SQLite 事务里（`SQLiteKnowledgeStore::begin/commit/rollback_transaction`），
+  中途失败即整体回滚，不再留下半迁移数据库（有文档、缺章节；边悬空等）。
+  新增三个 store 级事务测试（commit 持久 / rollback 丢弃 / 多行回滚）。
+- **全量语料验收回归。** 新增 `tests/generalize_corpus_regression.rs`：对 7 部
+  小说语料（三国演义/水浒传/红楼梦/西游记/封神演义/倾城之恋/PrideAndPrejudice）
+  + 3 组对话语料跑 `compile_source` → `inspect_entity` 全链路，全绿
+  （三国演义 3644 objects / 55763 edges，红楼梦/封神演义检出故事事件）。
+
 ### Fixed
 
 - **Conflict resolution now actually dedupes.** The existing memory's

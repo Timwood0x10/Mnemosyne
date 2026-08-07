@@ -223,16 +223,22 @@ impl PersonaCheckEngine {
             }
         }
 
-        if let Some(c) = best_conflict {
+        // Same-direction anchoring takes priority over conflict detection.
+        // Under mem0 v3 ADD-only accumulation, a stance flip leaves BOTH the
+        // old and the new fact in store ("我喜欢应酬" then "我讨厌应酬").
+        // A draft that matches the anchored same-direction stance must be
+        // consistent — otherwise every future draft is falsely flagged as a
+        // conflict against the stale, opposite stance.
+        if best_same_negated.is_some_and(|b| b >= self.thresholds.match_) {
+            result.consistent_count += 1;
+        } else if let Some(c) = best_conflict {
             result.conflicts.push(c);
-        } else if best_same_negated.is_none_or(|b| b < self.thresholds.match_) {
+        } else {
             result.drift.push(PersonaDrift {
                 fact_type: signal.fact_type,
                 draft_signal: signal.clone(),
                 reason: "no anchored persona fact (best similarity below match threshold)".into(),
             });
-        } else {
-            result.consistent_count += 1;
         }
         Ok(())
     }
@@ -289,16 +295,20 @@ impl PersonaCheckEngine {
             }
         }
 
-        if let Some(c) = best_conflict {
+        // Same-direction anchoring wins over conflict, mirroring the semantic
+        // path: after a stance flip both stances coexist in the store, so a
+        // draft aligned with the current stance must not be flagged against
+        // the stale opposite one.
+        if best_same_negated.is_some_and(|b| b > 0) {
+            result.consistent_count += 1;
+        } else if let Some(c) = best_conflict {
             result.conflicts.push(c);
-        } else if best_same_negated.is_none_or(|b| b == 0) {
+        } else {
             result.drift.push(PersonaDrift {
                 fact_type: signal.fact_type,
                 draft_signal: signal.clone(),
                 reason: "no anchored persona fact (zero shared bigrams)".into(),
             });
-        } else {
-            result.consistent_count += 1;
         }
     }
 }
@@ -552,6 +562,91 @@ mod tests {
         assert_eq!(
             result.conflicts[0].stored_fact_id, 1,
             "references stored fact"
+        );
+    }
+
+    /// Objective: Verify that after a stance flip (mem0 v3 ADD-only leaves
+    /// BOTH stances in store) a draft aligned with the CURRENT stance is
+    /// consistent, not flagged as a conflict against the stale opposite one.
+    /// Invariants: stored "我喜欢应酬"(negated=false) + "我讨厌应酬"(negated=true)
+    /// + draft "我讨厌应酬，太累了" → 0 conflicts, 0 drift, consistent_count == 1.
+    #[tokio::test]
+    async fn stance_flip_draft_not_falsely_conflicted() {
+        let engine = engine().await;
+        let stored = vec![
+            persona_fact(1, FactType::Preference, false, "我喜欢应酬"),
+            persona_fact(2, FactType::Preference, true, "我讨厌应酬"),
+        ];
+        let result = engine
+            .check("我讨厌应酬，太累了。", &stored)
+            .await
+            .expect("check");
+        assert!(
+            result.conflicts.is_empty(),
+            "draft matches the current stance; stale opposite fact must not conflict, got {:?}",
+            result.conflicts
+        );
+        assert!(result.drift.is_empty(), "no drift for an anchored stance");
+        assert_eq!(
+            result.consistent_count, 1,
+            "aligned draft counted as consistent"
+        );
+    }
+
+    /// Objective: Verify a draft contradicting the current stance is still a
+    /// conflict when the same-direction anchor is absent (the priority change
+    /// must not suppress genuine contradictions).
+    /// Invariants: stored "我喜欢应酬"(negated=false) + dissimilar same-type
+    /// fact "我喜欢爬山"(negated=false) + draft "我讨厌应酬，太累了。"
+    /// (negated=true) → 1 conflict; the dissimilar same-direction fact must
+    /// not anchor the draft.
+    #[tokio::test]
+    async fn genuine_contradiction_still_conflicts() {
+        let engine = engine().await;
+        let stored = vec![
+            persona_fact(1, FactType::Preference, false, "我喜欢应酬"),
+            persona_fact(3, FactType::Preference, false, "我喜欢爬山"),
+        ];
+        let result = engine
+            .check("我讨厌应酬，太累了。", &stored)
+            .await
+            .expect("check");
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "opposite stance with no same-direction anchor must conflict"
+        );
+        assert_eq!(
+            result.conflicts[0].stored_fact_id, 1,
+            "conflict references the genuinely contradicted fact"
+        );
+        assert!(result.drift.is_empty(), "conflict, not drift");
+    }
+
+    /// Objective: Verify the keyword fallback path applies the same
+    /// same-direction-priority rule after a stance flip.
+    /// Invariants: cache=None; stored both stances + draft matching the
+    /// current one → 0 conflicts.
+    #[tokio::test]
+    async fn keyword_fallback_stance_flip_not_falsely_conflicted() {
+        let embedder = Arc::new(StubEmbedder);
+        let engine = PersonaCheckEngine::new(None, embedder, thresholds());
+        let stored = vec![
+            persona_fact(1, FactType::Preference, false, "我喜欢应酬"),
+            persona_fact(2, FactType::Preference, true, "我讨厌应酬"),
+        ];
+        let result = engine
+            .check("我讨厌应酬，太累了。", &stored)
+            .await
+            .expect("check");
+        assert!(
+            result.conflicts.is_empty(),
+            "keyword path must also honor the current stance, got {:?}",
+            result.conflicts
+        );
+        assert_eq!(
+            result.consistent_count, 1,
+            "aligned draft counted as consistent on keyword path"
         );
     }
 

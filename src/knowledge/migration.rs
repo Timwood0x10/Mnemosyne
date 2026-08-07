@@ -92,12 +92,27 @@ impl<'a> Migrator<'a> {
         // migrator inserts in parent→child order so enforcement is unnecessary,
         // and cross-novel edges can transiently reference not-yet-migrated
         // objects. Re-enable unconditionally afterwards so production queries
-        // keep FK integrity checking.
+        // keep FK integrity checking. This PRAGMA must run OUTSIDE the
+        // transaction below — SQLite ignores foreign_keys changes mid-transaction.
         self.knowledge.set_foreign_keys_enabled(false).await?;
+        // Wrap the entire run in one transaction (H6): a failure mid-way rolls
+        // back every row written so far instead of leaving a half-migrated
+        // database (documents exist, chapters missing; edges orphaned, etc.).
+        self.knowledge.begin_transaction().await?;
         let result = self.migrate_inner().await;
-        // Best-effort re-enable; if it fails we still want the original result
-        // (or error) to surface.
-        let _ = self.knowledge.set_foreign_keys_enabled(true).await;
+        match &result {
+            Ok(_) => {
+                // Best-effort re-enable FKs first (outside the transaction);
+                // if commit then fails we still surface it.
+                let _ = self.knowledge.set_foreign_keys_enabled(true).await;
+                self.knowledge.commit_transaction().await?;
+            }
+            Err(_) => {
+                // Discard partial writes, then restore FK enforcement.
+                let _ = self.knowledge.rollback_transaction().await;
+                let _ = self.knowledge.set_foreign_keys_enabled(true).await;
+            }
+        }
         result
     }
 

@@ -596,7 +596,7 @@ impl IngestionPipeline {
                 created_at: now_ts,
                 metadata: Metadata::default(),
             };
-            self.store.create_character(&char_attr).await.ok();
+            self.store.create_character(&char_attr).await?;
             stats.characters += 1;
 
             // Insert events
@@ -615,7 +615,7 @@ impl IngestionPipeline {
                     created_at: now_ts,
                     metadata: Metadata::default(),
                 };
-                self.store.create_event(&event).await.ok();
+                self.store.create_event(&event).await?;
                 stats.events += 1;
             }
 
@@ -634,7 +634,7 @@ impl IngestionPipeline {
                     created_at: now_ts,
                     metadata: Metadata::default(),
                 };
-                self.store.create_event(&death_event).await.ok();
+                self.store.create_event(&death_event).await?;
                 stats.events += 1;
             }
 
@@ -765,7 +765,7 @@ impl IngestionPipeline {
                     created_at: now_ts,
                     metadata,
                 };
-                self.store.create_relation(&relation).await.ok();
+                self.store.create_relation(&relation).await?;
                 stats.relations += 1;
             }
         }

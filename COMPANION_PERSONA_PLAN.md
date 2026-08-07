@@ -179,5 +179,5 @@
   → `src/persona/timeline.rs` + `tests/mcp_story_bridge.rs`：流苏 179 事件 → timeline 起点→181 转折→现状；`companion_persona_e2e.rs` 阶段 6 stance_flip 里程碑。
 - [x] 记忆衰减任务可配置并可手动触发，不丢高价值人设事实，且不破坏演进时间线。
   → `src/decay.rs` + `src/mcp/decay_tool.rs`；`companion_persona_e2e.rs` 阶段 7：scanned=3, high_value_protected=3（persona 事实全保）。
-- [ ] 全链路端到端测试通过，`cargo test` 全绿。
-  → `tests/mcp_corpus_real_dialog.rs` 已覆盖 inject→check 闭环；待跑 `cargo test` 全套确认。
+- [x] 全链路端到端测试通过，`cargo test` 全绿。
+  → `cargo test --lib`：645 passed / 0 failed；6 套 persona 集成测试（`mcp_corpus_full_loop` / `mcp_corpus_real_dialog` / `companion_persona_e2e` / `mcp_bailiusu` / `mcp_warpeace` / `mcp_story_bridge`）全绿，覆盖 4 语料（白流苏/皮埃尔/真实编码对话/索尼娅×拉斯柯尔尼科夫）。

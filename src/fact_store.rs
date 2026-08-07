@@ -445,6 +445,22 @@ impl SqliteFactStore {
         Ok(ids)
     }
 
+    /// List all entity ids belonging to a single tenant.
+    ///
+    /// `memory_decay` uses this so a tenant-scoped tool call never touches
+    /// entities owned by other tenants (previously the tool scanned every
+    /// entity in the database regardless of `tenant_id`).
+    pub fn all_entity_ids_in_tenant(&self, tenant_id: &str) -> Result<Vec<i64>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare("SELECT id FROM entities WHERE tenant_id = ?1 ORDER BY id")?;
+        let mut rows = stmt.query(params![tenant_id])?;
+        let mut ids = Vec::new();
+        while let Some(row) = rows.next()? {
+            ids.push(row.get(0)?);
+        }
+        Ok(ids)
+    }
+
     /// Read the current decay flags (`weight`, `archived`) for a fact.
     ///
     /// # Errors

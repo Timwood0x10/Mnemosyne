@@ -364,7 +364,7 @@ impl ExperienceRepository for SQLiteVecStore {
         let conn = self.conn.lock().await;
         let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
         let affected = conn.execute(
-            "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12, vector=?13 WHERE id=?1",
+            "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12, vector=?13, expires_at=?14 WHERE id=?1",
             params![
                 exp.id, exp.tenant_id, exp.user_id,
                 memory_type_to_str(exp.memory_type),
@@ -374,6 +374,7 @@ impl ExperienceRepository for SQLiteVecStore {
                 exp.created_at.to_rfc3339(),
                 serde_json::to_string(&exp.metadata).unwrap_or_default(),
                 vector_json,
+                exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
             ],
         )?;
         if affected == 0 {

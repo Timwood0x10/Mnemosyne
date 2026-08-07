@@ -50,7 +50,7 @@ The previous pass fixed 9 of 11 CRITICAL/HIGH issues (C3, C7, C8, C9, H1, H4, H5
 | C5 | HIGH | `src/compiler/pipeline.rs` | Stub — no compile() entry point |
 | C6 | HIGH | `src/compiler/inference.rs` | Stub — Layer 5 missing (+ relation/merge/pronoun/alias.rs) |
 | C10 | CRITICAL | `src/storage/schema.rs:27` | `WORLD_SCHEMA` (V7 tables) defined but never executed |
-| H6 | HIGH | `src/knowledge/migration.rs` | No transaction wrapping — partial-failure corruption |
+| H6 | HIGH | `src/knowledge/migration.rs` | ✅ FIXED (V7 wiring sprint) — `Migrator::migrate` now wraps the whole run in one SQLite transaction (`begin_transaction` / `commit_transaction` / `rollback_transaction` on `SQLiteKnowledgeStore`); a mid-run failure rolls back every row instead of leaving a half-migrated DB. Tests: `transaction_commit_persists_writes`, `transaction_rollback_discards_writes`, `transaction_rollback_undoes_multi_row_writes` |
 | H10 | HIGH | `src/compiler/extract.rs:254` | `scan_mentions` hardcodes `sentence_id: 0` |
 | H11 | HIGH | `src/compiler/entity/registry.rs:97` | `assign_ids` never called → `Mention.entity_id` always `None` |
 | H12 | MEDIUM | `src/compiler/entity/mod.rs:36` | `EntityEngine` (Aho-Corasick) unused; extract.rs reimplements |

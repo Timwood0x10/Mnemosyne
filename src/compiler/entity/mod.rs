@@ -5,12 +5,10 @@
 //! multi-pattern matching against known names and aliases, then supplements
 //! with safe single-character shortname matches ("飞曰"→张飞).
 
-mod conversation;
 mod corpus;
 mod json_provider;
 mod novel;
 mod provider;
-mod regex;
 mod registry;
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -19,12 +17,10 @@ use std::collections::HashMap;
 use crate::compiler::{Mention, Sentence};
 use crate::ingest::extract::{ACTION_VERBS, DIALOG_VERBS, floor_char_boundary};
 
-pub use conversation::ConversationProvider;
 pub use corpus::CorpusEntityProvider;
 pub use json_provider::JsonEntityProvider;
 pub use novel::NovelProvider;
 pub use provider::{EntityEntry, EntityProvider};
-pub use regex::RegexProvider;
 pub use registry::{EntityDictionary, EntityRegistry};
 
 /// A single-char shortname spec (equivalent to the old

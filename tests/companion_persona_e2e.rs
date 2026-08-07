@@ -67,6 +67,8 @@ async fn companion_persona_full_loop() {
     // 1. Seed the agent's persona facts. The second and third facts form a
     //    genuine stance flip (喜欢应酬 → 不喜欢应酬) so the timeline later
     //    reports a turning point, and `persona_check` can flag a contradiction.
+    //    Fact 4 (喜欢安稳) is a single-stance topic used by stage 3b to verify
+    //    a genuine reversal with no same-direction anchor.
     let entity_id = store
         .resolve_agent(TENANT_ID, AGENT_ID)
         .expect("resolve agent");
@@ -74,12 +76,13 @@ async fn companion_persona_full_loop() {
         persona_fact(FactType::Identity, 1, false, "我是白流苏，离过婚"),
         persona_fact(FactType::Preference, 2, false, "我喜欢应酬"),
         persona_fact(FactType::Preference, 3, true, "我不喜欢应酬"),
+        persona_fact(FactType::Preference, 4, false, "我喜欢安稳"),
     ];
     for fact in &mut facts {
         fact.entity_id = entity_id;
     }
     let inserted = store.insert_batch(&facts).expect("insert persona facts");
-    assert_eq!(inserted, 3, "all three persona facts are persisted");
+    assert_eq!(inserted, 4, "all four persona facts are persisted");
 
     // 2. persona_inject: aggregate a structured persona card from the facts.
     let inject = PersonaInjectTool::new(store.clone());
@@ -102,9 +105,11 @@ async fn companion_persona_full_loop() {
     );
     assert_eq!(inject_payload["agent_id"], json!(AGENT_ID));
 
-    // 3. persona_check: guard a draft that contradicts a stored persona fact.
-    //    Stored "我喜欢应酬" (negated=false) + draft "我讨厌应酬" (negated=true)
-    //    → a genuine conflict via the keyword fallback path.
+    // 3. persona_check: verify the draft matching the CURRENT stance is NOT
+    //    falsely flagged. Facts 2 and 3 form a stance flip (我喜欢应酬 →
+    //    我不喜欢应酬); the draft "我讨厌应酬" aligns with the current negated
+    //    stance, so after the same-direction-priority fix (persona/check.rs)
+    //    it is consistent rather than a conflict against the stale affirmative.
     let check = PersonaCheckTool::new(store.clone(), Arc::new(NullEmbedder)).await;
     let check_result = check
         .call(&json!({
@@ -117,14 +122,47 @@ async fn companion_persona_full_loop() {
     let check_payload = parse_payload(&check_result);
     assert_eq!(
         check_payload["clean"],
-        json!(false),
-        "contradictory draft is flagged"
+        json!(true),
+        "draft aligned with the current stance must be clean, not a stale conflict: {check_payload}"
     );
     let conflicts = check_payload["conflicts"]
         .as_array()
         .expect("conflicts array");
-    assert!(!conflicts.is_empty(), "a genuine conflict is reported");
-    assert_eq!(conflicts[0]["fact_type"], json!("Preference"));
+    assert!(
+        conflicts.is_empty(),
+        "no conflict when the draft matches the current stance"
+    );
+
+    // 3b. A draft that genuinely contradicts the CURRENT stance (opposite
+    //     negation, no same-direction anchor) must still be flagged. Fact 4
+    //     ("我喜欢安稳", negated=false) is a single-stance topic — "我讨厌安稳"
+    //     reverses it with no affirmative anchor to shield it.
+    let contra_result = check
+        .call(&json!({
+            "agent_id": AGENT_ID,
+            "tenant_id": TENANT_ID,
+            "draft": "我讨厌安稳，太吵了。",
+        }))
+        .await
+        .expect("persona_check succeeds");
+    let contra_payload = parse_payload(&contra_result);
+    assert_eq!(
+        contra_payload["clean"],
+        json!(false),
+        "a genuine reversal of a single-stance topic must be flagged: {contra_payload}"
+    );
+    let contra_conflicts = contra_payload["conflicts"]
+        .as_array()
+        .expect("conflicts array");
+    assert!(
+        !contra_conflicts.is_empty(),
+        "a genuine contradiction is reported"
+    );
+    assert_eq!(
+        contra_conflicts[0]["fact_type"],
+        json!("Preference"),
+        "flagged conflict is a Preference reversal"
+    );
 
     // 4. relationship_update: roll intimacy from positive/negative emotion
     //    user messages (deterministic rules, no LLM).
@@ -192,7 +230,7 @@ async fn companion_persona_full_loop() {
     let trajectory = timeline_payload["trajectory"]
         .as_array()
         .expect("trajectory array");
-    assert_eq!(trajectory.len(), 3, "ADD-only trajectory keeps all facts");
+    assert_eq!(trajectory.len(), 4, "ADD-only trajectory keeps all facts");
     assert!(
         timeline_payload["milestones"]
             .as_array()
@@ -209,14 +247,10 @@ async fn companion_persona_full_loop() {
         .await
         .expect("memory_decay succeeds");
     let decay_payload = parse_payload(&decay_result);
-    assert_eq!(
-        decay_payload["scanned"],
-        json!(3),
-        "all three facts scanned"
-    );
+    assert_eq!(decay_payload["scanned"], json!(4), "all four facts scanned");
     assert_eq!(
         decay_payload["high_value_protected"],
-        json!(3),
+        json!(4),
         "persona facts are protected from decay"
     );
 }

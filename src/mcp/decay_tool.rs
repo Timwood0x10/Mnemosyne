@@ -40,7 +40,7 @@ impl MemoryDecayTool {
 #[async_trait]
 impl ToolHandler for MemoryDecayTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let _tenant_id = args
+        let tenant_id = args
             .get("tenant_id")
             .and_then(Value::as_str)
             .unwrap_or("default");
@@ -63,7 +63,17 @@ impl ToolHandler for MemoryDecayTool {
             .map_err(|e| Error::Internal(e.to_string()))?
             .as_secs() as i64;
 
-        let stats = run_decay_pass(self.fact_store.as_ref(), &config, entity_id, force, now)?;
+        // Scope the sweep to the requested tenant: without this, an omitted
+        // entity_id made the tool decay facts across EVERY tenant in the
+        // database, ignoring the advertised tenant namespace.
+        let stats = run_decay_pass(
+            self.fact_store.as_ref(),
+            &config,
+            entity_id,
+            Some(tenant_id),
+            force,
+            now,
+        )?;
 
         let payload = json!({
             "scanned": stats.scanned,
@@ -226,8 +236,11 @@ mod tests {
         assert_eq!(archived.len(), 1, "archived fact remains readable");
     }
 
-    /// Objective: Verify the tool scans all entities when `entity_id` is absent.
-    /// Invariants: scanned == total facts across entities, all archived.
+    /// Objective: Verify the tool scans all entities in the REQUESTED tenant
+    /// when `entity_id` is absent — the sweep is tenant-scoped, so entities in
+    /// other tenants are untouched.
+    /// Invariants: tenant-a holds two decayable facts → scanned == 2, both
+    /// archived; tenant-b facts are not scanned.
     #[tokio::test]
     async fn memory_decay_scans_all_entities_when_entity_id_absent() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
@@ -253,13 +266,37 @@ mod tests {
                 json!({"importance": 0.9}),
             ))
             .expect("insert bob fact");
+        // A tenant-b entity must stay out of the sweep.
+        let c = store
+            .resolve_user("tenant-b", "carol")
+            .expect("resolve carol");
+        store
+            .insert_fact(&fact(
+                None,
+                c,
+                FactType::Event,
+                0,
+                json!({"importance": 0.9}),
+            ))
+            .expect("insert carol fact");
 
         let tool = MemoryDecayTool::with_config(store, DecayConfig::default());
-        let result = tool.call(&json!({})).await.expect("call succeeds");
+        let result = tool
+            .call(&json!({ "tenant_id": "tenant-a" }))
+            .await
+            .expect("call succeeds");
         let payload = parse_payload(&result);
 
-        assert_eq!(payload["scanned"], json!(2), "both entities scanned");
-        assert_eq!(payload["archived"], json!(2), "both facts archived");
+        assert_eq!(
+            payload["scanned"],
+            json!(2),
+            "only tenant-a entities scanned"
+        );
+        assert_eq!(
+            payload["archived"],
+            json!(2),
+            "both tenant-a facts archived"
+        );
     }
 
     /// Objective: Verify the definition exposes the decay tool schema.

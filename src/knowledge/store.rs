@@ -412,6 +412,45 @@ impl SQLiteKnowledgeStore {
         Ok(())
     }
 
+    /// Begin an explicit SQLite transaction on the shared connection.
+    ///
+    /// All subsequent store calls on this connection participate in the
+    /// transaction until [`commit_transaction`](Self::commit_transaction) or
+    /// [`rollback_transaction`](Self::rollback_transaction) ends it. Used by
+    /// the migrator to make a full run atomic (H6): a failure mid-way rolls
+    /// back every row written so far instead of leaving a half-migrated
+    /// database.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `BEGIN` fails (e.g. a transaction is already
+    /// open on this connection — callers must not nest).
+    pub async fn begin_transaction(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("BEGIN;").map_err(Into::into)
+    }
+
+    /// Commit the transaction opened by [`begin_transaction`](Self::begin_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `COMMIT` fails.
+    pub async fn commit_transaction(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("COMMIT;").map_err(Into::into)
+    }
+
+    /// Roll back the transaction opened by [`begin_transaction`](Self::begin_transaction),
+    /// discarding every write made since it began.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `ROLLBACK` fails.
+    pub async fn rollback_transaction(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("ROLLBACK;").map_err(Into::into)
+    }
+
     /// Drop all general-model rows. Called by the migrator at the start of a
     /// full run so a re-migration is a clean rebuild rather than an
     /// accumulating append.
@@ -1668,6 +1707,80 @@ mod tests {
             .expect("chapter exists");
         assert_eq!(got.id, cid);
         assert_eq!(got.chapter_no, 3);
+    }
+
+    /// Objective: Verify an explicit transaction COMMIT persists all writes
+    /// made since BEGIN (H6 — the migrator's atomicity relies on this).
+    /// Invariants: after commit, the created document is visible.
+    #[tokio::test]
+    async fn transaction_commit_persists_writes() {
+        let store = fresh().await;
+        store.begin_transaction().await.expect("begin");
+        seed_doc(&store, "事务提交测试").await;
+        store.commit_transaction().await.expect("commit");
+        let doc = store
+            .find_document_by_title("事务提交测试")
+            .await
+            .expect("query");
+        assert!(
+            doc.is_some(),
+            "committed write must be visible after COMMIT"
+        );
+    }
+
+    /// Objective: Verify an explicit transaction ROLLBACK discards every
+    /// write made since BEGIN (H6 — a failed migration must not leave a
+    /// half-migrated database).
+    /// Invariants: after rollback, the created document is NOT visible.
+    #[tokio::test]
+    async fn transaction_rollback_discards_writes() {
+        let store = fresh().await;
+        store.begin_transaction().await.expect("begin");
+        seed_doc(&store, "事务回滚测试").await;
+        store.rollback_transaction().await.expect("rollback");
+        let doc = store
+            .find_document_by_title("事务回滚测试")
+            .await
+            .expect("query");
+        assert!(
+            doc.is_none(),
+            "rolled-back write must be invisible after ROLLBACK"
+        );
+    }
+
+    /// Objective: Verify a failed store call inside a transaction leaves the
+    /// database unchanged when the transaction is rolled back (H6 partial-
+    /// failure scenario at the store level).
+    /// Invariants: doc + person written, then rollback → neither remains.
+    #[tokio::test]
+    async fn transaction_rollback_undoes_multi_row_writes() {
+        let store = fresh().await;
+        store.begin_transaction().await.expect("begin");
+        let did = seed_doc(&store, "多行回滚测试").await;
+        seed_person(
+            &store,
+            did,
+            "关羽",
+            serde_json::json!({ "novel": "三国演义" }),
+        )
+        .await;
+        store.rollback_transaction().await.expect("rollback");
+        assert!(
+            store
+                .find_document_by_title("多行回滚测试")
+                .await
+                .expect("query")
+                .is_none(),
+            "document must be rolled back"
+        );
+        let objects = store
+            .list_objects_by_document(999_999)
+            .await
+            .expect("query");
+        assert!(
+            objects.is_empty(),
+            "no objects should remain from the rolled-back transaction"
+        );
     }
 
     /// Objective: Verify object CRUD, properties JSON round-trip, and

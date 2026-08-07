@@ -300,12 +300,19 @@ pub fn run_decay_pass(
     store: &SqliteFactStore,
     config: &DecayConfig,
     entity_id: Option<i64>,
+    tenant_id: Option<&str>,
     force: bool,
     now: i64,
 ) -> Result<DecayStats> {
     let entity_ids = match entity_id {
         Some(id) => vec![id],
-        None => store.all_entity_ids()?,
+        None => match tenant_id {
+            // Tenant-scoped sweep: only entities owned by the given tenant.
+            Some(tenant) => store.all_entity_ids_in_tenant(tenant)?,
+            // Unscoped sweep: used by the background decay loop, which owns
+            // the store and may touch every tenant.
+            None => store.all_entity_ids()?,
+        },
     };
     let mut stats = DecayStats::default();
     for entity_id in entity_ids {
@@ -383,7 +390,7 @@ pub async fn run_decay_loop(
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| Error::Internal(e.to_string()))?
             .as_secs() as i64;
-        run_decay_pass(&store, &config, None, false, now)?;
+        run_decay_pass(&store, &config, None, None, false, now)?;
     }
 }
 
@@ -635,7 +642,7 @@ mod tests {
             })
             .expect("insert persona fact");
 
-        let stats = run_decay_pass(&store, &DecayConfig::default(), Some(eid), false, now)
+        let stats = run_decay_pass(&store, &DecayConfig::default(), Some(eid), None, false, now)
             .expect("decay pass");
         assert_eq!(stats.scanned, 3, "all facts scanned");
         assert_eq!(stats.archived, 2, "both old events archived");

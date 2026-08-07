@@ -265,6 +265,52 @@ pub async fn compile_source(
                 stats.objects += 1;
                 cast.push(entry.canonical_name.clone());
             }
+            // ③f Novel dictionary (NEW-C20): `NovelProvider` carries the
+            // curated character tables (ingest::characters) that the shipped
+            // JSON profiles leave with `"entities": []`, and it was never
+            // instantiated in production. Register known characters that
+            // actually appear in the text (canonical name OR any alias), so
+            // the real cast — including characters who narrate but rarely
+            // speak — lands in the graph with their aliases, instead of only
+            // dialogue speakers. Unknown doc titles yield zero entries.
+            let novel = crate::compiler::entity::NovelProvider::new(&doc.title);
+            for entry in novel.entries() {
+                if entry.canonical_name == doc.title {
+                    continue;
+                }
+                let present = entry.aliases.iter().any(|a| doc.text.contains(a.as_str()))
+                    || doc.text.contains(entry.canonical_name.as_str());
+                if !present {
+                    continue;
+                }
+                if store
+                    .find_object_by_name(&entry.canonical_name, Some(doc_id))
+                    .await?
+                    .is_some()
+                {
+                    continue;
+                }
+                store
+                    .create_object(&KnowledgeObject {
+                        id: 0,
+                        doc_id,
+                        object_type: ObjectType::Person,
+                        name: entry.canonical_name.clone(),
+                        properties: serde_json::json!({
+                            "source": "novel_dictionary",
+                            "aliases": entry.aliases,
+                            "novel": doc.title,
+                        }),
+                        confidence: 0.85,
+                        created_at: now_ts(),
+                    })
+                    .await?;
+                store
+                    .upsert_world_entity(&entry.canonical_name, "person", 0.7)
+                    .await?;
+                stats.objects += 1;
+                cast.push(entry.canonical_name.clone());
+            }
             // ③e Story-event extraction: turn narrative sentences into Event
             //     objects + `participated_in` edges so `person_key_events` has a
             //     real trajectory to distill (never invoked for dialog).
@@ -371,6 +417,50 @@ mod tests {
             "txt file must yield an entity, got {stats:?}"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Objective: Verify a novel-titled text registers known characters from
+    /// the novel dictionary (NEW-C20) — a character who narrates but rarely
+    /// speaks must still land in the graph with its aliases.
+    /// Invariants: 赵云 exists with source=novel_dictionary and 子龙 among
+    /// aliases; the corpus-only path would miss him (no dialogue verb).
+    #[tokio::test]
+    async fn novel_dictionary_registers_known_cast() {
+        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
+        let text = "赵云字子龙，常山真定人也。其人身长八尺，姿颜雄伟。";
+        let source =
+            crate::knowledge::document_source::RawTextSource::new("三国演义", "test", text, "text");
+        let stats = compile_source(&source, &profile(), &store, "t1")
+            .await
+            .expect("compile");
+        assert!(stats.objects >= 1, "novel cast registered, got {stats:?}");
+
+        let zhaoyun = store
+            .find_object_by_name("赵云", None)
+            .await
+            .expect("query")
+            .expect("赵云 must exist via novel dictionary");
+        assert_eq!(
+            zhaoyun.properties.get("source").and_then(|v| v.as_str()),
+            Some("novel_dictionary"),
+            "registered from the curated dictionary"
+        );
+        let aliases = zhaoyun
+            .properties
+            .get("aliases")
+            .and_then(|a| a.as_array())
+            .expect("aliases array");
+        assert!(
+            aliases.iter().any(|a| a.as_str() == Some("子龙")),
+            "alias 子龙 must be attached, got {aliases:?}"
+        );
+        // The world model must also carry the entity.
+        let we = store
+            .find_world_entity("赵云")
+            .await
+            .expect("query")
+            .expect("world entity");
+        assert_eq!(we.name, "赵云");
     }
 
     /// Objective: Verify an empty source produces zero rows (no phantom

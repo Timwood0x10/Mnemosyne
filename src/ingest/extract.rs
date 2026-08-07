@@ -89,10 +89,13 @@ pub fn find_single_char_matches(
             let prev_ok = if pos == 0 {
                 true
             } else {
-                let prev = &text[..pos];
-                // Floor to the previous char boundary (multi-byte safe).
-                let boundary = floor_char_boundary(prev, prev.len());
-                let last_char = prev[boundary..].chars().next();
+                // The previous character is the last char before `pos`.
+                // NOTE: `floor_char_boundary(prev, prev.len())` used to be
+                // called here, but it returns `prev.len()` unchanged (it is
+                // already a char boundary), making `prev[boundary..]` the
+                // empty string and this whole check a no-op — single-char
+                // shortnames matched anywhere, even mid-word ("乌云曰" → 赵云).
+                let last_char = text[..pos].chars().next_back();
                 match last_char {
                     None => true,
                     Some(c) => {
@@ -283,5 +286,48 @@ mod tests {
         let text = "甲。乙。丙。";
         let end = sentence_end(text, 2);
         assert_eq!(end, 3, "should end at first period");
+    }
+
+    /// Objective: Verify the single-char shortname match respects the
+    /// "not preceded by a Chinese char" safety rule (NEW audit — the previous
+    /// boundary computation was a no-op, so 乌云曰 matched 赵云).
+    /// Invariants: 云 preceded by 乌 → no match; 云 preceded by punctuation →
+    /// match when followed by a dialog verb.
+    #[test]
+    fn single_char_respects_preceding_char_context() {
+        let cdefs = [crate::ingest::characters::CharacterDef {
+            name: "赵云",
+            aliases: &[],
+            single_char: Some("云"),
+        }];
+
+        // "乌云曰" — 云 is mid-word, preceded by a Han char → must NOT match.
+        let no_match = find_single_char_matches("乌云曰：此事不可。", &cdefs);
+        assert!(
+            no_match.is_empty(),
+            "云 preceded by 乌 must not match, got {no_match:?}"
+        );
+
+        // "，云曰" — 云 preceded by punctuation and followed by a verb → match.
+        let match_ok = find_single_char_matches("，云曰：诺。", &cdefs);
+        assert_eq!(match_ok.len(), 1, "punctuation-preceded 云 must match");
+        assert_eq!(match_ok[0].2, "赵云", "match resolves to 赵云");
+    }
+
+    /// Objective: Verify the single-char shortname requires a following
+    /// dialog/action verb even when the preceding char is safe.
+    /// Invariants: "，云" at end of text (no verb) → no match.
+    #[test]
+    fn single_char_requires_following_verb() {
+        let cdefs = [crate::ingest::characters::CharacterDef {
+            name: "赵云",
+            aliases: &[],
+            single_char: Some("云"),
+        }];
+        let matches = find_single_char_matches("天上飘着云。", &cdefs);
+        assert!(
+            matches.is_empty(),
+            "bare 云 as a noun must not match, got {matches:?}"
+        );
     }
 }

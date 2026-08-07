@@ -118,7 +118,13 @@ pub async fn bridge_story_events_to_persona(
         fstore.insert_fact(&raw)?;
         stats.event_facts += 1;
 
-        time += TIME_STRIDE;
+        // Saturating add: a plain `+=` overflows after ~1073 events
+        // (i32::MAX / TIME_STRIDE), panicking in debug builds and wrapping to
+        // negative timestamps in release — corrupting the timeline's ordering.
+        // Saturating keeps `time` monotonic non-decreasing, so very long
+        // novels degrade gracefully (facts after the cap share the max time)
+        // instead of crashing or inverting the sort.
+        time = time.saturating_add(TIME_STRIDE);
     }
 
     Ok(stats)
@@ -193,5 +199,102 @@ mod tests {
         assert_eq!(bridged.story_events, 0);
         assert_eq!(bridged.persona_facts, 0);
         assert_eq!(bridged.event_facts, 0);
+    }
+
+    /// Objective: verify the logical-time accumulation never overflows for a
+    /// protagonist with more story events than fit in i32::MAX / TIME_STRIDE
+    /// (~1073). A plain `time += TIME_STRIDE` would panic in debug builds and
+    /// wrap negative in release; saturating add must keep times monotonic
+    /// non-decreasing instead.
+    /// Invariants: all events bridge successfully; fact times never decrease.
+    #[tokio::test]
+    async fn bridge_many_events_never_overflows() {
+        let kstore = SQLiteKnowledgeStore::open_in_memory()
+            .await
+            .expect("kstore");
+        let doc_id = kstore
+            .create_document(&crate::knowledge::Document {
+                id: 0,
+                title: "长篇小说".into(),
+                author: None,
+                doc_type: Some("novel".into()),
+                created_at: 1,
+            })
+            .await
+            .expect("create doc");
+        let protagonist = kstore
+            .create_object(&crate::knowledge::KnowledgeObject {
+                id: 0,
+                doc_id,
+                object_type: crate::knowledge::ObjectType::Person,
+                name: "主角".into(),
+                properties: serde_json::json!({}),
+                confidence: 1.0,
+                created_at: 1,
+            })
+            .await
+            .expect("create protagonist");
+
+        // 1100 participated_in events — past the ~1073 overflow point.
+        let n_events: usize = 1100;
+        for i in 0..n_events {
+            let event_id = kstore
+                .create_object(&crate::knowledge::KnowledgeObject {
+                    id: 0,
+                    doc_id,
+                    object_type: crate::knowledge::ObjectType::Event,
+                    name: format!("第{i}回 主角行动"),
+                    properties: serde_json::json!({}),
+                    confidence: 1.0,
+                    created_at: 1,
+                })
+                .await
+                .expect("create event");
+            kstore
+                .create_edge(&crate::knowledge::KnowledgeEdge {
+                    id: 0,
+                    source_id: protagonist,
+                    target_id: event_id,
+                    predicate: "participated_in".into(),
+                    properties: serde_json::json!({}),
+                    origin: crate::knowledge::Origin::Observed,
+                    confidence: 1.0,
+                    valid_from: None,
+                    valid_to: None,
+                    created_at: 1,
+                })
+                .await
+                .expect("create edge");
+        }
+
+        let fstore = SqliteFactStore::open_in_memory().expect("fstore");
+        let bridged = bridge_story_events_to_persona(&kstore, &fstore, "default", "主角")
+            .await
+            .expect("bridge many events");
+        assert_eq!(
+            bridged.story_events, n_events,
+            "all story events must be discovered"
+        );
+        assert_eq!(
+            bridged.event_facts, n_events,
+            "every story event must produce a raw Event fact"
+        );
+
+        let entity_id = bridged.entity_id.expect("bridged entity");
+        let facts = fstore.get_facts(entity_id).expect("facts");
+        let times: Vec<i32> = facts
+            .iter()
+            .filter(|f| f.fact_type == crate::cognition::FactType::Event)
+            .map(|f| f.time)
+            .collect();
+        assert_eq!(times.len(), n_events, "one time per event fact");
+        for pair in times.windows(2) {
+            assert!(
+                pair[1] >= pair[0],
+                "fact times must be monotonic non-decreasing, got {} then {}",
+                pair[0],
+                pair[1]
+            );
+        }
     }
 }
