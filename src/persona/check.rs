@@ -353,7 +353,7 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 /// Count shared character-bigrams between two strings (offline heuristic).
-fn shared_bigrams(a: &str, b: &str) -> usize {
+pub(crate) fn shared_bigrams(a: &str, b: &str) -> usize {
     if a.chars().count() < 2 || b.chars().count() < 2 {
         return 0;
     }

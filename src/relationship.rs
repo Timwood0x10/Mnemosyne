@@ -275,33 +275,42 @@ impl RelationshipStore {
     ) -> Result<RelationshipState> {
         let agent_entity_id = self.store.resolve_agent(tenant_id, agent_id)?;
         let user_entity_id = self.store.resolve_user(tenant_id, user_id)?;
-        let current = self
-            .get_relationship(tenant_id, agent_entity_id, user_entity_id)?
-            .unwrap_or_else(|| RelationshipState::new(tenant_id, agent_entity_id, user_entity_id));
-
-        let mut intimacy = current.intimacy;
-        for msg in messages.iter().filter(|m| m.is_user()) {
-            if has_positive_emotion(&msg.content) {
-                intimacy += POSITIVE_DELTA;
-            }
-            if has_negative_emotion(&msg.content) {
-                intimacy -= NEGATIVE_DELTA;
-            }
-        }
-        intimacy = intimacy.clamp(0.0, 1.0);
-
-        let updated = RelationshipState {
-            tenant_id: tenant_id.to_string(),
+        // Read-modify-write happens inside ONE lock critical section (see
+        // `SqliteFactStore::update_relationship_atomic`): the previous
+        // get-then-upsert pair ran under two separate locks, so concurrent
+        // calls for the same (agent, user) pair both read the old intimacy,
+        // each applied its own delta, and one increment was lost.
+        self.store.update_relationship_atomic(
+            tenant_id,
             agent_entity_id,
             user_entity_id,
-            intimacy,
-            stage: RelationshipStage::from_intimacy(intimacy),
-            emotion_trend: EmotionTrend::from_delta(intimacy - current.intimacy),
-            recent_topics: extract_recent_topics(messages),
-            updated_at: unix_now(),
-        };
-        self.upsert_relationship(&updated)?;
-        Ok(updated)
+            |current| {
+                let current = current.cloned().unwrap_or_else(|| {
+                    RelationshipState::new(tenant_id, agent_entity_id, user_entity_id)
+                });
+                let mut intimacy = current.intimacy;
+                for msg in messages.iter().filter(|m| m.is_user()) {
+                    if has_positive_emotion(&msg.content) {
+                        intimacy += POSITIVE_DELTA;
+                    }
+                    if has_negative_emotion(&msg.content) {
+                        intimacy -= NEGATIVE_DELTA;
+                    }
+                }
+                intimacy = intimacy.clamp(0.0, 1.0);
+
+                RelationshipState {
+                    tenant_id: tenant_id.to_string(),
+                    agent_entity_id,
+                    user_entity_id,
+                    intimacy,
+                    stage: RelationshipStage::from_intimacy(intimacy),
+                    emotion_trend: EmotionTrend::from_delta(intimacy - current.intimacy),
+                    recent_topics: extract_recent_topics(messages),
+                    updated_at: unix_now(),
+                }
+            },
+        )
     }
 }
 

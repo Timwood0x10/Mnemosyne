@@ -585,15 +585,18 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         properties: &serde_json::Value,
         confidence: Option<f64>,
     ) -> Result<usize> {
+        // Read-modify-write runs inside a SINGLE lock critical section (the
+        // conn guard is held across SELECT and UPDATE), so concurrent callers
+        // serialize and no lost update occurs.
         let conn = self.conn.lock().await;
-        let existing: Option<String> = conn
+        let existing: Option<(String, f64)> = conn
             .query_row(
-                "SELECT properties FROM knowledge_objects WHERE id = ?1",
+                "SELECT properties, confidence FROM knowledge_objects WHERE id = ?1",
                 params![id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
-        let Some(raw) = existing else {
+        let Some((raw, stored_confidence)) = existing else {
             return Ok(0);
         };
         let mut merged = serde_json::from_str::<serde_json::Value>(&raw)
@@ -604,9 +607,12 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 merged_obj.insert(k.clone(), v.clone());
             }
         }
+        // `None` keeps the stored confidence (properties-only merge must not
+        // clobber it with a hardcoded value); `Some(c)` raises/lowers it.
+        let new_confidence = confidence.unwrap_or(stored_confidence);
         let n = conn.execute(
             "UPDATE knowledge_objects SET properties = ?1, confidence = ?2 WHERE id = ?3",
-            params![json_to_string(&merged), confidence.unwrap_or(0.8), id],
+            params![json_to_string(&merged), new_confidence, id],
         )?;
         Ok(n)
     }
@@ -1949,6 +1955,42 @@ mod tests {
             .await
             .expect("update");
         assert_eq!(n, 0, "unknown id → zero rows updated");
+    }
+
+    /// Objective: Verify a properties-only merge (`confidence=None`) does NOT
+    /// clobber the stored confidence with a hardcoded value — the previous
+    /// `unwrap_or(0.8)` silently rewrote any stored value on every merge.
+    /// Invariants: stored confidence 0.95 stays 0.95 after a None merge.
+    #[tokio::test]
+    async fn update_object_properties_none_preserves_confidence() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "三国演义").await;
+        let oid = seed_person(&store, did, "关羽", json!({"aliases": ["云长"]})).await;
+        // Establish a distinct stored confidence.
+        store
+            .update_object_properties(oid, &json!({"title": "汉寿亭侯"}), Some(0.95))
+            .await
+            .expect("seed confidence");
+
+        // Properties-only merge: must keep 0.95, not reset to 0.8.
+        store
+            .update_object_properties(oid, &json!({"preference": "重义"}), None)
+            .await
+            .expect("merge properties only");
+        let got = store.get_object(oid).await.expect("get").expect("exists");
+        assert_eq!(
+            got.confidence, 0.95,
+            "None must preserve the stored confidence, got {}",
+            got.confidence
+        );
+        assert_eq!(
+            got.properties["preference"], "重义",
+            "properties still merged"
+        );
+        assert_eq!(
+            got.properties["title"], "汉寿亭侯",
+            "previous property preserved"
+        );
     }
 
     /// Objective: Verify `search_objects` filters by type, name substring,

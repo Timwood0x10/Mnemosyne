@@ -483,10 +483,15 @@ impl ToolHandler for CharacterGraphTool {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("novels");
         let novel = args.get("novel").and_then(serde_json::Value::as_str);
+        // Clamp max_nodes: an unbounded value (or a huge one like 1,000,000)
+        // makes the engine materialize the entire character table via the
+        // `LIKE '%%'` full scan plus a per-character relation query — the same
+        // unbounded-resource hazard the other tools cap at 200.
         let max_nodes = args
             .get("max_nodes")
             .and_then(serde_json::Value::as_u64)
-            .unwrap_or(200) as usize;
+            .unwrap_or(200)
+            .min(200) as usize;
 
         // Retrieve characters (empty query matches all via LIKE '%%')
         let characters = self

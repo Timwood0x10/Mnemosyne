@@ -26,6 +26,15 @@ use crate::persona::check::is_persona_fact;
 /// only fires on genuinely separated events.
 const LARGE_GAP_THRESHOLD: i32 = 1_000_000;
 
+/// Minimum number of shared character-bigrams required for two same-type
+/// facts to count as the "same topic" in stance-flip detection. Without this,
+/// any opposite-`negated` pair of the same type was a "flip" — e.g.
+/// "我讨厌应酬" followed by "我喜欢安稳" was mislabeled a stance change even
+/// though the topics differ. One shared bigram ("喜欢") is too loose across
+/// common verb templates, so a flip requires at least two overlapping bigrams
+/// (e.g. 应酬 appears in both "我喜欢应酬" and "我不喜欢应酬").
+const STANCE_FLIP_MIN_SHARED_BIGRAMS: usize = 2;
+
 /// The kind of a persona-evolution turning point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -117,35 +126,46 @@ fn find_current(facts: &[Fact]) -> Option<Fact> {
 /// Detect turning points across the time-ordered facts.
 ///
 /// - **StanceFlip**: a `negated` fact appears after an earlier same-type fact
-///   with the opposite `negated` flag. Both facts are retained.
+///   with the opposite `negated` flag AND the two facts share the same topic
+///   (≥ [`STANCE_FLIP_MIN_SHARED_BIGRAMS`] shared character bigrams). Both
+///   facts are retained. The topic check keeps unrelated same-type facts
+///   (e.g. "我讨厌应酬" then "我喜欢安稳") from being mislabeled as a flip.
 /// - **NewTheme**: the first fact of a previously-unseen `fact_type`.
 /// - **LargeGap**: a `fact.time` jump larger than [`LARGE_GAP_THRESHOLD`].
 fn find_milestones(facts: &[Fact]) -> Vec<Milestone> {
     let mut milestones = Vec::new();
-    let mut last_negated: HashMap<FactType, bool> = HashMap::new();
+    let mut last_stance: HashMap<FactType, (bool, String)> = HashMap::new();
     let mut seen_types: HashSet<FactType> = HashSet::new();
     let mut prev_time: Option<i32> = None;
 
     for fact in facts {
-        // Stance flip: same fact_type, opposite negated flag.
+        // Stance flip: same fact_type, opposite negated flag, same topic.
         if let Some(negated) = fact
             .payload
             .get("negated")
             .and_then(serde_json::Value::as_bool)
         {
-            if let Some(prev) = last_negated.get(&fact.fact_type) {
-                if *prev != negated {
+            let content = fact
+                .payload
+                .get("content")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("");
+            if let Some((prev_negated, prev_content)) = last_stance.get(&fact.fact_type) {
+                if *prev_negated != negated
+                    && crate::persona::check::shared_bigrams(prev_content, content)
+                        >= STANCE_FLIP_MIN_SHARED_BIGRAMS
+                {
                     milestones.push(Milestone {
                         fact: fact.clone(),
                         milestone_type: MilestoneType::StanceFlip,
                         note: format!(
-                            "stance flip: {:?} went from negated={prev} to negated={negated}",
+                            "stance flip: {:?} went from negated={prev_negated} to negated={negated}",
                             fact.fact_type
                         ),
                     });
                 }
             }
-            last_negated.insert(fact.fact_type, negated);
+            last_stance.insert(fact.fact_type, (negated, content.to_string()));
         }
 
         // New theme: first fact of a fresh fact_type.
@@ -227,6 +247,57 @@ mod tests {
         assert_eq!(
             timeline.trajectory[1].payload["negated"], true,
             "the later fact is also preserved"
+        );
+    }
+
+    /// Objective: Verify two opposite-negated facts of the SAME type but
+    /// DIFFERENT topics are NOT a stance flip — "我讨厌应酬" then "我喜欢安稳"
+    /// share no topic, so no turning point (regression for the audit finding
+    /// that any negated flip was mislabeled regardless of topic similarity).
+    /// Invariants: zero StanceFlip milestones; both facts still in trajectory.
+    #[test]
+    fn unrelated_topics_are_not_a_stance_flip() {
+        let facts = vec![
+            fact(1, FactType::Preference, 2024, Some(true), "我讨厌应酬"),
+            fact(2, FactType::Preference, 2026, Some(false), "我喜欢安稳"),
+        ];
+        let timeline = build_evolution_timeline(&facts);
+
+        let flips: Vec<&Milestone> = timeline
+            .milestones
+            .iter()
+            .filter(|m| m.milestone_type == MilestoneType::StanceFlip)
+            .collect();
+        assert!(
+            flips.is_empty(),
+            "different topics must not be a stance flip, got {flips:?}"
+        );
+        assert_eq!(
+            timeline.trajectory.len(),
+            2,
+            "ADD-only: both facts must remain in the trajectory"
+        );
+    }
+
+    /// Objective: Verify the stance-flip topic guard still fires when the
+    /// content is short (a single shared bigram is NOT enough — the flip
+    /// needs the same topic, not just a shared verb template).
+    /// Invariants: "我喜欢" vs "我讨厌" alone (no topic bigram) → no flip.
+    #[test]
+    fn verb_template_alone_is_not_a_stance_flip() {
+        let facts = vec![
+            fact(1, FactType::Preference, 2024, Some(false), "我喜欢"),
+            fact(2, FactType::Preference, 2026, Some(true), "我讨厌"),
+        ];
+        let timeline = build_evolution_timeline(&facts);
+        let flips: Vec<&Milestone> = timeline
+            .milestones
+            .iter()
+            .filter(|m| m.milestone_type == MilestoneType::StanceFlip)
+            .collect();
+        assert!(
+            flips.is_empty(),
+            "a shared verb template without a shared topic must not flip"
         );
     }
 

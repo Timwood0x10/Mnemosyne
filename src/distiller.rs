@@ -448,7 +448,12 @@ impl PipelineDistiller {
                         exp.confidence,
                     );
                     existing_mem.id = exp.id.clone();
-                    existing_mem.vector = self.store.get_vector(&exp.id).await.unwrap_or_default();
+                    // Rehydrate the REAL stored vector. Propagate read
+                    // failures: silently defaulting to an empty vector made a
+                    // storage error look like "no embedding", so cosine
+                    // similarity returned None, the resolver picked
+                    // NoConflict, and a genuine duplicate was inserted.
+                    existing_mem.vector = self.store.get_vector(&exp.id).await?;
                     let resolution = self.resolver.resolve(&mem, &existing_mem, exp.confidence);
                     match resolution {
                         Resolution::ReplaceOld { old_id, .. } => {

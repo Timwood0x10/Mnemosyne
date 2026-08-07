@@ -18,8 +18,15 @@ pub const PERSONALITY_KW: &[&str] = &[
 ];
 
 /// Keywords indicating death.
+///
+/// Deliberately NO bare single characters (`死`/`亡`/`卒`/`杀`): a 40-char
+/// window after a character name that merely CONTAINS one of those chars
+/// produces rampant false positives in classical novels — "刘备率士卒"
+/// (contains 卒), "张飞杀入敌阵" (contains 杀), "曹操逃亡" (contains 亡)
+/// all used to mark the character as dead. Only multi-char death phrases
+/// survive, so the death flag requires an actual death expression.
 pub const DEATH_KW: &[&str] = &[
-    "死", "亡", "卒", "杀", "斩首", "身亡", "战死", "阵亡", "去世", "薨",
+    "身亡", "战死", "阵亡", "去世", "薨", "死亡", "被杀", "斩首", "病逝", "毙命", "殒命",
 ];
 
 /// Largest char boundary at or before `pos`, clamped to `text.len()`.
@@ -267,6 +274,25 @@ mod tests {
         assert!(!STRONG_VERBS.is_empty());
         assert!(STRONG_VERBS.contains(&"杀"));
         assert!(STRONG_VERBS.contains(&"死"));
+    }
+
+    /// Objective: Verify DEATH_KW contains NO bare ambiguous single characters
+    /// (死/亡/卒/杀) — a 40-char window merely containing such a char made
+    /// "刘备率士卒"/"张飞杀入敌阵"/"曹操逃亡" mark the character dead
+    /// (audit finding). "薨" (noble death) is a legitimate single-char death
+    /// expression and stays allowed; the banned set is the ambiguous set.
+    /// Invariants: none of 死/亡/卒/杀 appears as a keyword.
+    #[test]
+    fn death_keywords_are_phrase_level_only() {
+        for bare in ["死", "亡", "卒", "杀"] {
+            assert!(
+                !DEATH_KW.contains(&bare),
+                "bare `{bare}` must not be a death keyword (false positives)"
+            );
+        }
+        // The genuine death phrases survive.
+        assert!(DEATH_KW.contains(&"身亡"));
+        assert!(DEATH_KW.contains(&"战死"));
     }
 
     #[test]

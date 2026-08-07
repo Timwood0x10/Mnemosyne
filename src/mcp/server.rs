@@ -211,8 +211,27 @@ impl MCPServer {
                 // No response for notifications.
                 Ok(None)
             }
-            JSONRPCMessage::Response(_) => {
-                // Server shouldn't receive responses; ignore.
+            JSONRPCMessage::Response(resp) => {
+                // A malformed request that has an `id` but no `method`
+                // (e.g. {"jsonrpc":"2.0","id":1}) deserializes as a Response
+                // because result/error are both optional — it was previously
+                // silently dropped here, hanging the client forever. A real
+                // Response always carries result OR error, so a Response with
+                // NEITHER is a malformed request: answer -32600 (JSON-RPC
+                // 2.0 §5.1) instead of ignoring it.
+                if resp.result.is_none() && resp.error.is_none() {
+                    return Ok(Some(JSONRPCMessage::Response(JSONRPCResponse {
+                        jsonrpc: "2.0".to_string(),
+                        id: resp.id,
+                        result: None,
+                        error: Some(JSONRPCError {
+                            code: ERR_INVALID_REQUEST,
+                            message: "invalid request: missing `method`".into(),
+                            data: None,
+                        }),
+                    })));
+                }
+                // Server shouldn't receive genuine responses; ignore.
                 Ok(None)
             }
         }
@@ -418,6 +437,44 @@ mod tests {
                     Some("test")
                 );
                 assert!(result.get("capabilities").is_some());
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    /// Objective: Verify a malformed request with an `id` but NO `method`
+    /// (e.g. {"jsonrpc":"2.0","id":1}) deserializes as a Response and is NOT
+    /// silently dropped — the server must answer -32600 Invalid Request so the
+    /// client does not hang forever (audit finding: previously ignored).
+    /// Invariants: one response; error.code == -32600; error message mentions
+    /// the missing method; the id is echoed.
+    #[tokio::test]
+    async fn malformed_request_without_method_gets_32600() {
+        let server = MCPServer::new(Implementation {
+            name: "test".into(),
+            version: "1.0.0".into(),
+        });
+        let mut t = VecTransport {
+            inbox: vec![JSONRPCMessage::Response(JSONRPCResponse {
+                jsonrpc: "2.0".into(),
+                id: Value::from(42),
+                result: None,
+                error: None,
+            })],
+            outbox: vec![],
+        };
+        server.serve(&mut t).await.expect("serve");
+        assert_eq!(t.outbox.len(), 1, "malformed request must get a response");
+        match &t.outbox[0] {
+            JSONRPCMessage::Response(resp) => {
+                assert_eq!(resp.id, Value::from(42), "id echoed");
+                let err = resp.error.as_ref().expect("error present");
+                assert_eq!(err.code, ERR_INVALID_REQUEST, "code -32600");
+                assert!(
+                    err.message.contains("method"),
+                    "message explains the missing method, got: {}",
+                    err.message
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }

@@ -246,14 +246,23 @@ impl Default for StateEngine {
 }
 
 /// Keep only the newest fact for each semantic payload key.
+///
+/// Facts that carry one of the given keys are bucketed by that key (newest
+/// wins). Facts WITHOUT any key are distinct facts (e.g. observation-compiler
+/// output has `{action, subject, object}` and no semantic key): they must not
+/// all fold into a single "default" bucket — that silently dropped all but
+/// the last. They are bucketed by their full payload instead, so different
+/// facts each survive while exact duplicates still dedupe to the newest.
 fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> Vec<Fact> {
     let mut latest = std::collections::BTreeMap::new();
     for fact in facts.iter().filter(|fact| fact.fact_type == fact_type) {
         let semantic_key = keys
             .iter()
             .find_map(|key| fact.payload.get(*key).and_then(|value| value.as_str()))
-            .unwrap_or("default")
-            .to_owned();
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                serde_json::to_string(&fact.payload).unwrap_or_else(|_| "{}".to_string())
+            });
         latest.insert(semantic_key, fact.clone());
     }
     latest.into_values().collect()
@@ -520,6 +529,36 @@ mod tests {
             snapshot.format_json()["entity_id"],
             7,
             "JSON should preserve the entity id"
+        );
+    }
+
+    /// Objective: Verify facts WITHOUT a semantic payload key are NOT folded
+    /// into a single "default" bucket — each distinct fact survives (the
+    /// observation-compiler output `{action, subject, object}` has no key, so
+    /// previously N distinct goals collapsed into one, silently dropping all
+    /// but the last).
+    /// Invariants: two distinct unkeyed Goal facts both appear in `goals`.
+    #[test]
+    fn unkeyed_facts_are_not_folded_together() {
+        let facts = vec![
+            fact(
+                FactType::Goal,
+                2024,
+                serde_json::json!({"action": "学习", "subject": "Alice", "object": "Rust"}),
+            ),
+            fact(
+                FactType::Goal,
+                2026,
+                serde_json::json!({"action": "减肥", "subject": "Alice", "object": null}),
+            ),
+        ];
+        let state = StateEngine::new().aggregate(&facts);
+        assert_eq!(
+            state.goals.len(),
+            2,
+            "both unkeyed goals must survive, got {}: {:?}",
+            state.goals.len(),
+            state.goals
         );
     }
 

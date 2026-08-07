@@ -319,9 +319,14 @@ fn row_to_experience(row: &rusqlite::Row) -> rusqlite::Result<Experience> {
 #[async_trait]
 impl ExperienceRepository for SQLiteVecStore {
     async fn create(&self, exp: &Experience) -> Result<()> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
         let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
-        conn.execute(
+        // Single transaction: `memories` and `vec_memories` must land (or
+        // neither). Without it a vec insert failure left the memory row
+        // persisted while the caller got an error — a retry then hit the PK
+        // conflict on `memories.id`.
+        let tx = conn.transaction()?;
+        tx.execute(
             "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, expires_at, metadata, vector)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
@@ -340,12 +345,13 @@ impl ExperienceRepository for SQLiteVecStore {
         if !exp.vector.is_empty() {
             let vec_json = serde_json::to_string(&exp.vector)
                 .map_err(|e| StorageError::Schema(format!("serialize vector: {e}")))?;
-            conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
                 params![exp.id, vec_json],
             )?;
         }
 
+        tx.commit()?;
         Ok(())
     }
 
@@ -361,9 +367,12 @@ impl ExperienceRepository for SQLiteVecStore {
     }
 
     async fn update(&self, exp: &Experience) -> Result<()> {
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
         let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
-        let affected = conn.execute(
+        // Single transaction: the memories UPDATE and the vec_memories
+        // upsert must land together, mirroring `create`.
+        let tx = conn.transaction()?;
+        let affected = tx.execute(
             "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12, vector=?13, expires_at=?14 WHERE id=?1",
             params![
                 exp.id, exp.tenant_id, exp.user_id,
@@ -383,11 +392,12 @@ impl ExperienceRepository for SQLiteVecStore {
         if !exp.vector.is_empty() {
             let vec_json = serde_json::to_string(&exp.vector)
                 .map_err(|e| StorageError::Schema(format!("serialize vector: {e}")))?;
-            conn.execute(
+            tx.execute(
                 "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
                 params![exp.id, vec_json],
             )?;
         }
+        tx.commit()?;
         Ok(())
     }
 

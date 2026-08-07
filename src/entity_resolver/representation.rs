@@ -105,9 +105,14 @@ impl EntityRepresentationBuilder for FixedTemplateBuilder {
             parts.push(format!("Name:{}", name));
         }
 
-        // Alias × 2
+        // Alias × 2 (importance weighting, symmetric with Name × 3 above).
+        // The doc contract (structure docs: "2. Alias (repeated 2×)") requires
+        // two copies; a single push made aliases underweighted relative to the
+        // canonical name in the embedding template.
         for alias in &snapshot.aliases {
-            parts.push(format!("Alias:{}", alias));
+            for _ in 0..2 {
+                parts.push(format!("Alias:{}", alias));
+            }
         }
 
         // Type

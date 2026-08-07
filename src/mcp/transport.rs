@@ -118,7 +118,6 @@ impl Transport for StdioTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::mcp::types::JSONRPCRequest;
 
     /// Objective: Verify StdioTransport::new constructs without panic.
     /// Invariants: new() returns a value, default() equals new().

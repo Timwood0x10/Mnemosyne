@@ -355,8 +355,13 @@ pub fn build_timeline(
     // event loop stores both (A,B) and (B,A) with the same type, so emitting
     // both would double every ongoing relation (NEW-H23). We canonicalize to
     // the lexicographically-smaller direction and skip the reverse.
+    // HashMap::drain() yields in arbitrary order, which made the emitted
+    // direction (and thus the relation list) non-deterministic across runs;
+    // sort by the canonical pair so output is stable.
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    for ((source, target), (rel_type, started)) in current.drain() {
+    let mut active: Vec<((String, String), (String, i32))> = current.drain().collect();
+    active.sort_by(|a, b| a.0.cmp(&b.0));
+    for ((source, target), (rel_type, started)) in active {
         let canon_key = if source <= target {
             (source.clone(), target.clone())
         } else {

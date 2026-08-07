@@ -21,8 +21,8 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Sse;
 use axum::response::sse::{Event, KeepAlive};
+use axum::response::{IntoResponse, Sse};
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
@@ -34,6 +34,13 @@ use crate::mcp::types::JSONRPCMessage;
 
 /// Maximum accepted POST body size for a single JSON-RPC message (1 MiB).
 const MAX_BODY_BYTES: usize = 1_000_000;
+
+/// How long `POST /message` waits for the matching JSON-RPC response before
+/// falling back to `202 Accepted`. When no `/sse` stream is open the spec
+/// ("respond in POST body when no stream is open") says the server SHOULD
+/// return the response in the POST body; the timeout keeps a slow or absent
+/// handler from pinning the request indefinitely.
+const POST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Channel-based [`Transport`] bridged to the HTTP endpoints.
 ///
@@ -106,16 +113,26 @@ impl AppState {
 
 /// `POST /message` handler: accept one JSON-RPC message (or a batch array),
 /// forward it to the protocol loop, and acknowledge with 202 Accepted.
+/// When no `/sse` stream is open the response would otherwise be lost on the
+/// broadcast channel; per the MCP spec ("respond in POST body when no stream
+/// is open") we subscribe to the response channel and, if the matching
+/// response arrives within [`POST_RESPONSE_TIMEOUT`], return it in the POST
+/// body instead. Slow/absent handlers still get a prompt 202.
 async fn message_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Body,
-) -> std::result::Result<StatusCode, (StatusCode, String)> {
+) -> std::result::Result<axum::response::Response, (StatusCode, String)> {
     state.check_auth(&headers)?;
 
     let bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("read body: {e}")))?;
+
+    // Subscribe BEFORE forwarding so a fast response is not missed: the
+    // protocol loop may answer before this handler awaits recv.
+    let mut response_rx = state.response_tx.subscribe();
+    let mut expected_ids: Vec<serde_json::Value> = Vec::new();
 
     // MCP over HTTP+SSE: a POST body is a single JSON-RPC message, but be
     // liberal and accept a batch array too (JSON-RPC 2.0 §6), forwarding each.
@@ -126,6 +143,11 @@ async fn message_handler(
                 format!("invalid JSON-RPC batch: {e}"),
             )
         })?;
+        for msg in &batch {
+            if let JSONRPCMessage::Request(req) = msg {
+                expected_ids.push(req.id.clone());
+            }
+        }
         for msg in batch {
             state.request_tx.send(msg).await.map_err(|_| {
                 (
@@ -141,6 +163,9 @@ async fn message_handler(
                 format!("invalid JSON-RPC message: {e}"),
             )
         })?;
+        if let JSONRPCMessage::Request(req) = &msg {
+            expected_ids.push(req.id.clone());
+        }
         state.request_tx.send(msg).await.map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -148,7 +173,42 @@ async fn message_handler(
             )
         })?;
     }
-    Ok(StatusCode::ACCEPTED)
+
+    // Notifications produce no response; nothing to wait for.
+    if expected_ids.is_empty() {
+        return Ok(StatusCode::ACCEPTED.into_response());
+    }
+
+    // Wait for the first response whose id matches one of the forwarded
+    // requests. Lagged subscribers simply skip (older messages are stale).
+    let matched = tokio::time::timeout(POST_RESPONSE_TIMEOUT, async {
+        loop {
+            match response_rx.recv().await {
+                Ok(JSONRPCMessage::Response(resp))
+                    if expected_ids.iter().any(|id| *id == resp.id) =>
+                {
+                    break Some(JSONRPCMessage::Response(resp));
+                }
+                Ok(_) => continue, // another request's response; keep waiting
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+            }
+        }
+    })
+    .await;
+
+    match matched {
+        Ok(Some(resp)) => {
+            let json = serde_json::to_string(&resp)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
+            Ok(axum::response::Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json))
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("body: {e}")))?)
+        }
+        _ => Ok(StatusCode::ACCEPTED.into_response()),
+    }
 }
 
 /// `GET /sse` handler: open a Server-Sent Events stream carrying every
@@ -530,6 +590,73 @@ mod tests {
             }
             other => panic!("expected Response, got {other:?}"),
         }
+
+        // Shut down cleanly and await the serve task.
+        drop(request_tx);
+        let _ = handle.await;
+    }
+
+    /// Objective: Verify a `POST /message` with NO `/sse` subscriber still
+    /// receives its JSON-RPC response — the spec's "respond in POST body when
+    /// no stream is open" fallback. Previously the response was broadcast to
+    /// zero subscribers and silently lost (202 forever).
+    /// Invariants: HTTP 200; body is the JSON-RPC response echoing the id.
+    #[ignore]
+    #[tokio::test]
+    async fn post_message_returns_response_body_without_sse() {
+        let (request_tx, request_rx) = mpsc::channel::<JSONRPCMessage>(8);
+        let (response_tx, _) = broadcast::channel(8);
+        let response_tx_serve = response_tx.clone();
+        let server = MCPServer::new(Implementation {
+            name: "lorescope-test".into(),
+            version: "0.0.1".into(),
+        });
+        let handle = tokio::spawn(async move {
+            let mut transport = HttpTransport::new(request_rx, response_tx_serve);
+            server.serve(&mut transport).await.expect("serve")
+        });
+
+        // No SSE subscriber is ever created — the response must come back in
+        // the POST body (the regression this test locks in). The original
+        // `request_tx` is kept outside so the test can drop it at the end to
+        // signal EOF to the serve loop.
+        let state = AppState {
+            request_tx: request_tx.clone(),
+            response_tx,
+            token: None,
+        };
+        let app = router(state);
+
+        let response = app
+            .oneshot(
+                HttpRequest::builder()
+                    .method("POST")
+                    .uri("/message")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}"#,
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("oneshot");
+
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "response must come back in the POST body, not be lost"
+        );
+        let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES)
+            .await
+            .expect("read body");
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON response");
+        assert_eq!(resp["id"], json!(1), "response echoes the request id");
+        assert!(
+            resp["result"]["serverInfo"]["name"]
+                .as_str()
+                .is_some_and(|n| n == "lorescope-test"),
+            "initialize result present in POST body, got {resp}"
+        );
 
         // Shut down cleanly and await the serve task.
         drop(request_tx);

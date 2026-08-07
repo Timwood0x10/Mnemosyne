@@ -44,26 +44,41 @@ fn cn_num_value(c: char) -> Option<i32> {
 ///
 /// Handles both pure Chinese numerals ("一百二十") and mixed
 /// Arabic-and-Chinese ("第120回").
+///
+/// The old implementation accumulated 十/百/千 directly into `total`, then
+/// when it met 万 it only multiplied the residual `temp` — so 十万 parsed as
+/// 10*10 + 1*10000 = 10010 instead of 100000, and 一百二十万 as 10120
+/// instead of 1200000. The correct model is segmented: digits and 十/百/千
+/// build the current section; 万 (and 亿 if ever added) multiplies the whole
+/// section into the running total and resets it.
 pub fn chinese_to_int(s: &str) -> i32 {
     let s = s.trim();
-    let mut total = 0i32;
-    let mut temp = 0i32;
+    let mut total = 0i32; // 万-accumulated value (segments already scaled)
+    let mut section = 0i32; // current sub-10000 segment
+    let mut temp = 0i32; // pending digit
     for c in s.chars() {
         if let Some(n) = cn_num_value(c) {
-            if n >= 10 {
-                if temp == 0 {
-                    temp = 1;
-                }
-                total += temp * n;
+            if n >= 10_000 {
+                // 万/亿: scale the whole section and fold into total.
+                let base = if section == 0 { 1 } else { section };
+                total = total.saturating_add(base.saturating_mul(n));
+                section = 0;
+                temp = 0;
+            } else if n >= 10 {
+                // 十/百/千: multiply the pending digit into the section.
+                let digit = if temp == 0 { 1 } else { temp };
+                section = section.saturating_add(digit.saturating_mul(n));
                 temp = 0;
             } else {
                 temp = n;
             }
         } else if c.is_ascii_digit() {
-            temp = temp * 10 + (c as i32 - '0' as i32);
+            temp = temp
+                .saturating_mul(10)
+                .saturating_add(c as i32 - '0' as i32);
         }
     }
-    total + temp
+    total.saturating_add(section).saturating_add(temp)
 }
 
 /// Check if `s` is a valid chapter numeral: non-empty and containing only
@@ -215,6 +230,43 @@ mod tests {
     fn chinese_to_int_eleven() {
         assert_eq!(chinese_to_int("十一"), 11);
         assert_eq!(chinese_to_int("二十一"), 21);
+    }
+
+    /// Objective: Verify 万-scale numerals parse correctly — the old
+    /// algorithm folded 十/百/千 into `total` and only scaled the residual
+    /// `temp` by 万, so 十万 → 10010 and 一百二十万 → 10120 (audit finding).
+    /// Invariants: 十万 == 100000; 一百二十万 == 1200000; 一万 == 10000;
+    /// 十万八千 == 108000; 三千五百 == 3500 still holds.
+    #[test]
+    fn chinese_to_int_wan_scale() {
+        assert_eq!(chinese_to_int("一万"), 10000, "一万 must be 10000");
+        assert_eq!(chinese_to_int("十万"), 100000, "十万 must be 100000");
+        assert_eq!(
+            chinese_to_int("一百二十万"),
+            1_200_000,
+            "一百二十万 must be 1200000"
+        );
+        assert_eq!(
+            chinese_to_int("十万八千"),
+            108_000,
+            "十万八千 must be 108000"
+        );
+        // Existing small-number behavior is unchanged.
+        assert_eq!(chinese_to_int("三千五百"), 3500);
+    }
+
+    /// Objective: Verify an absurdly long Arabic digit string does not panic
+    /// (debug builds overflow on plain `temp * 10`). Saturating arithmetic
+    /// must clamp instead of panicking.
+    /// Invariants: no panic; result is finite (i32::MAX clamped).
+    #[test]
+    fn chinese_to_int_long_arabic_does_not_panic() {
+        let huge = "12345678901234567890";
+        let n = chinese_to_int(huge);
+        assert!(
+            n == i32::MAX || n > 0,
+            "long digit string must saturate without panicking, got {n}"
+        );
     }
 
     #[test]
