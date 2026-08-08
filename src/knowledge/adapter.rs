@@ -158,7 +158,7 @@ pub trait ExternalSignalProvider: Send + Sync {
 /// One retrieval hit from an external index-mode source.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ExternalHit {
-    /// External id (opaque to LoreScope).
+    /// External id (opaque to Mnemosyne).
     pub id: String,
     /// Snippet text used as the synthetic experience content.
     pub text: String,
@@ -337,7 +337,7 @@ impl ExternalSignalProvider for DbAdapter {
 // ───────────────────────────────────────────────────────────────────────────
 
 /// Index-mode vector adapter. Reuses an external vector store via an injected
-/// similarity closure — LoreScope never re-computes embeddings for the source.
+/// similarity closure — Mnemosyne never re-computes embeddings for the source.
 pub struct VectorAdapter {
     name: String,
     similarity_fn: ExternalQueryFn,

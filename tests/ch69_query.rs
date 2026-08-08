@@ -4,7 +4,7 @@
 //! Note: Diagnostic test — uses in-memory store. If no data has been seeded
 //! (via migration), search returns empty results and the test passes gracefully.
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 #[tokio::test]

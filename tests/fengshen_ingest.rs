@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 
 #[tokio::test]
 async fn fengshen_ingest() {
@@ -23,13 +23,13 @@ async fn fengshen_ingest() {
         ..Default::default()
     };
 
-    let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
+    let mut dict = mnemosyne::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(
         text,
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx
@@ -67,7 +67,7 @@ async fn fengshen_ingest() {
 
     // Create document first (required by FK constraint on knowledge_objects)
     let doc = k
-        .create_document(&lore_scope::knowledge::Document {
+        .create_document(&mnemosyne::knowledge::Document {
             id: 0,
             title: "封神演义".into(),
             author: None,
@@ -79,10 +79,10 @@ async fn fengshen_ingest() {
 
     // Create doc concept object referencing the document
     let doc_id = k
-        .create_object(&lore_scope::knowledge::KnowledgeObject {
+        .create_object(&mnemosyne::knowledge::KnowledgeObject {
             id: 0,
             doc_id: doc,
-            object_type: lore_scope::knowledge::ObjectType::Concept,
+            object_type: mnemosyne::knowledge::ObjectType::Concept,
             name: "封神演义".into(),
             properties: serde_json::json!({"source": "corpus/封神演义.txt"}),
             confidence: 1.0,
@@ -93,10 +93,10 @@ async fn fengshen_ingest() {
 
     for ev in &ctx.events {
         let _event_id = k
-            .create_object(&lore_scope::knowledge::KnowledgeObject {
+            .create_object(&mnemosyne::knowledge::KnowledgeObject {
                 id: 0,
                 doc_id,
-                object_type: lore_scope::knowledge::ObjectType::Event,
+                object_type: mnemosyne::knowledge::ObjectType::Event,
                 name: ev.title.clone(),
                 properties: serde_json::json!({
                     "chapter": ev.timestamp,

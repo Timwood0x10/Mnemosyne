@@ -1,4 +1,4 @@
-//! # LoreScope World Model Compiler V7
+//! # Mnemosyne World Model Compiler V7
 //!
 //! Converts narrative text into an Entity-centric world model.
 //!

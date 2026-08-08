@@ -1,0 +1,18 @@
+{
+  "decision": [
+    "决定", "选择", "改主意", "先做", "不做", "一步到位", "灰度", "选", "定了",
+    "decide", "decided", "choose", "switch", "go with", "do not", "skip"
+  ],
+  "goal": [
+    "目标", "计划", "想要", "落地", "做完", "验收", "完成", "实现", "搞定", "推进",
+    "goal", "aim", "want", "plan to", "finish", "complete", "ship", "land"
+  ],
+  "problem": [
+    "问题", "根因", "失败", "报错", "局限", "缺陷", "bug", "error", "fail", "break",
+    "issue", "root cause", "limitation", "flaw", "crash", "does not work"
+  ],
+  "plan": [
+    "方案", "步骤", "阶段", "下一步", "怎么做", "路线", "路线图", "分步",
+    "approach", "step", "phase", "next", "roadmap", "how to", "strategy"
+  ]
+}

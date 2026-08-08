@@ -29,24 +29,24 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use lore_scope::cognition::FactStore as _;
-use lore_scope::embed::NullEmbedder;
-use lore_scope::fact_store::SqliteFactStore;
-use lore_scope::knowledge::EntityLinker;
-use lore_scope::knowledge::SQLiteKnowledgeStore;
-use lore_scope::knowledge::external::ExternalKnowledgeRegistry;
-use lore_scope::mcp::external_knowledge_tools::register_external_knowledge_tools;
-use lore_scope::mcp::generalize_tool::register_generalize_tool;
-use lore_scope::mcp::knowledge_tools::register_knowledge_tools;
-use lore_scope::mcp::persona_check_tool::PersonaCheckTool;
-use lore_scope::mcp::persona_inject_tool::PersonaInjectTool;
-use lore_scope::mcp::relationship_tool::{
+use mnemosyne::cognition::FactStore as _;
+use mnemosyne::embed::NullEmbedder;
+use mnemosyne::fact_store::SqliteFactStore;
+use mnemosyne::knowledge::EntityLinker;
+use mnemosyne::knowledge::SQLiteKnowledgeStore;
+use mnemosyne::knowledge::external::ExternalKnowledgeRegistry;
+use mnemosyne::mcp::external_knowledge_tools::register_external_knowledge_tools;
+use mnemosyne::mcp::generalize_tool::register_generalize_tool;
+use mnemosyne::mcp::knowledge_tools::register_knowledge_tools;
+use mnemosyne::mcp::persona_check_tool::PersonaCheckTool;
+use mnemosyne::mcp::persona_inject_tool::PersonaInjectTool;
+use mnemosyne::mcp::relationship_tool::{
     PersonaTimelineTool, RelationshipQueryTool, RelationshipUpdateTool,
 };
-use lore_scope::mcp::server::{MCPServer, ServerBuilder};
-use lore_scope::mcp::transport::Transport;
-use lore_scope::mcp::types::ToolHandler;
-use lore_scope::mcp::types::{Implementation, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse};
+use mnemosyne::mcp::server::{MCPServer, ServerBuilder};
+use mnemosyne::mcp::transport::Transport;
+use mnemosyne::mcp::types::ToolHandler;
+use mnemosyne::mcp::types::{Implementation, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse};
 use serde_json::{Value, json};
 
 /// One corpus entry: file path + the agent_id to attribute assistant turns to.
@@ -108,10 +108,10 @@ struct OneShotTransport {
 
 #[async_trait]
 impl Transport for OneShotTransport {
-    async fn recv(&mut self) -> lore_scope::error::Result<Option<JSONRPCMessage>> {
+    async fn recv(&mut self) -> mnemosyne::error::Result<Option<JSONRPCMessage>> {
         Ok(self.inbox.pop())
     }
-    async fn send(&mut self, msg: &JSONRPCMessage) -> lore_scope::error::Result<()> {
+    async fn send(&mut self, msg: &JSONRPCMessage) -> mnemosyne::error::Result<()> {
         self.outbox.push(msg.clone());
         Ok(())
     }
@@ -223,7 +223,7 @@ fn load_messages(corpus_path: &str) -> Vec<Value> {
 }
 
 /// Count persona facts (attribution == "agent_personality") for an entity.
-fn count_persona_facts(facts: &[lore_scope::cognition::Fact]) -> (usize, Vec<String>) {
+fn count_persona_facts(facts: &[mnemosyne::cognition::Fact]) -> (usize, Vec<String>) {
     let mut facets = std::collections::BTreeSet::new();
     let mut n = 0;
     for f in facts {
@@ -425,7 +425,7 @@ async fn every_corpus_full_companion_loop() {
         );
 
         // ── Stage 8: memory_decay scans, protects persona facts, no delete ─
-        let decay = lore_scope::mcp::decay_tool::MemoryDecayTool::new(fact_store.clone());
+        let decay = mnemosyne::mcp::decay_tool::MemoryDecayTool::new(fact_store.clone());
         let decay_out = decay
             .call(&json!({ "entity_id": entity_id }))
             .await

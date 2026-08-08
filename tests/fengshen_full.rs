@@ -1,12 +1,12 @@
 //! 封神演义 full ingest: raw SQL writes, MCP query.
 //! Run: cargo test --test fengshen_full -- --nocapture
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::{EntityRegistry, JsonEntityProvider};
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -34,7 +34,7 @@ async fn fengshen_full() {
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx

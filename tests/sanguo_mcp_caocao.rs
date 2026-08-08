@@ -5,7 +5,7 @@
 
 mod common;
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 [package]
-name = "LoreScope"
+name = "Mnemosyne"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
@@ -13,11 +13,11 @@ keywords = ["mcp", "memory", "llm", "agent", "sqlite-vec"]
 categories = ["asynchronous", "database-implementations"]
 
 [lib]
-name = "lore_scope"
+name = "mnemosyne"
 path = "src/lib.rs"
 
 [[bin]]
-name = "lore-scope"
+name = "mnemosyne"
 path = "src/main.rs"
 
 [dependencies]
@@ -108,17 +108,14 @@ debug = false
 
 # Balanced production build: small enough to ship, much faster than fat LTO.
 [profile.release]
-opt-level = "s"
-lto = "thin"
-codegen-units = 16
-panic = "abort"
-strip = "symbols"
-debug = false
-incremental = false
-
-# Distribution build: prioritize the smallest executable over build latency.
-[profile.dist]
-inherits = "release"
 opt-level = "z"
 lto = "fat"
 codegen-units = 1
+panic = "abort"
+strip = true
+debug = false
+incremental = false
+
+# Distribution build: inherit the smallest release settings.
+[profile.dist]
+inherits = "release"

@@ -1,5 +1,5 @@
-use lore_scope::character::SQLiteCharacterStore;
-use lore_scope::ingest::IngestionPipeline;
+use mnemosyne::character::SQLiteCharacterStore;
+use mnemosyne::ingest::IngestionPipeline;
 use std::sync::Arc;
 
 #[tokio::test]

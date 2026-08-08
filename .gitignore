@@ -2,8 +2,6 @@
 
 plan/
 
-docs/
-
 *.db
 
 .codescope/
@@ -13,7 +11,9 @@ docs/
 
 **/*.pyc
 
-**/*.pdf
-
-**/*.json
-**/*.txt
+# Test corpora are large third-party text; keep them out of the repo (tests
+# skip gracefully when a corpus file is absent). Docs, config, and source
+# MUST be tracked.
+corpus/*.pdf
+corpus/*.txt
+corpus/*.json

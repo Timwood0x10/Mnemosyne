@@ -8,12 +8,12 @@
 
 use std::sync::{Arc, RwLock};
 
-use lore_scope::knowledge::{
+use mnemosyne::knowledge::{
     EntityLinker, ExternalKnowledgeRegistry, KnowledgeStore, SQLiteKnowledgeStore,
 };
-use lore_scope::mcp::external_knowledge_tools::register_external_knowledge_tools;
-use lore_scope::mcp::types::{JSONRPCMessage, JSONRPCRequest};
-use lore_scope::mcp::{ServerBuilder, Transport};
+use mnemosyne::mcp::external_knowledge_tools::register_external_knowledge_tools;
+use mnemosyne::mcp::types::{JSONRPCMessage, JSONRPCRequest};
+use mnemosyne::mcp::{ServerBuilder, Transport};
 
 /// Minimal in-memory transport for driving the MCP server in tests.
 struct MemoryTransport {
@@ -23,10 +23,10 @@ struct MemoryTransport {
 
 #[async_trait::async_trait]
 impl Transport for MemoryTransport {
-    async fn recv(&mut self) -> lore_scope::error::Result<Option<JSONRPCMessage>> {
+    async fn recv(&mut self) -> mnemosyne::error::Result<Option<JSONRPCMessage>> {
         Ok(self.inbox.pop())
     }
-    async fn send(&mut self, msg: &JSONRPCMessage) -> lore_scope::error::Result<()> {
+    async fn send(&mut self, msg: &JSONRPCMessage) -> mnemosyne::error::Result<()> {
         self.outbox.push(msg.clone());
         Ok(())
     }
@@ -35,7 +35,7 @@ impl Transport for MemoryTransport {
 /// Build a full MCP server with the external-knowledge tools registered,
 /// sharing an in-memory knowledge store + fact store + registry + linker.
 async fn build_server() -> (
-    lore_scope::mcp::MCPServer,
+    mnemosyne::mcp::MCPServer,
     Arc<SQLiteKnowledgeStore>,
     Arc<ExternalKnowledgeRegistry>,
 ) {
@@ -45,11 +45,11 @@ async fn build_server() -> (
             .expect("knowledge store"),
     );
     let fact_store =
-        Arc::new(lore_scope::fact_store::SqliteFactStore::open_in_memory().expect("fact store"));
+        Arc::new(mnemosyne::fact_store::SqliteFactStore::open_in_memory().expect("fact store"));
     let registry = Arc::new(ExternalKnowledgeRegistry::new());
     let linker: Arc<RwLock<EntityLinker>> = Arc::new(RwLock::new(EntityLinker::new()));
 
-    let mut builder = ServerBuilder::new(lore_scope::mcp::types::Implementation {
+    let mut builder = ServerBuilder::new(mnemosyne::mcp::types::Implementation {
         name: "test".into(),
         version: "1.0.0".into(),
     });
@@ -66,7 +66,7 @@ async fn build_server() -> (
 
 /// Drive one `tools/call` request through the server; return the JSON result.
 async fn call_tool(
-    server: &lore_scope::mcp::MCPServer,
+    server: &mnemosyne::mcp::MCPServer,
     name: &str,
     args: serde_json::Value,
 ) -> serde_json::Value {

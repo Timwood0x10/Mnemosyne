@@ -1,4 +1,4 @@
-//! Schema definitions for the LoreScope world model (V7).
+//! Schema definitions for the Mnemosyne world model (V7).
 //!
 //! ## Core tables (V7 Entity-centric model)
 //!

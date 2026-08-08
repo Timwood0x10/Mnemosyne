@@ -1,6 +1,6 @@
 //! One-time migration: V1 domain model → general knowledge model.
 //!
-//! LoreScope's V1 stored characters/events/relations in dedicated domain
+//! Mnemosyne's V1 stored characters/events/relations in dedicated domain
 //! tables (`character_*`). The frozen general model (dev_guide §3) replaces
 //! them with `knowledge_objects` / `knowledge_edges` / `evidence` / ...
 //! Per the migration strategy (dev_guide §6 "不双写"): V1 stays as a legacy

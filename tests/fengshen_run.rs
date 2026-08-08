@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::{EntityRegistry, JsonEntityProvider};
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
 
 #[tokio::test]
 async fn fengshen_run() {
@@ -35,7 +35,7 @@ async fn fengshen_run() {
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
 
     for entity in &ctx.entities {

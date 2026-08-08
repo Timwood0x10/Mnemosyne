@@ -1,7 +1,7 @@
 //! MCP query: 封神演义 主线
 //! Run: cargo test --test fengshen_mcp -- --nocapture
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 const DB_PATH: &str = "/tmp/lorescope_sanguo.db";

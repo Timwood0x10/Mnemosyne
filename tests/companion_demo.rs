@@ -21,20 +21,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use lore_scope::cognition::{Fact, FactStore as _, StateEngine, build_snapshot};
-use lore_scope::fact_store::SqliteFactStore;
-use lore_scope::knowledge::EntityLinker;
-use lore_scope::knowledge::SQLiteKnowledgeStore;
-use lore_scope::knowledge::external::ExternalKnowledgeRegistry;
-use lore_scope::knowledge::store::KnowledgeStore;
-use lore_scope::mcp::external_knowledge_tools::register_external_knowledge_tools;
-use lore_scope::mcp::generalize_tool::register_generalize_tool;
-use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
-use lore_scope::mcp::knowledge_tools::register_knowledge_tools;
-use lore_scope::mcp::server::{MCPServer, ServerBuilder};
-use lore_scope::mcp::transport::Transport;
-use lore_scope::mcp::types::{Implementation, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse};
-use lore_scope::types::Message;
+use mnemosyne::cognition::{Fact, FactStore as _, StateEngine, build_snapshot};
+use mnemosyne::fact_store::SqliteFactStore;
+use mnemosyne::knowledge::EntityLinker;
+use mnemosyne::knowledge::SQLiteKnowledgeStore;
+use mnemosyne::knowledge::external::ExternalKnowledgeRegistry;
+use mnemosyne::knowledge::store::KnowledgeStore;
+use mnemosyne::mcp::external_knowledge_tools::register_external_knowledge_tools;
+use mnemosyne::mcp::generalize_tool::register_generalize_tool;
+use mnemosyne::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
+use mnemosyne::mcp::knowledge_tools::register_knowledge_tools;
+use mnemosyne::mcp::server::{MCPServer, ServerBuilder};
+use mnemosyne::mcp::transport::Transport;
+use mnemosyne::mcp::types::{Implementation, JSONRPCMessage, JSONRPCRequest, JSONRPCResponse};
+use mnemosyne::types::Message;
 
 // ── In-memory transport so we can drive the MCP server like a client ────────
 
@@ -47,10 +47,10 @@ struct OneShotTransport {
 
 #[async_trait]
 impl Transport for OneShotTransport {
-    async fn recv(&mut self) -> lore_scope::error::Result<Option<JSONRPCMessage>> {
+    async fn recv(&mut self) -> mnemosyne::error::Result<Option<JSONRPCMessage>> {
         Ok(self.inbox.pop())
     }
-    async fn send(&mut self, msg: &JSONRPCMessage) -> lore_scope::error::Result<()> {
+    async fn send(&mut self, msg: &JSONRPCMessage) -> mnemosyne::error::Result<()> {
         self.outbox.push(msg.clone());
         Ok(())
     }
@@ -280,7 +280,7 @@ async fn companion_demo_end_to_end() {
     // pick the Person whose name has a substring relationship with "白流苏" AND
     // carries the most participated_in edges (the real protagonist, not a
     // truncation artifact).
-    use lore_scope::knowledge::ObjectType;
+    use mnemosyne::knowledge::ObjectType;
     let all_objs = kstore
         .search_objects(None, None, None, None, 20_000)
         .await

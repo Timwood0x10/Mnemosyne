@@ -1,7 +1,7 @@
 //! MCP query: 吕布's life via the knowledge store (same backend as MCP tools).
 //! Run: cargo test --test lubu_mcp lubu_query -- --nocapture
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 #[tokio::test]

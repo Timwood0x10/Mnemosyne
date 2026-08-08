@@ -5,8 +5,8 @@ mod common;
 
 use std::sync::Arc;
 
-use lore_scope::compiler::writer::{EvidenceBatch, EvidenceWriter};
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::compiler::writer::{EvidenceBatch, EvidenceWriter};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 
 /// Objective: Verify War-and-Peace compiles with the warandpeace.json entity
 /// provider and lands in the MCP knowledge store, then Anna is queryable.

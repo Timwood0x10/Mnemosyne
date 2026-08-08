@@ -1,9 +1,9 @@
 //! Full 三国演义 cognitive pipeline: Observation → Fact → Store → Snapshot.
 //! Run: cargo test --test sanguo_cognition run -- --nocapture
 
-use lore_scope::cognition::{FactStore, Rule, StateEngine};
-use lore_scope::fact_store::SqliteFactStore;
-use lore_scope::observation_compiler::{DefaultRule, compile_observations};
+use mnemosyne::cognition::{FactStore, Rule, StateEngine};
+use mnemosyne::fact_store::SqliteFactStore;
+use mnemosyne::observation_compiler::{DefaultRule, compile_observations};
 
 #[tokio::test]
 async fn run() {
@@ -70,10 +70,10 @@ async fn run() {
     .copied()
     .collect();
 
-    let resolve_mention = |text: &str| -> Option<lore_scope::cognition::Mention> {
+    let resolve_mention = |text: &str| -> Option<mnemosyne::cognition::Mention> {
         for (key, (id, canonical)) in &known {
             if text.contains(key) {
-                return Some(lore_scope::cognition::Mention {
+                return Some(mnemosyne::cognition::Mention {
                     entity_id: Some(*id),
                     surface: key.to_string(),
                     canonical_name: canonical.to_string(),
@@ -101,7 +101,7 @@ async fn run() {
 
     // 4. Facts from observations
     let rule = DefaultRule;
-    let mut facts: Vec<lore_scope::cognition::Fact> = Vec::new();
+    let mut facts: Vec<mnemosyne::cognition::Fact> = Vec::new();
     for obs in &observations {
         facts.append(&mut rule.apply(obs));
     }
@@ -127,11 +127,11 @@ async fn run() {
     // 6. Entity snapshots
     let _state_engine = StateEngine::new();
     // Find entities with the most facts
-    let mut by_entity: HashMap<i64, Vec<&lore_scope::cognition::Fact>> = HashMap::new();
+    let mut by_entity: HashMap<i64, Vec<&mnemosyne::cognition::Fact>> = HashMap::new();
     for f in &facts {
         by_entity.entry(f.entity_id).or_default().push(f);
     }
-    let mut ranked: Vec<(&i64, &Vec<&lore_scope::cognition::Fact>)> = by_entity.iter().collect();
+    let mut ranked: Vec<(&i64, &Vec<&mnemosyne::cognition::Fact>)> = by_entity.iter().collect();
     ranked.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
 
     println!("\n━━━ Top entities by fact count ━━━━━━━━━\n");

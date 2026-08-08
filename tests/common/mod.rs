@@ -13,14 +13,14 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use lore_scope::character::SQLiteCharacterStore;
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::EntityDictionary;
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
-use lore_scope::ingest::IngestionPipeline;
-use lore_scope::knowledge::{KnowledgeStore, Migrator, SQLiteKnowledgeStore};
+use mnemosyne::character::SQLiteCharacterStore;
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::EntityDictionary;
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::ingest::IngestionPipeline;
+use mnemosyne::knowledge::{KnowledgeStore, Migrator, SQLiteKnowledgeStore};
 use serde::{Deserialize, Serialize};
 
 /// Shared DB path for integration tests that need the full 三国演义 dataset.
@@ -92,10 +92,10 @@ fn war_sample(text: &str) -> String {
 /// Serializable slice of the War-and-Peace compile result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WarCompile {
-    pub entities: Vec<lore_scope::compiler::Entity>,
-    pub events: Vec<lore_scope::compiler::Event>,
-    pub relations: Vec<lore_scope::compiler::Relation>,
-    pub profiles: Vec<lore_scope::compiler::EntityProfile>,
+    pub entities: Vec<mnemosyne::compiler::Entity>,
+    pub events: Vec<mnemosyne::compiler::Event>,
+    pub relations: Vec<mnemosyne::compiler::Relation>,
+    pub profiles: Vec<mnemosyne::compiler::EntityProfile>,
 }
 
 /// Compile the opening sample of War and Peace.
@@ -118,7 +118,7 @@ pub fn ensure_war_compile() -> WarCompile {
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::EnglishLanguageProvider::new(),
+        &mnemosyne::language::EnglishLanguageProvider::new(),
     );
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx
@@ -142,16 +142,15 @@ pub fn ensure_war_compile() -> WarCompile {
     let sentences = sentence::split_all(&chunks);
     let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
     let config =
-        extract::Config::from_language(&lore_scope::language::EnglishLanguageProvider::new());
+        extract::Config::from_language(&mnemosyne::language::EnglishLanguageProvider::new());
     extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&resolver));
 
-    let compiled = WarCompile {
+    WarCompile {
         entities: ctx.entities,
         events: ctx.events,
         relations: ctx.relations,
         profiles: ctx.profiles,
-    };
-    compiled
+    }
 }
 
 /// Compile the opening sample of War and Peace with the warandpeace.json
@@ -161,7 +160,7 @@ pub fn ensure_war_compile() -> WarCompile {
 ///
 /// Panics if the corpus or provider config is missing, or compilation fails.
 pub fn ensure_war_mcp_compile() -> WarCompile {
-    use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
+    use mnemosyne::compiler::entity::{EntityRegistry, JsonEntityProvider};
     use std::sync::Arc;
 
     let doc = Document::from_file(WAR_CORPUS).expect("WarandPeace.txt");
@@ -187,7 +186,7 @@ pub fn ensure_war_mcp_compile() -> WarCompile {
         &mut ctx,
         Some(&dict),
         &patterns,
-        &lore_scope::language::EnglishLanguageProvider::new(),
+        &mnemosyne::language::EnglishLanguageProvider::new(),
     );
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx
@@ -217,11 +216,10 @@ pub fn ensure_war_mcp_compile() -> WarCompile {
     };
     extract::compile(&mut ctx, &sent_texts, &dict, &config, Some(&resolver));
 
-    let compiled = WarCompile {
+    WarCompile {
         entities: ctx.entities,
         events: ctx.events,
         relations: ctx.relations,
         profiles: ctx.profiles,
-    };
-    compiled
+    }
 }

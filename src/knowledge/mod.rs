@@ -1,6 +1,6 @@
 //! General knowledge model — Object + Edge + Evidence.
 //!
-//! This is the core of LoreScope's "Narrative World Compiler" (dev_guide §3,
+//! This is the core of Mnemosyne's "Narrative World Compiler" (dev_guide §3,
 //! V2.0 冻结版). The model is deliberately generic: every entity is a
 //! [`KnowledgeObject`], every relationship a [`KnowledgeEdge`], and every
 //! claim is backed by [`Evidence`] linked through [`KnowledgeEvidenceLink`].

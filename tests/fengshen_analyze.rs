@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
 
 #[tokio::test]
 async fn fengshen_main_story() {
@@ -20,13 +20,13 @@ async fn fengshen_main_story() {
         ..Default::default()
     };
 
-    let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
+    let mut dict = mnemosyne::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(
         &doc.text,
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
 
     // Build EntityResolver from discovered entities

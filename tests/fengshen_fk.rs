@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
-use lore_scope::knowledge::{KnowledgeObject, KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::{EntityRegistry, JsonEntityProvider};
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::knowledge::{KnowledgeObject, KnowledgeStore, ObjectType, SQLiteKnowledgeStore};
 
 #[tokio::test]
 async fn fengshen_fk() {
@@ -17,7 +17,7 @@ async fn fengshen_fk() {
 
     // Create document first (required by FK constraint on knowledge_objects)
     let doc_id = k
-        .create_document(&lore_scope::knowledge::Document {
+        .create_document(&mnemosyne::knowledge::Document {
             id: 0,
             title: "封神演义".into(),
             author: None,
@@ -46,7 +46,7 @@ async fn fengshen_fk() {
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
     for entity in &ctx.entities {
         let aliases: Vec<&str> = ctx

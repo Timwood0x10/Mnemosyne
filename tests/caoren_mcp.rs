@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 
 #[tokio::test]
 async fn setup_and_query() {

@@ -19,9 +19,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use lore_scope::character::SQLiteCharacterStore;
-use lore_scope::ingest::IngestionPipeline;
-use lore_scope::knowledge::{KnowledgeStore, MigrationStats, Migrator, SQLiteKnowledgeStore};
+use mnemosyne::character::SQLiteCharacterStore;
+use mnemosyne::ingest::IngestionPipeline;
+use mnemosyne::knowledge::{KnowledgeStore, MigrationStats, Migrator, SQLiteKnowledgeStore};
 use tokio::sync::OnceCell;
 
 // ============================================================================

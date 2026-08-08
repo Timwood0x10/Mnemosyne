@@ -14,41 +14,41 @@ use clap::Parser;
 use serde_json::Value;
 use tracing_subscriber::EnvFilter;
 
-use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use lore_scope::config::{CliArgs, Command, EmbeddingProvider};
-use lore_scope::decay::{DecayConfig, run_decay_loop};
-use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
+use mnemosyne::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
+use mnemosyne::config::{CliArgs, Command, EmbeddingProvider};
+use mnemosyne::decay::{DecayConfig, run_decay_loop};
+use mnemosyne::distiller::{DistillationConfig, Distiller, PipelineDistiller};
 #[cfg(feature = "remote-embed")]
-use lore_scope::embed::RemoteEmbedder;
-use lore_scope::embed::{EmbeddingService, NullEmbedder};
-use lore_scope::error::Error;
-use lore_scope::fact_store::SqliteFactStore;
-use lore_scope::ingest::IngestionPipeline;
-use lore_scope::knowledge::store::KnowledgeStore;
-use lore_scope::knowledge::{Migrator, SQLiteKnowledgeStore};
-use lore_scope::mcp::context_aware::{ContextCheckTool, context_check_definition};
-use lore_scope::mcp::decay_tool::{MemoryDecayTool, memory_decay_definition};
-use lore_scope::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
-use lore_scope::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
-use lore_scope::mcp::persona_check_tool::{PersonaCheckTool, persona_check_definition};
-use lore_scope::mcp::persona_inject_tool::{PersonaInjectTool, persona_inject_definition};
-use lore_scope::mcp::register_external_knowledge_tools;
-use lore_scope::mcp::register_generalize_tool;
-use lore_scope::mcp::register_graph_search_tool;
-use lore_scope::mcp::register_knowledge_tools;
-use lore_scope::mcp::register_memory_transfer_tools;
-use lore_scope::mcp::register_trace_path_tool;
-use lore_scope::mcp::relationship_tool::{
+use mnemosyne::embed::RemoteEmbedder;
+use mnemosyne::embed::{EmbeddingService, NullEmbedder};
+use mnemosyne::error::Error;
+use mnemosyne::fact_store::SqliteFactStore;
+use mnemosyne::ingest::IngestionPipeline;
+use mnemosyne::knowledge::store::KnowledgeStore;
+use mnemosyne::knowledge::{Migrator, SQLiteKnowledgeStore};
+use mnemosyne::mcp::context_aware::{ContextCheckTool, context_check_definition};
+use mnemosyne::mcp::decay_tool::{MemoryDecayTool, memory_decay_definition};
+use mnemosyne::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
+use mnemosyne::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
+use mnemosyne::mcp::persona_check_tool::{PersonaCheckTool, persona_check_definition};
+use mnemosyne::mcp::persona_inject_tool::{PersonaInjectTool, persona_inject_definition};
+use mnemosyne::mcp::register_external_knowledge_tools;
+use mnemosyne::mcp::register_generalize_tool;
+use mnemosyne::mcp::register_graph_search_tool;
+use mnemosyne::mcp::register_knowledge_tools;
+use mnemosyne::mcp::register_memory_transfer_tools;
+use mnemosyne::mcp::register_trace_path_tool;
+use mnemosyne::mcp::relationship_tool::{
     PersonaTimelineTool, RelationshipQueryTool, RelationshipUpdateTool,
     persona_timeline_definition, relationship_query_definition, relationship_update_definition,
 };
-use lore_scope::mcp::serve_http_addr;
-use lore_scope::mcp::story_bridge_tool::{StoryBridgeTool, story_bridge_definition};
-use lore_scope::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
-use lore_scope::mcp::{MCPServer, ServerBuilder, StdioTransport};
-use lore_scope::retrieval::RetrievalEngine;
-use lore_scope::store::{ExperienceRepository, SQLiteVecStore};
-use lore_scope::types::{Experience, MemoryType, Message};
+use mnemosyne::mcp::serve_http_addr;
+use mnemosyne::mcp::story_bridge_tool::{StoryBridgeTool, story_bridge_definition};
+use mnemosyne::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
+use mnemosyne::mcp::{MCPServer, ServerBuilder, StdioTransport};
+use mnemosyne::retrieval::RetrievalEngine;
+use mnemosyne::store::{ExperienceRepository, SQLiteVecStore};
+use mnemosyne::types::{Experience, MemoryType, Message};
 
 /// Tool: distill memories from a conversation (`lore_scope`).
 struct MemoryDistillTool {
@@ -273,7 +273,7 @@ fn parse_messages(arr: &[Value]) -> Result<Vec<Message>, Error> {
 }
 
 /// Build the embedder based on the configured `embedding_provider`.
-fn build_embedder(cfg: &lore_scope::config::Config) -> AnyhowResult<Arc<dyn EmbeddingService>> {
+fn build_embedder(cfg: &mnemosyne::config::Config) -> AnyhowResult<Arc<dyn EmbeddingService>> {
     match cfg.embedding_provider {
         EmbeddingProvider::None => Ok(Arc::new(NullEmbedder::new())),
         EmbeddingProvider::Openai | EmbeddingProvider::Ollama => build_remote_embedder(cfg),
@@ -282,7 +282,7 @@ fn build_embedder(cfg: &lore_scope::config::Config) -> AnyhowResult<Arc<dyn Embe
 
 #[cfg(feature = "remote-embed")]
 fn build_remote_embedder(
-    cfg: &lore_scope::config::Config,
+    cfg: &mnemosyne::config::Config,
 ) -> AnyhowResult<Arc<dyn EmbeddingService>> {
     let embedder = RemoteEmbedder::new(
         cfg.embedding_url.clone(),
@@ -295,14 +295,14 @@ fn build_remote_embedder(
 
 #[cfg(not(feature = "remote-embed"))]
 fn build_remote_embedder(
-    _cfg: &lore_scope::config::Config,
+    _cfg: &mnemosyne::config::Config,
 ) -> AnyhowResult<Arc<dyn EmbeddingService>> {
     anyhow::bail!("remote embedding support is disabled at compile time")
 }
 
 /// Build the storage backend.
 async fn build_store(
-    cfg: &lore_scope::config::Config,
+    cfg: &mnemosyne::config::Config,
 ) -> AnyhowResult<Arc<dyn ExperienceRepository>> {
     let store = SQLiteVecStore::open(&cfg.db_path, cfg.vector_dim)
         .await
@@ -315,7 +315,7 @@ async fn build_store(
 /// Returns an un-`Arc`-wrapped engine so the caller can chain
 /// `with_external_registry` before wrapping in `Arc` for sharing.
 fn build_retrieval_engine(
-    cfg: &lore_scope::config::Config,
+    cfg: &mnemosyne::config::Config,
     embedder: Arc<dyn EmbeddingService>,
     store: Arc<dyn ExperienceRepository>,
 ) -> RetrievalEngine {
@@ -594,7 +594,7 @@ impl ToolHandler for CharacterGraphTool {
 
 /// Build the MCP server with all `memory_*` and `character_*` tools registered.
 async fn build_server(
-    cfg: &lore_scope::config::Config,
+    cfg: &mnemosyne::config::Config,
 ) -> AnyhowResult<(MCPServer, Arc<PipelineDistiller>, Arc<RetrievalEngine>)> {
     let store = build_store(cfg).await?;
     let embedder = build_embedder(cfg)?;
@@ -603,7 +603,7 @@ async fn build_server(
     // Created once here and shared (via Arc) between:
     // - the retrieval engine (hybrid search fuses external signals via RRF),
     // - the knowledge_attach/ingest MCP tools (runtime mutation via RwLock).
-    let external_registry = Arc::new(lore_scope::knowledge::ExternalKnowledgeRegistry::new());
+    let external_registry = Arc::new(mnemosyne::knowledge::ExternalKnowledgeRegistry::new());
     let engine = Arc::new(
         build_retrieval_engine(cfg, embedder.clone(), store.clone())
             .with_external_registry(external_registry.clone()),
@@ -957,7 +957,7 @@ async fn build_server(
     // The general knowledge store is opened against the same SQLite file as
     // the character store: V1 stays as a legacy read view (dev_guide §6
     // "不双写"), while the four new tools query the general tables produced
-    // by `lore-scope migrate`. Opening the store here is idempotent
+    // by `mnemosyne migrate`. Opening the store here is idempotent
     // (CREATE TABLE IF NOT EXISTS), so `serve` works whether or not a
     // migration has been run.
     let kstore = Arc::new(
@@ -994,8 +994,8 @@ async fn build_server(
     // empty; `knowledge_attach` (Phase E) rebuilds it after attaching a
     // source. `inspect_entity` reads it to resolve external surface names to
     // unified graph nodes.
-    let entity_linker: Arc<std::sync::RwLock<lore_scope::knowledge::EntityLinker>> = Arc::new(
-        std::sync::RwLock::new(lore_scope::knowledge::EntityLinker::new()),
+    let entity_linker: Arc<std::sync::RwLock<mnemosyne::knowledge::EntityLinker>> = Arc::new(
+        std::sync::RwLock::new(mnemosyne::knowledge::EntityLinker::new()),
     );
     builder = register_knowledge_tools(
         builder,

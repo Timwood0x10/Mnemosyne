@@ -1,4 +1,4 @@
-use lore_scope::faction;
+use mnemosyne::faction;
 
 #[tokio::test]
 async fn test_faction_constraint_logic() {

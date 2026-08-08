@@ -93,6 +93,12 @@ pub struct ToolDefinition {
     /// Human-readable description.
     pub description: String,
     /// JSON Schema describing the tool's `arguments` object.
+    ///
+    /// Serialized as `inputSchema` per the MCP wire contract (camelCase) —
+    /// previously the snake_case `input_schema` leaked into `tools/list`,
+    /// which strict MCP clients reject (matches codescope's
+    /// `#[serde(rename = "inputSchema")]`).
+    #[serde(rename = "inputSchema")]
     pub input_schema: Value,
 }
 
@@ -200,6 +206,28 @@ mod tests {
         assert!(r.is_error);
         assert_eq!(r.content.len(), 1);
         assert_eq!(r.content[0].text.as_deref(), Some("bad input"));
+    }
+
+    /// Objective: Verify `ToolDefinition` serializes its schema as
+    /// `inputSchema` (MCP camelCase wire contract), not snake_case — the
+    /// regression fixed against codescope's protocol.rs.
+    /// Invariants: JSON has `inputSchema` key; no `input_schema` key.
+    #[test]
+    fn tool_definition_serializes_input_schema_camel_case() {
+        let def = ToolDefinition {
+            name: "demo".into(),
+            description: "demo tool".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+        };
+        let json = serde_json::to_value(&def).expect("serialize");
+        assert!(
+            json.get("inputSchema").is_some(),
+            "has inputSchema, got {json}"
+        );
+        assert!(
+            json.get("input_schema").is_none(),
+            "no snake_case, got {json}"
+        );
     }
 
     /// Objective: Verify JSONRPCMessage can deserialize a Request.

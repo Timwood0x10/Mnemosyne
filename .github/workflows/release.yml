@@ -1,0 +1,101 @@
+name: Release Build
+
+# Build Mnemosyne binaries for macOS (arm64 + x86_64), Linux (arm64 + x86_64)
+# and Windows (x86_64) on native runners, then create a GitHub Release whose
+# body is taken verbatim from `release.md` and attach all binaries. Triggered
+# on every push to `main` (or manually via workflow_dispatch).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macOS arm64: macos-latest runs natively on arm64.
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: ""
+          # macOS x86_64: cross-compile from the arm64 runner; the macOS SDK
+          # ships with both arch slices so no extra linker is needed.
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: ""
+          # Linux arm64: native arm64 runner.
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            ext: ""
+          # Linux x86_64: native amd64 runner.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: ""
+          # Windows x86_64: native runner, MSVC toolchain (rustup default).
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }} --bin mnemosyne
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mnemosyne-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/mnemosyne${{ matrix.ext }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release from release.md
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all platform binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: false
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Body is read verbatim from release.md at the repo root.
+          body_path: release.md
+          # Attach every downloaded binary (mac×2, linux×2, windows×1).
+          files: dist/mnemosyne-*/*
+          # Tag/name from the Cargo package version (v0.1.0).
+          tag_name: v${{ github.run_number }}
+          name: Mnemosyne v${{ github.run_number }}
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true

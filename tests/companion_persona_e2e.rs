@@ -13,17 +13,17 @@
 
 use std::sync::Arc;
 
-use lore_scope::agent_personality::AGENT_PERSONALITY_ATTRIBUTION;
-use lore_scope::cognition::{Fact, FactStore, FactType};
-use lore_scope::embed::NullEmbedder;
-use lore_scope::fact_store::SqliteFactStore;
-use lore_scope::mcp::decay_tool::MemoryDecayTool;
-use lore_scope::mcp::persona_check_tool::PersonaCheckTool;
-use lore_scope::mcp::persona_inject_tool::PersonaInjectTool;
-use lore_scope::mcp::relationship_tool::{
+use mnemosyne::agent_personality::AGENT_PERSONALITY_ATTRIBUTION;
+use mnemosyne::cognition::{Fact, FactStore, FactType};
+use mnemosyne::embed::NullEmbedder;
+use mnemosyne::fact_store::SqliteFactStore;
+use mnemosyne::mcp::decay_tool::MemoryDecayTool;
+use mnemosyne::mcp::persona_check_tool::PersonaCheckTool;
+use mnemosyne::mcp::persona_inject_tool::PersonaInjectTool;
+use mnemosyne::mcp::relationship_tool::{
     PersonaTimelineTool, RelationshipQueryTool, RelationshipUpdateTool,
 };
-use lore_scope::mcp::types::{ToolCallResult, ToolHandler};
+use mnemosyne::mcp::types::{ToolCallResult, ToolHandler};
 use serde_json::{Value, json};
 
 const TENANT_ID: &str = "default";

@@ -3,7 +3,7 @@
 
 mod common;
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -42,10 +42,10 @@ async fn fix_caoren_relation() {
         let sunce = k.find_object_by_name("孙策", None).await.unwrap().unwrap();
         // Create 孙匡 object
         let sk_id = k
-            .create_object(&lore_scope::knowledge::KnowledgeObject {
+            .create_object(&mnemosyne::knowledge::KnowledgeObject {
                 id: 0,
                 doc_id: sunce.doc_id,
-                object_type: lore_scope::knowledge::ObjectType::Person,
+                object_type: mnemosyne::knowledge::ObjectType::Person,
                 name: "孙匡".into(),
                 properties: serde_json::json!({"note": "孙策幼弟，曹仁之女婿"}),
                 confidence: 1.0,

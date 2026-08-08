@@ -1,7 +1,7 @@
 //! MCP only: query 孔宣 fate.
 //! Run: cargo test --test mcp_kongxuan -- --nocapture
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 /// The fengshen DB is built by `fengshen_mcp_query`; CI runs tests in

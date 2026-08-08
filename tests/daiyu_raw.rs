@@ -4,7 +4,7 @@
 //! Note: This test reads from data seeded by `make migrate`. When run without
 //! a seeded database it prints a notice and passes gracefully.
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 #[tokio::test]

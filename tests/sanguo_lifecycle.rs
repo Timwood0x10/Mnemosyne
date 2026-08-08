@@ -11,10 +11,10 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use lore_scope::distiller::{DistillationConfig, Distiller, PipelineDistiller};
-use lore_scope::embed::EmbeddingService;
-use lore_scope::store::{ExperienceRepository, SQLiteVecStore};
-use lore_scope::types::{MemoryType, Message};
+use mnemosyne::distiller::{DistillationConfig, Distiller, PipelineDistiller};
+use mnemosyne::embed::EmbeddingService;
+use mnemosyne::store::{ExperienceRepository, SQLiteVecStore};
+use mnemosyne::types::{MemoryType, Message};
 
 /// Simple deterministic embedder so vector search works without a remote API.
 #[derive(Clone)]
@@ -22,7 +22,7 @@ struct TestEmbedder;
 
 #[async_trait::async_trait]
 impl EmbeddingService for TestEmbedder {
-    async fn embed(&self, text: &str) -> lore_scope::error::Result<Vec<f32>> {
+    async fn embed(&self, text: &str) -> mnemosyne::error::Result<Vec<f32>> {
         // 8-dim bag-of-words-ish vector so similar text has similar vectors.
         let mut v = vec![0.0_f32; 8];
         for (i, ch) in text.chars().enumerate() {
@@ -34,10 +34,10 @@ impl EmbeddingService for TestEmbedder {
         &self,
         _prefix: &str,
         text: &str,
-    ) -> lore_scope::error::Result<Vec<f32>> {
+    ) -> mnemosyne::error::Result<Vec<f32>> {
         self.embed(text).await
     }
-    async fn health_check(&self) -> lore_scope::error::Result<()> {
+    async fn health_check(&self) -> mnemosyne::error::Result<()> {
         Ok(())
     }
     fn model(&self) -> &str {
@@ -153,7 +153,7 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
     // 3. Forget-expired: insert an expired row directly, run empty distill,
     //    and verify the maintenance phase purges it.
     let mut expired =
-        lore_scope::types::Experience::new("t1", MemoryType::Knowledge, "过期记忆：董卓旧事", 0.9);
+        mnemosyne::types::Experience::new("t1", MemoryType::Knowledge, "过期记忆：董卓旧事", 0.9);
     expired.id = "sanguo-expired-1".to_string();
     expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
     store.create(&expired).await.expect("create expired");

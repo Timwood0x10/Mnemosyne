@@ -1,7 +1,7 @@
 //! MCP query: 孔宣 from fengshen store.
 //! Run: cargo test --test find_kongxuan -- --nocapture
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 use std::sync::Arc;
 
 /// The fengshen DB is built by `fengshen_mcp_query`; CI runs tests in

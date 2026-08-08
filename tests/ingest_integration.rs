@@ -18,8 +18,8 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use lore_scope::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
-use lore_scope::ingest::{IngestionPipeline, IngestionStats};
+use mnemosyne::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
+use mnemosyne::ingest::{IngestionPipeline, IngestionStats};
 use tokio::sync::OnceCell;
 
 /// Tenant ID used by the ingestion pipeline for all novel data.

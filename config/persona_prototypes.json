@@ -1,0 +1,94 @@
+{
+  "version": 1,
+  "thresholds": {
+    "match": 0.75,
+    "dedup": 0.95,
+    "conflict": 0.75
+  },
+  "prototypes": [
+    {
+      "fact_type": "Identity",
+      "negated": false,
+      "sentences": [
+        "我是白流苏",
+        "我是离过婚的人",
+        "我向来独来独往",
+        "我过了时",
+        "I am someone who has been through divorce",
+        "I am Bai Liusu"
+      ]
+    },
+    {
+      "fact_type": "Identity",
+      "negated": true,
+      "sentences": [
+        "我不是那种人",
+        "我不再是过去的我",
+        "I am no longer that person"
+      ]
+    },
+    {
+      "fact_type": "Emotion",
+      "negated": false,
+      "sentences": [
+        "我心里很害怕",
+        "心里也有害怕的时候",
+        "我难过",
+        "我羡慕",
+        "我恨",
+        "I feel afraid",
+        "I am envious"
+      ]
+    },
+    {
+      "fact_type": "Emotion",
+      "negated": true,
+      "sentences": [
+        "我心里不害怕",
+        "我不再难过了",
+        "I am no longer afraid"
+      ]
+    },
+    {
+      "fact_type": "Preference",
+      "negated": false,
+      "sentences": [
+        "我喜欢安稳",
+        "我偏爱清静",
+        "我爱真实",
+        "I like stability",
+        "I prefer quiet"
+      ]
+    },
+    {
+      "fact_type": "Preference",
+      "negated": true,
+      "sentences": [
+        "我不喜欢虚伪的应酬",
+        "我讨厌应酬",
+        "I don't like hypocritical socializing",
+        "I hate small talk"
+      ]
+    },
+    {
+      "fact_type": "Goal",
+      "negated": false,
+      "sentences": [
+        "我要活下去",
+        "我宁可一个人过",
+        "I want to live on",
+        "I would rather be alone"
+      ]
+    },
+    {
+      "fact_type": "Goal",
+      "negated": true,
+      "sentences": [
+        "我不要你为我改什么",
+        "我不肯低头",
+        "I don't want you to change for me",
+        "I refuse to yield"
+      ]
+    }
+  ]
+}

@@ -5,10 +5,10 @@
 //! "中英文人工 fixture" required by the plan: positive/negative cases for
 //! entity discovery, event extraction, and profile patterns.
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::{chunk, extract, profile, sentence};
-use lore_scope::language::{ChineseLanguageProvider, EnglishLanguageProvider};
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::{chunk, extract, profile, sentence};
+use mnemosyne::language::{ChineseLanguageProvider, EnglishLanguageProvider};
 
 /// Objective: Verify the Chinese fixture yields the expected entities/events.
 /// Invariants: 刘备, 关羽, 张飞, 曹操 are discovered; at least one event
@@ -24,7 +24,7 @@ fn chinese_fixture_compiles_expected_entities_and_events() {
         ..Default::default()
     };
     let lang = ChineseLanguageProvider::new();
-    let mut dict = lore_scope::compiler::entity::EntityDictionary::default();
+    let mut dict = mnemosyne::compiler::entity::EntityDictionary::default();
     profile::extract_profiles(text, &mut context, Some(&dict), &[], &lang);
     for entity in &context.entities {
         let aliases: Vec<&str> = context
@@ -42,8 +42,8 @@ fn chinese_fixture_compiles_expected_entities_and_events() {
         .iter()
         .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
         .collect();
-    let resolver = lore_scope::entity_resolver::EntityResolver::new(
-        lore_scope::entity_resolver::AliasResolver::from_pairs(alias_pairs),
+    let resolver = mnemosyne::entity_resolver::EntityResolver::new(
+        mnemosyne::entity_resolver::AliasResolver::from_pairs(alias_pairs),
     );
 
     let chunks = chunk::plan(text, chunk::Config::default());

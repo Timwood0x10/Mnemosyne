@@ -7,15 +7,15 @@ all: build
 
 # Balanced release build with remote embedding support.
 build:
-	$(CARGO_CACHE) cargo build --release --bin lore-scope
+	$(CARGO_CACHE) cargo build --release --bin mnemosyne
 
 # Smallest offline distribution binary. Fat LTO trades build time for size.
 dist:
-	$(CARGO_CACHE) cargo build --profile dist --no-default-features --bin lore-scope
+	$(CARGO_CACHE) cargo build --profile dist --no-default-features --bin mnemosyne
 
 # Fast incremental development build.
 dev:
-	$(CARGO_CACHE) cargo build --bin lore-scope
+	$(CARGO_CACHE) cargo build --bin mnemosyne
 
 # Lint and compile every supported feature combination.
 check:
@@ -42,4 +42,4 @@ clean:
 
 # Run the MCP server with the default lightweight feature set.
 run:
-	$(CARGO_CACHE) cargo run --bin lore-scope -- serve
+	$(CARGO_CACHE) cargo run --bin mnemosyne -- serve

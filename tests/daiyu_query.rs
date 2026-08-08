@@ -5,8 +5,8 @@
 //! exist (no prior migration run), the test prints a notice and passes
 //! gracefully so it does not block the regression baseline.
 
-use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
-use lore_scope::personality::extract_profile;
+use mnemosyne::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
+use mnemosyne::personality::extract_profile;
 use std::sync::Arc;
 
 #[tokio::test]

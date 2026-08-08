@@ -4,11 +4,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::{CompileContext, Event, Relation};
-use lore_scope::compiler::{chunk, extract, profile, sentence, timeline};
-use lore_scope::entity_resolver::{AliasResolver, EntityResolver};
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::{EntityRegistry, JsonEntityProvider};
+use mnemosyne::compiler::{CompileContext, Event, Relation};
+use mnemosyne::compiler::{chunk, extract, profile, sentence, timeline};
+use mnemosyne::entity_resolver::{AliasResolver, EntityResolver};
 
 #[tokio::test]
 async fn lubu_life() {
@@ -35,7 +35,7 @@ async fn lubu_life() {
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
     profile::register_discovered_entities(&mut dict, &ctx);
 

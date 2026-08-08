@@ -1,7 +1,7 @@
 //! Cognition Engine — core types for the unified cognitive compiler.
 //!
 //! This module defines the cross-cutting types that replace ad-hoc structures
-//! from LoreScope and Memory Distillation with a unified data model.
+//! from Mnemosyne and Memory Distillation with a unified data model.
 //!
 //! ## Existing infrastructure reused
 //!

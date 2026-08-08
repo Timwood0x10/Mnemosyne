@@ -396,7 +396,7 @@ impl RetrievalEngine {
         // is attached, forward the query to every signal provider and merge the
         // hits as a THIRD RRF list. Each external hit becomes a synthetic
         // candidate: it contributes only its external RRF term (no local
-        // keyword/semantic signal, since external ids are opaque to LoreScope
+        // keyword/semantic signal, since external ids are opaque to Mnemosyne
         // and cannot be reliably matched to local experiences). This keeps the
         // fusion scale-free and never double-counts a hit across lists.
         if let Some(registry) = &self.external {

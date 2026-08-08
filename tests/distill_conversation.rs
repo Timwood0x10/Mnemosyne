@@ -1,8 +1,8 @@
 //! Memory Distillation on our dev conversation.
 //! Run: cargo test --test distill_conversation distill_dev_session -- --nocapture
 
-use lore_scope::conversation_compiler::ConversationCompiler;
-use lore_scope::types::Message;
+use mnemosyne::conversation_compiler::ConversationCompiler;
+use mnemosyne::types::Message;
 
 #[test]
 fn distill_dev_session() {

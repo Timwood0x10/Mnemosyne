@@ -4,10 +4,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
-use lore_scope::compiler::{CompileContext, Event, Relation};
-use lore_scope::compiler::{chunk, extract, faction, profile, sentence, timeline};
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::{EntityRegistry, JsonEntityProvider};
+use mnemosyne::compiler::{CompileContext, Event, Relation};
+use mnemosyne::compiler::{chunk, extract, faction, profile, sentence, timeline};
 
 #[tokio::test]
 async fn xushu_trajectory() {
@@ -34,7 +34,7 @@ async fn xushu_trajectory() {
         &mut ctx,
         Some(&dict),
         &[],
-        &lore_scope::language::ChineseLanguageProvider::new(),
+        &mnemosyne::language::ChineseLanguageProvider::new(),
     );
 
     // Wire Pass 1 → Pass 2: register discovered entities + aliases

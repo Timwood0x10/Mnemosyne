@@ -7,7 +7,7 @@
 //! outcome for this corpus file (no crash, no mojibake); the >500 assertion
 //! only applies when the PDF actually contains a text layer.
 
-use lore_scope::knowledge::pdf::extract_text;
+use mnemosyne::knowledge::pdf::extract_text;
 
 #[test]
 fn extracts_paris_notre_dame_pdf() {

@@ -13,12 +13,12 @@
 //!
 //! 运行：cargo test --test generalize_corpus_regression -- --nocapture
 
-use lore_scope::compiler::pipeline::compile_source;
-use lore_scope::knowledge::KnowledgeStore;
-use lore_scope::knowledge::document_source::{DialogSource, RawTextSource};
-use lore_scope::knowledge::domain_profile::DomainProfile;
-use lore_scope::knowledge::store::SQLiteKnowledgeStore;
-use lore_scope::types::Message;
+use mnemosyne::compiler::pipeline::compile_source;
+use mnemosyne::knowledge::KnowledgeStore;
+use mnemosyne::knowledge::document_source::{DialogSource, RawTextSource};
+use mnemosyne::knowledge::domain_profile::DomainProfile;
+use mnemosyne::knowledge::store::SQLiteKnowledgeStore;
+use mnemosyne::types::Message;
 
 /// 小说语料（.txt，非对话 → 走 corpus 发现 + NovelProvider 字典注册路径）。
 const TXT_CORPORA: &[&str] = &[
@@ -50,7 +50,7 @@ fn title_of(path: &str) -> String {
 /// 逐条验证一个语料：编译 → inspect_entity(标题) 必须读回实体。
 async fn verify_corpus(
     label: &str,
-    source: &dyn lore_scope::knowledge::document_source::DocumentSource,
+    source: &dyn mnemosyne::knowledge::document_source::DocumentSource,
     expected_title: &str,
 ) {
     let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");

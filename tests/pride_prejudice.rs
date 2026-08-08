@@ -3,11 +3,11 @@
 //! Source: Project Gutenberg eBook #1342 by Jane Austen. The corpus file keeps
 //! the complete Gutenberg header and license notice for provenance.
 
-use lore_scope::compiler::CompileContext;
-use lore_scope::compiler::document::Document;
-use lore_scope::compiler::entity::EntityDictionary;
-use lore_scope::compiler::{chunk, profile, sentence};
-use lore_scope::language::EnglishLanguageProvider;
+use mnemosyne::compiler::CompileContext;
+use mnemosyne::compiler::document::Document;
+use mnemosyne::compiler::entity::EntityDictionary;
+use mnemosyne::compiler::{chunk, profile, sentence};
+use mnemosyne::language::EnglishLanguageProvider;
 
 /// Objective: Verify the English frontend compiles a second independent full novel.
 /// Invariants: The complete corpus is substantial and title discovery finds named people.

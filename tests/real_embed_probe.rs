@@ -13,10 +13,10 @@
 
 #![cfg(feature = "local-embed")]
 
-use lore_scope::anchor::AnchorClassifier;
-use lore_scope::entity_resolver::{Embedder, FastEmbedProvider};
-use lore_scope::types::Message;
-use lore_scope::value_extract::{AnchorSeeds, HighValueItem};
+use mnemosyne::anchor::AnchorClassifier;
+use mnemosyne::entity_resolver::{Embedder, FastEmbedProvider};
+use mnemosyne::types::Message;
+use mnemosyne::value_extract::{AnchorSeeds, HighValueItem};
 
 fn load_export_messages(path: &str) -> Vec<Message> {
     let raw = std::fs::read_to_string(path).expect("read export json");

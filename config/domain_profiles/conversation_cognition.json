@@ -1,0 +1,18 @@
+{
+  "profile_name": "conversation_cognition",
+  "doc_type_hint": "dialog",
+  "languages": ["zh", "en"],
+  "entity_attrs": ["identity", "preference", "goal", "emotion", "personality"],
+  "relation_predicates": ["喜欢", "讨厌", "目标是", "擅长", "偏好", "like", "prefer", "aim at"],
+  "verb_groups": {
+    "positive": ["喜欢", "爱", "欣赏", "like", "love", "enjoy"],
+    "negative": ["讨厌", "反感", "恨", "hate", "dislike", "avoid"],
+    "goal": ["目标", "计划", "想要", "打算", "goal", "plan", "want", "intend"],
+    "decision": ["决定", "选择", "灰度", "一步到位", "decide", "choose", "switch"]
+  },
+  "extraction_hints": {
+    "preference_keywords": ["偏好", "喜欢", "偏爱", "prefer", "like"],
+    "decision_keywords": ["决定", "选", "定了", "decide", "decided"],
+    "goal_keywords": ["目标", "计划", "落地", "goal", "plan", "land"]
+  }
+}
