@@ -274,6 +274,45 @@ cleartext.
 
 ---
 
+## Installation
+
+### Option 1 — Prebuilt binaries (recommended)
+
+Download the binary for your platform from the
+[Releases](https://github.com/Timwood0x10/Mnemosyne/releases) page:
+
+| Platform | File |
+|---|---|
+| macOS (Apple Silicon) | `mnemosyne-aarch64-apple-darwin` |
+| macOS (Intel) | `mnemosyne-x86_64-apple-darwin` |
+| Linux (arm64) | `mnemosyne-aarch64-unknown-linux-gnu` |
+| Linux (x86_64) | `mnemosyne-x86_64-unknown-linux-gnu` |
+| Windows (x86_64) | `mnemosyne-x86_64-pc-windows-msvc.exe` |
+
+```bash
+# macOS / Linux
+chmod +x mnemosyne-*
+sudo mv mnemosyne-* /usr/local/bin/mnemosyne
+mnemosyne --version
+
+# Windows: rename to mnemosyne.exe and add its folder to PATH
+```
+
+### Option 2 — Build from source
+
+Requires a Rust toolchain (see `rust-toolchain` / Cargo.toml for the MSRV).
+
+```bash
+git clone https://github.com/Timwood0x10/Mnemosyne.git
+cd Mnemosyne
+cargo build --release
+./target/release/mnemosyne --version
+```
+
+Then continue with [Quick Start](#quick-start).
+
+---
+
 ## Quick Start
 
 ```bash

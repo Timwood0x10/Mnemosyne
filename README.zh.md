@@ -249,6 +249,44 @@ HTTP 服务未提供 `--http-token` 时拒绝启动（见 [配置](#配置)）�
 
 ---
 
+## 安装
+
+### 方式一：下载预编译二进制（推荐）
+
+从 [Releases](https://github.com/Timwood0x10/Mnemosyne/releases) 页面下载对应平台的二进制：
+
+| 平台 | 文件名 |
+|---|---|
+| macOS（Apple Silicon） | `mnemosyne-aarch64-apple-darwin` |
+| macOS（Intel） | `mnemosyne-x86_64-apple-darwin` |
+| Linux（arm64） | `mnemosyne-aarch64-unknown-linux-gnu` |
+| Linux（x86_64） | `mnemosyne-x86_64-unknown-linux-gnu` |
+| Windows（x86_64） | `mnemosyne-x86_64-pc-windows-msvc.exe` |
+
+```bash
+# macOS / Linux
+chmod +x mnemosyne-*
+sudo mv mnemosyne-* /usr/local/bin/mnemosyne
+mnemosyne --version
+
+# Windows：改名为 mnemosyne.exe，并把所在目录加入 PATH
+```
+
+### 方式二：源码构建
+
+需要 Rust 工具链（MSRV 见 `rust-toolchain` / Cargo.toml）。
+
+```bash
+git clone https://github.com/Timwood0x10/Mnemosyne.git
+cd Mnemosyne
+cargo build --release
+./target/release/mnemosyne --version
+```
+
+然后继续下面的[快速启动](#快速启动)。
+
+---
+
 ## 快速启动
 
 ```bash

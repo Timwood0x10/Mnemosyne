@@ -93,11 +93,20 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }} --bin mnemosyne
 
+      # Rename the binary to a per-platform file name BEFORE uploading, so the
+      # release job's merge-multiple download does not let the five binaries
+      # (all named `mnemosyne`) overwrite each other in dist/.
+      - name: Rename binary per platform
+        shell: bash
+        run: |
+          cp target/${{ matrix.target }}/release/mnemosyne${{ matrix.ext }} \
+             mnemosyne-${{ matrix.target }}${{ matrix.ext }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mnemosyne-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/mnemosyne${{ matrix.ext }}
+          path: mnemosyne-${{ matrix.target }}${{ matrix.ext }}
           if-no-files-found: error
 
   release:
@@ -111,10 +120,16 @@ jobs:
         uses: actions/checkout@v4
 
       # Extract the version from release.md (first line: "# Mnemosyne v0.1.0").
+      # Fail hard if no version is found — an empty tag would create a broken
+      # release instead of surfacing the missing-version problem.
       - name: Read version from release.md
         id: version
         run: |
           VER=$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' release.md | head -1)
+          if [ -z "$VER" ]; then
+            echo "::error::no version (vX.Y.Z) found in release.md" >&2
+            exit 1
+          fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
       - name: Download all platform binaries
@@ -126,8 +141,24 @@ jobs:
           # per-artifact subdirectories to mismatch).
           merge-multiple: true
 
-      - name: List downloaded binaries
-        run: ls -la dist/
+      # Verify ALL five platform binaries exist BEFORE creating the release.
+      # softprops/action-gh-release creates the release first and uploads files
+      # after — if files were missing it would publish a body-only release
+      # (exactly the broken v0.1.0). Failing here prevents any release at all.
+      - name: Verify all 5 platform binaries present
+        run: |
+          MISSING=0
+          for f in \
+            mnemosyne-aarch64-apple-darwin \
+            mnemosyne-x86_64-apple-darwin \
+            mnemosyne-aarch64-unknown-linux-gnu \
+            mnemosyne-x86_64-unknown-linux-gnu \
+            mnemosyne-x86_64-pc-windows-msvc.exe
+          do
+            if [ ! -f "dist/$f" ]; then echo "MISSING: $f"; MISSING=1; fi
+          done
+          if [ "$MISSING" -ne 0 ]; then exit 1; fi
+          echo "All 5 platform binaries present ✓"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
