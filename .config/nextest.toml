@@ -1,50 +1,7 @@
 # cargo-nextest configuration
 # Docs: https://nexte.st/docs/configuration/
 
-# Tests that share /tmp/lorescope_sanguo.db must run serially to avoid
-# SQLite "database disk image is malformed" from concurrent rebuilds.
-# Each of these tests calls `ensure_sanguo_db()`, which lazily builds the
-# shared DB; if two run in parallel they corrupt the file.
-[test-groups]
-serial-db = { max-threads = 1 }
-
-[[profile.default.overrides]]
-filter = 'test(=setup_and_query)'
-test-group = 'serial-db'
-
-[[profile.default.overrides]]
-filter = 'test(=write_faction_to_db)'
-test-group = 'serial-db'
-
-[[profile.default.overrides]]
-filter = 'test(=fix_caoren_relation)'
-test-group = 'serial-db'
-
-# caocao_growth_trajectory also calls ensure_sanguo_db() and rebuilds the
-# shared DB; without serial grouping it races fix_caoren_relation and
-# corrupts the file ("database disk image is malformed").
-[[profile.default.overrides]]
-filter = 'test(=caocao_growth_trajectory)'
-test-group = 'serial-db'
-
-# daiyu_raw / daiyu_query read the same shared DB and would race with the
-# rebuilders above (file deleted mid-open → disk I/O error).
-[[profile.default.overrides]]
-filter = 'test(=daiyu_raw)'
-test-group = 'serial-db'
-
-[[profile.default.overrides]]
-filter = 'test(=daiyu_query)'
-test-group = 'serial-db'
-
-# fengshen_mcp / lubu_query open the same shared /tmp/lorescope_sanguo.db
-# read-only, but they still race the rebuilders above (file deleted mid-open →
-# "no such table: main.chapters" / "unable to open database file"). Serialize
-# them with the rest of the shared-DB group.
-[[profile.default.overrides]]
-filter = 'test(=fengshen_mcp)'
-test-group = 'serial-db'
-
-[[profile.default.overrides]]
-filter = 'test(=lubu_query)'
-test-group = 'serial-db'
+# The `serial-db` test group previously serialized tests sharing the
+# `/tmp/lorescope_sanguo.db` fixture. Those corpus-dependent tests were
+# removed (corpus/ is gitignored and never present in CI), so no test group
+# overrides are needed anymore.

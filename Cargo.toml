@@ -119,3 +119,12 @@ incremental = false
 # Distribution build: inherit the smallest release settings.
 [profile.dist]
 inherits = "release"
+
+# CI build: same size-friendly opt-level and panic=abort, but thin LTO + many
+# codegen units so the release pipeline compiles fast (fat LTO + 1 unit is the
+# dominant cost on every platform). Slightly larger binary is irrelevant for CI
+# artifacts; use `cargo build --profile ci`.
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
