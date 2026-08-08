@@ -19,7 +19,7 @@ use serde::Deserialize;
 use crate::error::{Error, Result};
 
 /// JSON shape of a domain profile pack.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct DomainProfile {
     /// Stable profile name, e.g. `"conversation_cognition"`.
     pub profile_name: String,
@@ -54,8 +54,21 @@ impl DomainProfile {
 }
 
 /// Cached conversation-cognition pack (the default domain for dialog input).
-static CONVERSATION_PROFILE: LazyLock<DomainProfile> =
-    LazyLock::new(|| DomainProfile::load("conversation_cognition").expect("conversation pack"));
+static CONVERSATION_PROFILE: LazyLock<DomainProfile> = LazyLock::new(|| {
+    // Fail soft instead of panicking at first use: a missing/corrupt
+    // `config/domain_profiles/conversation_cognition.json` used to abort the
+    // process. Degrade to an EMPTY profile (keyword extraction simply misses)
+    // and log the cause so a deployment without the config stays alive.
+    match DomainProfile::load("conversation_cognition") {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "warning: conversation_cognition profile failed to load ({e}); using an empty profile"
+            );
+            DomainProfile::default()
+        }
+    }
+});
 
 /// Access the process-cached conversation-cognition profile.
 #[must_use]

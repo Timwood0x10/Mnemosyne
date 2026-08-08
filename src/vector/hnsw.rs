@@ -30,7 +30,13 @@ impl Point for CosinePoint {
         }
         let denominator = left_norm.sqrt() * right_norm.sqrt();
         if denominator <= f64::EPSILON {
-            return 1.0;
+            // Zero vector: cosine similarity is undefined; match
+            // BruteForceIndex (which returns 0.0) by mapping to the angular
+            // distance whose cosine is 0.0 — sqrt(2) = sqrt(2 - 2*0).
+            // Previously returned 1.0, which the search() conversion
+            // (cosine = 1 - d²/2) turned into 0.5, disagreeing with the
+            // brute-force reference.
+            return 2.0f32.sqrt();
         }
         let cosine = (dot / denominator).clamp(-1.0, 1.0);
         (2.0 - 2.0 * cosine).max(0.0).sqrt() as f32

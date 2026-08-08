@@ -46,13 +46,20 @@ impl ToolHandler for MemoryExportHandler {
 
         // Write to a file when a path is supplied; otherwise return the JSON.
         if let Some(path) = args.get("path").and_then(Value::as_str) {
+            let resolved = match resolve_transfer_path(path) {
+                Ok(p) => p,
+                Err(e) => return Ok(err_result(e.to_string())),
+            };
+            if let Some(parent) = resolved.parent() {
+                std::fs::create_dir_all(parent).map_err(Error::Io)?;
+            }
             let json = serde_json::to_string_pretty(&bundle)
                 .map_err(|e| Error::Internal(format!("serialize bundle: {e}")))?;
-            std::fs::write(path, json).map_err(Error::Io)?;
+            std::fs::write(&resolved, json).map_err(Error::Io)?;
             return json_block(
                 &serde_json::json!({
                     "exported": true,
-                    "path": path,
+                    "path": resolved.to_string_lossy(),
                     "documents": documents,
                     "objects": objects,
                     "edges": edges,
@@ -82,6 +89,54 @@ pub struct MemoryImportHandler {
     store: Arc<SQLiteKnowledgeStore>,
 }
 
+/// Directory that `memory_export`/`memory_import` may read/write through the
+/// `path` argument. Restricting to a fixed allowlist prevents the MCP client
+/// from reading/writing arbitrary files on the host (audit finding).
+const TRANSFER_DIR: &str = "exports";
+
+/// Resolve a tool-supplied `path` to a file inside the transfer allowlist.
+///
+/// Rejects absolute paths and any path that escapes `./exports` via `..`
+/// segments, so a remote client can never touch files outside the sandbox.
+///
+/// # Errors
+///
+/// Returns `InvalidInput` when the path is absolute or escapes the directory.
+fn resolve_transfer_path(path: &str) -> Result<std::path::PathBuf> {
+    let base = std::path::Path::new(TRANSFER_DIR);
+    let p = std::path::Path::new(path);
+    if p.is_absolute() {
+        return Err(Error::InvalidInput(format!(
+            "path must be inside `{TRANSFER_DIR}/`; absolute paths are rejected: {path}"
+        )));
+    }
+    // Accept both `x.json` (relative to the allowlist) and `exports/x.json`
+    // (already prefixed) without double-prefixing.
+    let joined = if p.starts_with(base) {
+        p.to_path_buf()
+    } else {
+        base.join(p)
+    };
+    // Normalize `.`/`..` so `../etc/passwd` cannot escape the allowlist.
+    let mut normalized = std::path::PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if normalized.starts_with(base) {
+        Ok(normalized)
+    } else {
+        Err(Error::InvalidInput(format!(
+            "path escapes `{TRANSFER_DIR}/`; rejected: {path}"
+        )))
+    }
+}
+
 /// Build a graceful error [`ToolCallResult`] (protocol success, content error).
 fn err_result(message: impl Into<String>) -> ToolCallResult {
     ToolCallResult {
@@ -98,7 +153,11 @@ fn err_result(message: impl Into<String>) -> ToolCallResult {
 impl ToolHandler for MemoryImportHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
         let raw = if let Some(path) = args.get("path").and_then(Value::as_str) {
-            match std::fs::read_to_string(path) {
+            let resolved = match resolve_transfer_path(path) {
+                Ok(p) => p,
+                Err(e) => return Ok(err_result(e.to_string())),
+            };
+            match std::fs::read_to_string(&resolved) {
                 Ok(s) => s,
                 Err(e) => return Ok(err_result(format!("read import file {path}: {e}"))),
             }
@@ -292,20 +351,47 @@ mod tests {
         .await
         .expect("seed");
 
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("memory.json");
-        let path_str = path.to_str().expect("path").to_string();
-
+        // Path must stay inside the `exports/` allowlist; a relative path in
+        // that directory is accepted.
+        std::fs::create_dir_all(TRANSFER_DIR).expect("create exports dir");
+        let rel = format!("{}/test-export.json", TRANSFER_DIR);
         let handler = MemoryExportHandler { store };
         let result = handler
-            .call(&serde_json::json!({"path": path_str}))
+            .call(&serde_json::json!({"path": rel}))
             .await
             .expect("export to file");
         assert!(!result.is_error, "export to file succeeds");
 
-        let raw = std::fs::read_to_string(&path).expect("file written");
+        let raw = std::fs::read_to_string(&rel).expect("file written");
         let bundle: ExportBundle = serde_json::from_str(&raw).expect("file is a bundle");
         assert_eq!(bundle.objects.len(), 1, "file contains the object");
+        let _ = std::fs::remove_file(&rel);
+    }
+
+    /// Objective: Verify the transfer path allowlist blocks writes that would
+    /// escape `exports/` (absolute paths and `..` traversal) — the MCP client
+    /// must not be able to write arbitrary files on the host.
+    /// Invariants: absolute path and `../` traversal are both rejected.
+    #[tokio::test]
+    async fn export_rejects_paths_outside_allowlist() {
+        let store = memory_store().await;
+        let handler = MemoryExportHandler { store };
+        for bad in [
+            "/tmp/lorescope-escape.json",
+            "../escape.json",
+            "exports/../../escape.json",
+        ] {
+            let result = handler
+                .call(&serde_json::json!({"path": bad}))
+                .await
+                .expect("call");
+            assert!(result.is_error, "`{bad}` must be rejected");
+            let text = result.content[0].text.clone().unwrap_or_default();
+            assert!(
+                text.contains("exports") || text.contains("rejected"),
+                "error explains the allowlist, got: {text}"
+            );
+        }
     }
 
     /// Objective: Verify `memory_import` requires content or path.
@@ -320,6 +406,24 @@ mod tests {
         assert!(
             text.contains("content") || text.contains("path"),
             "error mentions content/path, got: {text}"
+        );
+    }
+
+    /// Objective: Verify `memory_import` rejects a path outside the allowlist.
+    /// Invariants: absolute/escaping path → graceful error, no file access.
+    #[tokio::test]
+    async fn import_rejects_paths_outside_allowlist() {
+        let store = memory_store().await;
+        let handler = MemoryImportHandler { store };
+        let result = handler
+            .call(&serde_json::json!({"path": "/etc/passwd"}))
+            .await
+            .expect("call");
+        assert!(result.is_error, "absolute path must be rejected");
+        let text = result.content[0].text.clone().unwrap_or_default();
+        assert!(
+            text.contains("exports") || text.contains("rejected"),
+            "error explains the allowlist, got: {text}"
         );
     }
 

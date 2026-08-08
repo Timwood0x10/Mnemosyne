@@ -388,17 +388,30 @@ pub async fn import_bundle(
     }
 
     // Evidence: reuse by (doc_title, content) via the doc's first chapter.
+    // Preload every involved doc's existing evidence content ONCE instead of
+    // calling `list_evidence_by_document` per bundle row (O(n²) → O(n)); the
+    // cache is updated as rows are created so duplicate contents within one
+    // bundle also dedupe.
+    let mut evidence_cache: std::collections::HashMap<i64, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for &doc_id in docs_by_title.values() {
+        let contents = store
+            .list_evidence_by_document(doc_id)
+            .await?
+            .into_iter()
+            .map(|e| e.content)
+            .collect();
+        evidence_cache.insert(doc_id, contents);
+    }
     for export_ev in &bundle.evidence {
         let Some(&doc_id) = docs_by_title.get(&export_ev.doc_title) else {
             continue;
         };
         let chapter_id = ensure_chapter(store, doc_id).await?;
-        let exists = store
-            .list_evidence_by_document(doc_id)
-            .await?
-            .iter()
-            .any(|e| e.content == export_ev.content);
-        if !exists {
+        let existing = evidence_cache
+            .get_mut(&doc_id)
+            .expect("every bundle doc is preloaded above");
+        if !existing.contains(&export_ev.content) {
             store
                 .create_evidence(&Evidence {
                     id: 0,
@@ -410,6 +423,7 @@ pub async fn import_bundle(
                     created_at: now_ts(),
                 })
                 .await?;
+            existing.insert(export_ev.content.clone());
             stats.evidence_created += 1;
         }
     }

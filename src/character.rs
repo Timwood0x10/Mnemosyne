@@ -371,6 +371,10 @@ impl CharacterStore for SQLiteCharacterStore {
     ) -> Result<Vec<CharacterAttribute>> {
         let conn = self.conn.lock().await;
         let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        // Clamp before the `as i64` cast: an oversized usize wraps to a
+        // negative i64, and SQLite treats LIMIT -1 as "no limit", returning
+        // the whole table (audit finding).
+        let limit = limit.min(10_000) as i64;
 
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
             if let Some(n) = novel {
@@ -391,7 +395,7 @@ impl CharacterStore for SQLiteCharacterStore {
                         Box::new(like.clone()) as Box<dyn rusqlite::types::ToSql>,
                         Box::new(tenant_id.to_string()),
                         Box::new(n.to_string()),
-                        Box::new(limit as i64),
+                        Box::new(limit),
                     ],
                 )
             } else {
@@ -411,7 +415,7 @@ impl CharacterStore for SQLiteCharacterStore {
                     vec![
                         Box::new(like) as Box<dyn rusqlite::types::ToSql>,
                         Box::new(tenant_id.to_string()),
-                        Box::new(limit as i64),
+                        Box::new(limit),
                     ],
                 )
             };

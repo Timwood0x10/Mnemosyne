@@ -56,6 +56,38 @@ enum LineOutcome {
     Message(JSONRPCMessage),
 }
 
+/// Cap on a single stdio JSON-RPC line, mirroring the HTTP body cap
+/// (`MAX_BODY_BYTES` in `http_server.rs`). A client streaming one endless
+/// line would otherwise grow the buffer without bound and exhaust memory.
+const MAX_LINE_BYTES: usize = 1_000_000;
+
+/// Read one bounded line from `reader`.
+///
+/// - EOF → `Ok(None)`.
+/// - A line longer than [`MAX_LINE_BYTES`] → `Err(InvalidData)` (the read is
+///   capped at `MAX_LINE_BYTES + 1`, so a runaway line cannot allocate
+///   unboundedly — it is rejected instead).
+/// - Otherwise → `Ok(Some(line))` (newline stripped by `read_line` semantics
+///   are preserved; `trim` happens later in [`classify`]).
+fn read_bounded_line<R: std::io::BufRead>(reader: &mut R) -> std::io::Result<Option<String>> {
+    let mut line = String::new();
+    // `Read::take` consumes the reader, so call it fully-qualified on the
+    // reborrowed `&mut R` (which implements `Read`); the resulting
+    // `Take<&mut R>` implements `BufRead`, so `read_line` works. This caps
+    // the allocation for a single line at MAX_LINE_BYTES + 1.
+    let n = std::io::Read::take(&mut *reader, (MAX_LINE_BYTES + 1) as u64).read_line(&mut line)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    if line.len() > MAX_LINE_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("line exceeds {MAX_LINE_BYTES} bytes"),
+        ));
+    }
+    Ok(Some(line))
+}
+
 /// Classify a single raw stdin line.
 ///
 /// A blank/whitespace-only line is legal framing noise between messages and
@@ -82,13 +114,12 @@ impl Transport for StdioTransport {
     async fn recv(&mut self) -> Result<Option<JSONRPCMessage>> {
         loop {
             // Read one JSON-RPC line off the worker thread via `spawn_blocking`
-            // so a slow/blocked stdin never stalls the tokio runtime. The read is
-            // bounded to a single line and stdin is pipe-fed by the host, so this
-            // is cheap while keeping the async worker free.
+            // so a slow/blocked stdin never stalls the tokio runtime. The read
+            // is bounded to a single line (and to MAX_LINE_BYTES, so a
+            // runaway line cannot exhaust memory) while keeping the async
+            // worker free.
             let raw = tokio::task::spawn_blocking(|| -> std::io::Result<Option<String>> {
-                let mut line = String::new();
-                let n = std::io::stdin().lock().read_line(&mut line)?;
-                if n == 0 { Ok(None) } else { Ok(Some(line)) }
+                read_bounded_line(&mut std::io::stdin().lock())
             })
             .await
             .map_err(|e| Error::Internal(format!("spawn_blocking: {e}")))?
@@ -166,6 +197,45 @@ mod tests {
             }
             other => panic!("expected Message(Request), got {other:?}"),
         }
+    }
+
+    /// Objective: Verify `read_bounded_line` caps a single line at
+    /// MAX_LINE_BYTES — a runaway line is rejected with an error instead of
+    /// allocating without bound (audit finding: unbounded `read_line`).
+    /// Invariants: a normal line reads back intact; a line longer than the
+    /// cap errors; empty input (EOF) yields None.
+    #[test]
+    fn read_bounded_line_caps_oversized_lines() {
+        use std::io::Cursor;
+
+        // Normal line: read back intact. `read_line` keeps the trailing
+        // newline (trim happens later in `classify`), so compare trimmed.
+        let mut normal =
+            Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n".to_vec());
+        let got = read_bounded_line(&mut normal).expect("normal line reads");
+        assert_eq!(
+            got.as_deref().map(str::trim),
+            Some("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"),
+            "normal line preserved"
+        );
+
+        // Oversized line: must error, not OOM or truncate silently.
+        let huge = vec![b'x'; MAX_LINE_BYTES + 100];
+        let mut oversized = Cursor::new(huge);
+        let err = read_bounded_line(&mut oversized).expect_err("oversized line must error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(
+            err.to_string().contains("exceeds"),
+            "error explains the cap, got {err}"
+        );
+
+        // Empty input → EOF → None.
+        let mut empty = Cursor::new(Vec::new());
+        assert_eq!(
+            read_bounded_line(&mut empty).expect("empty reads"),
+            None,
+            "EOF yields None"
+        );
     }
 
     /// Objective: Verify a malformed JSON line surfaces a JsonRpcParse error

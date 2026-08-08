@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::character::CharacterStore;
+use crate::character::{CharacterAttribute, CharacterEvent, CharacterRelation, CharacterStore};
 use crate::error::Result;
 use crate::ingest::corpus;
 use crate::ingest::extract;
@@ -49,6 +49,25 @@ pub struct MigrationStats {
     pub edges: usize,
     pub evidence: usize,
     pub mentions: usize,
+}
+
+/// V1 source records preloaded BEFORE the write transaction opens.
+///
+/// Both the integration helper `ensure_sanguo_db` and the production CLI point
+/// the V1 store and the knowledge store at the SAME SQLite file. Reading V1
+/// through its own connection while the knowledge connection holds the H6
+/// write transaction escalates the file lock, and the V1 reads then fail with
+/// "database is locked". Snapshotting every V1 record up front keeps the
+/// migration's H6 atomicity (one transaction, rollback on failure) while never
+/// touching the V1 connection inside the transaction.
+#[derive(Debug, Default)]
+struct V1Snapshot {
+    /// novel name → characters.
+    characters: HashMap<String, Vec<CharacterAttribute>>,
+    /// novel name → (character name → events).
+    events: HashMap<String, HashMap<String, Vec<CharacterEvent>>>,
+    /// novel name → (character name → relations).
+    relations: HashMap<String, HashMap<String, Vec<CharacterRelation>>>,
 }
 
 /// Copies V1 domain data + corpus text into the general knowledge model.
@@ -95,11 +114,17 @@ impl<'a> Migrator<'a> {
         // keep FK integrity checking. This PRAGMA must run OUTSIDE the
         // transaction below — SQLite ignores foreign_keys changes mid-transaction.
         self.knowledge.set_foreign_keys_enabled(false).await?;
-        // Wrap the entire run in one transaction (H6): a failure mid-way rolls
-        // back every row written so far instead of leaving a half-migrated
-        // database (documents exist, chapters missing; edges orphaned, etc.).
+        // Snapshot the V1 source BEFORE opening the write transaction.
+        // `ensure_sanguo_db` and production both point v1 and knowledge at the
+        // SAME SQLite file: reading through the v1 connection while the
+        // knowledge connection holds the write transaction escalates the lock
+        // to PENDING and v1's reads fail with "database is locked" (a big
+        // chapter/object insert triggers the escalation). Reading all V1 data
+        // up front, outside the transaction, keeps the H6 atomicity (one
+        // transaction, roll back on failure) while never touching v1 inside it.
+        let snapshot = self.load_v1_snapshot().await?;
         self.knowledge.begin_transaction().await?;
-        let result = self.migrate_inner().await;
+        let result = self.migrate_inner(&snapshot).await;
         match &result {
             Ok(_) => {
                 // Best-effort re-enable FKs first (outside the transaction);
@@ -116,10 +141,10 @@ impl<'a> Migrator<'a> {
         result
     }
 
-    async fn migrate_inner(&self) -> Result<MigrationStats> {
+    async fn migrate_inner(&self, snapshot: &V1Snapshot) -> Result<MigrationStats> {
         let mut stats = MigrationStats::default();
         for novel in NOVELS {
-            let s = self.migrate_novel(novel).await?;
+            let s = self.migrate_novel(novel, snapshot).await?;
             stats.documents += s.documents;
             stats.chapters += s.chapters;
             stats.objects += s.objects;
@@ -130,8 +155,48 @@ impl<'a> Migrator<'a> {
         Ok(stats)
     }
 
+    /// Preload every V1 record the migration reads, BEFORE the write
+    /// transaction opens.
+    ///
+    /// `ensure_sanguo_db` (and the production CLI) point `v1` and `knowledge`
+    /// at the SAME SQLite file. Reading through the `v1` connection while the
+    /// `knowledge` connection holds the H6 write transaction escalates the
+    /// file lock to PENDING, and `v1`'s reads then fail with "database is
+    /// locked" (a big chapter/object insert triggers the escalation). Loading
+    /// all V1 data up front keeps the H6 atomicity (one transaction, rollback
+    /// on failure) while never touching `v1` inside it.
+    async fn load_v1_snapshot(&self) -> Result<V1Snapshot> {
+        let mut snapshot = V1Snapshot::default();
+        for novel in NOVELS {
+            let characters = self
+                .v1
+                .search_characters("", TENANT, Some(novel), 100_000)
+                .await?;
+            let mut events: HashMap<String, Vec<CharacterEvent>> = HashMap::new();
+            let mut relations: HashMap<String, Vec<CharacterRelation>> = HashMap::new();
+            for c in &characters {
+                events.insert(
+                    c.name.clone(),
+                    self.v1
+                        .get_character_events(&c.name, TENANT, Some(novel))
+                        .await?,
+                );
+                relations.insert(
+                    c.name.clone(),
+                    self.v1
+                        .get_relations_for_character(&c.name, TENANT, Some(novel))
+                        .await?,
+                );
+            }
+            snapshot.characters.insert(novel.to_string(), characters);
+            snapshot.events.insert(novel.to_string(), events);
+            snapshot.relations.insert(novel.to_string(), relations);
+        }
+        Ok(snapshot)
+    }
+
     /// Migrate a single novel.
-    async fn migrate_novel(&self, novel: &str) -> Result<MigrationStats> {
+    async fn migrate_novel(&self, novel: &str, snapshot: &V1Snapshot) -> Result<MigrationStats> {
         let mut stats = MigrationStats::default();
 
         // Load corpus chapters; skip novels whose file is absent or empty.
@@ -188,13 +253,11 @@ impl<'a> Migrator<'a> {
         }
         stats.chapters += chapters.len();
 
-        // 3. Persons from V1 character_attributes.
-        let v1_chars = self
-            .v1
-            .search_characters("", TENANT, Some(novel), 100_000)
-            .await?;
+        // 3. Persons from V1 character_attributes (preloaded snapshot).
+        let v1_chars = snapshot.characters.get(novel);
+        let v1_chars: &[CharacterAttribute] = v1_chars.map(|v| v.as_slice()).unwrap_or(&[]);
         let mut person_ids: HashMap<String, i64> = HashMap::new();
-        for c in &v1_chars {
+        for c in v1_chars {
             let props = json!({
                 "aliases": c.aliases,
                 "clothing": c.clothing,
@@ -224,16 +287,18 @@ impl<'a> Migrator<'a> {
         //    edges. Dedupe event objects by (name, chapter) so an event shared
         //    across multiple related characters is stored once.
         let mut event_obj_ids: HashMap<(String, i32), i64> = HashMap::new();
-        for c in &v1_chars {
-            let events = self
-                .v1
-                .get_character_events(&c.name, TENANT, Some(novel))
-                .await?;
+        for c in v1_chars {
+            let events: &[CharacterEvent] = snapshot
+                .events
+                .get(novel)
+                .and_then(|m| m.get(&c.name))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
             let person_id = match person_ids.get(&c.name) {
                 Some(id) => *id,
                 None => continue,
             };
-            for ev in &events {
+            for ev in events {
                 let key = (ev.event_name.clone(), ev.chapter);
                 let event_id = match event_obj_ids.get(&key) {
                     Some(id) => *id,
@@ -322,12 +387,14 @@ impl<'a> Migrator<'a> {
         //    visible from both endpoints, so dedupe by V1 relation id.
         let mut seen_relation_ids: std::collections::HashSet<String> =
             std::collections::HashSet::new();
-        for c in &v1_chars {
-            let rels = self
-                .v1
-                .get_relations_for_character(&c.name, TENANT, Some(novel))
-                .await?;
-            for r in &rels {
+        for c in v1_chars {
+            let rels: &[CharacterRelation] = snapshot
+                .relations
+                .get(novel)
+                .and_then(|m| m.get(&c.name))
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+            for r in rels {
                 if !seen_relation_ids.insert(r.id.clone()) {
                     continue;
                 }
@@ -394,7 +461,7 @@ impl<'a> Migrator<'a> {
         //    each chapter. ≤1 mention+evidence per (person, chapter) bounds
         //    the volume while still giving `inspect_entity` real traceable
         //    evidence for every chapter a character appears in.
-        for c in &v1_chars {
+        for c in v1_chars {
             let person_id = match person_ids.get(&c.name) {
                 Some(id) => *id,
                 None => continue,

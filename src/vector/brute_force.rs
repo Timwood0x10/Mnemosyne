@@ -4,7 +4,7 @@
 //! unexpected results, switching to BruteForce reveals whether the issue is
 //! in the index or in the embeddings.
 
-use crate::error::Error;
+use crate::error::{Error, StorageError};
 
 use super::VectorIndex;
 
@@ -48,6 +48,19 @@ impl VectorIndex for BruteForceIndex {
     fn search(&self, query: &[f32], top_k: usize) -> Result<Vec<(i64, f32)>, Error> {
         if self.items.is_empty() {
             return Ok(Vec::new());
+        }
+
+        // Validate the query dimension against the indexed vectors. The old
+        // code let `cosine_similarity` silently use `min_len`, so a
+        // wrong-dimension query returned plausible-but-wrong scores instead
+        // of an error (HNSW already returns DimensionMismatch here; keep the
+        // two reference implementations consistent).
+        let expected = self.items[0].1.len();
+        if query.len() != expected {
+            return Err(Error::Storage(StorageError::DimensionMismatch {
+                expected,
+                actual: query.len(),
+            }));
         }
 
         // Compute cosine similarity against every item

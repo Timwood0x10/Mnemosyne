@@ -206,12 +206,15 @@ impl ConversationCompiler {
                 knowledge.push(mem);
             }
 
-            // Decision detection: solution mentions an action was taken
+            // Decision detection: solution mentions an action was taken.
+            // No bare `已`: it appears inside fillers ("已经确认") and made
+            // nearly every solution a decision (mirrors the agent_facts
+            // COMPLETION_MARKERS fix); only multi-char completion phrases
+            // count.
             let sol_lower = raw.solution.to_lowercase();
             let is_decision = sol_lower.contains("done")
                 || sol_lower.contains("implemented")
                 || sol_lower.contains("replaced")
-                || sol_lower.contains("已")
                 || sol_lower.contains("完成");
             let prob_lower = raw.problem.to_lowercase();
             let has_replacement = prob_lower.contains("replace")

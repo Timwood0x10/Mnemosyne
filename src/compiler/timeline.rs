@@ -18,6 +18,14 @@ use std::collections::HashMap;
 
 use crate::compiler::{Event, Relation};
 
+/// A single active-relation entry: the canonical entity pair and its current
+/// `(relation_type, started_at)`. `started_at` is the event timestamp when the
+/// relation began; `None` means an open-ended relation (no start event seen).
+type ActiveRelation = ((String, String), (String, Option<i32>));
+
+/// Active relation state keyed by the canonical entity pair.
+type ActiveRelationMap = HashMap<(String, String), (String, Option<i32>)>;
+
 /// A personality marker at a point in time.
 #[derive(Debug, Clone)]
 pub struct PersonalityMarker {
@@ -276,7 +284,7 @@ pub fn build_timeline(
 
     // Track current relation state per entity pair
     // Key: (source, target) → current relation type
-    let mut current: HashMap<(String, String), (String, Option<i32>)> = HashMap::new();
+    let mut current: ActiveRelationMap = HashMap::new();
     let mut results: Vec<Relation> = Vec::new();
 
     // Seed with existing relations (default valid_from=1).
@@ -359,7 +367,7 @@ pub fn build_timeline(
     // direction (and thus the relation list) non-deterministic across runs;
     // sort by the canonical pair so output is stable.
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
-    let mut active: Vec<((String, String), (String, i32))> = current.drain().collect();
+    let mut active: Vec<ActiveRelation> = current.drain().collect();
     active.sort_by(|a, b| a.0.cmp(&b.0));
     for ((source, target), (rel_type, started)) in active {
         let canon_key = if source <= target {

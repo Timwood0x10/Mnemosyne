@@ -461,18 +461,46 @@ impl SQLiteKnowledgeStore {
     /// constraints, and we delete everything anyway, so enforcing FKs here only
     /// risks a spurious "FOREIGN KEY constraint failed" on the parent deletes.
     pub async fn clear_all(&self) -> Result<()> {
+        // If a caller already opened a transaction (e.g. `Migrator::migrate`'s
+        // H6 wrap), we must NOT nest a `BEGIN` — SQLite rejects it with
+        // "cannot start a transaction within a transaction". Run the DELETE
+        // directly inside the caller's transaction instead; the caller owns
+        // the atomicity. Otherwise wrap for atomicity (PRAGMA outside, DELETE
+        // inside, rollback on failure) so FK never stays OFF with a half-wipe.
+        let in_transaction = {
+            let conn = self.conn.lock().await;
+            !conn.is_autocommit()
+        };
+        if in_transaction {
+            return self.clear_all_inner().await;
+        }
+        self.set_foreign_keys_enabled(false).await?;
+        self.begin_transaction().await?;
+        let result = self.clear_all_inner().await;
+        match &result {
+            Ok(_) => {
+                let _ = self.set_foreign_keys_enabled(true).await;
+                self.commit_transaction().await?;
+            }
+            Err(_) => {
+                let _ = self.rollback_transaction().await;
+                let _ = self.set_foreign_keys_enabled(true).await;
+            }
+        }
+        result
+    }
+
+    async fn clear_all_inner(&self) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             DELETE FROM knowledge_evidence;
+            "DELETE FROM knowledge_evidence;
              DELETE FROM mentions;
              DELETE FROM knowledge_edges;
              DELETE FROM evidence;
              DELETE FROM knowledge_objects;
              DELETE FROM compiler_runs;
              DELETE FROM chapters;
-             DELETE FROM documents;
-             PRAGMA foreign_keys = ON;",
+             DELETE FROM documents;",
         )?;
         Ok(())
     }
@@ -483,10 +511,36 @@ impl SQLiteKnowledgeStore {
     /// data. FK enforcement is disabled during the wipe for the same reason as
     /// [`clear_all`].
     pub async fn clear_for_document(&self, doc_id: i64) -> Result<()> {
+        // Same outer-transaction detection as clear_all: never nest a BEGIN
+        // inside a caller transaction (Migrator::migrate's H6 wrap calls us);
+        // the caller owns atomicity then.
+        let in_transaction = {
+            let conn = self.conn.lock().await;
+            !conn.is_autocommit()
+        };
+        if in_transaction {
+            return self.clear_for_document_inner(doc_id).await;
+        }
+        self.set_foreign_keys_enabled(false).await?;
+        self.begin_transaction().await?;
+        let result = self.clear_for_document_inner(doc_id).await;
+        match &result {
+            Ok(_) => {
+                let _ = self.set_foreign_keys_enabled(true).await;
+                self.commit_transaction().await?;
+            }
+            Err(_) => {
+                let _ = self.rollback_transaction().await;
+                let _ = self.set_foreign_keys_enabled(true).await;
+            }
+        }
+        result
+    }
+
+    async fn clear_for_document_inner(&self, doc_id: i64) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute_batch(&format!(
-            "PRAGMA foreign_keys = OFF;
-             DELETE FROM knowledge_evidence
+            "DELETE FROM knowledge_evidence
                WHERE source_type = 'object' AND source_id IN
                  (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
                OR source_type = 'edge' AND source_id IN
@@ -503,8 +557,7 @@ impl SQLiteKnowledgeStore {
              DELETE FROM evidence WHERE doc_id = {doc_id};
              DELETE FROM knowledge_objects WHERE doc_id = {doc_id};
              DELETE FROM compiler_runs WHERE doc_id = {doc_id};
-             DELETE FROM chapters WHERE doc_id = {doc_id};
-             PRAGMA foreign_keys = ON;",
+             DELETE FROM chapters WHERE doc_id = {doc_id};",
         ))?;
         Ok(())
     }
@@ -680,9 +733,33 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         // other; a SINGLE unambiguous candidate is required so an alias never
         // silently maps to the wrong person. Exact-name echoes are excluded
         // (already handled above).
-        let candidates = match doc_id {
+        //
+        // When no doc is given, match at the SQL layer instead of pulling the
+        // first 10_000 objects via search_objects — a large graph with >10k
+        // objects silently failed to resolve aliases beyond the cap.
+        // LIKE wildcards in the query are escaped so `%`/`_` match literally.
+        let escaped = name
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let candidates: Vec<KnowledgeObject> = match doc_id {
             Some(d) => self.list_objects_by_document(d).await?,
-            None => self.search_objects(None, None, None, None, 10_000).await?,
+            None => {
+                let conn = self.conn.lock().await;
+                let mut stmt = conn.prepare(
+                    "SELECT * FROM knowledge_objects \
+                     WHERE name != ?1 \
+                       AND (name LIKE '%' || ?2 || '%' ESCAPE '\\' \
+                            OR ?3 LIKE '%' || name || '%' ESCAPE '\\') \
+                     ORDER BY id ASC",
+                )?;
+                let rows = stmt.query_map(params![name, escaped, escaped], row_to_object)?;
+                let mut out = Vec::new();
+                for r in rows {
+                    out.push(r?);
+                }
+                out
+            }
         };
         let matched: Vec<KnowledgeObject> = candidates
             .into_iter()
@@ -902,22 +979,31 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         limit: usize,
     ) -> Result<Vec<KnowledgeObject>> {
         let conn = self.conn.lock().await;
+        // Clamp like search_evidence: `usize::MAX as i64` becomes -1, which
+        // SQLite treats as "no limit" and materializes the whole table.
+        let limit = limit.min(10_000) as i64;
+        // Escape LIKE wildcards so `%`/`_` in the user's query match
+        // literally instead of acting as wildcards (mirrors search_evidence).
+        let name_like = name_contains.map(|n| {
+            n.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        });
+        let prop_like = property_contains.map(|p| {
+            p.replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_")
+        });
         let mut stmt = conn.prepare(
             "SELECT * FROM knowledge_objects \
-             WHERE (?1 IS NULL OR name LIKE '%' || ?1 || '%') \
+             WHERE (?1 IS NULL OR name LIKE '%' || ?1 || '%' ESCAPE '\\') \
                AND (?2 IS NULL OR object_type = ?2) \
-               AND (?3 IS NULL OR properties LIKE '%' || ?3 || '%') \
+               AND (?3 IS NULL OR properties LIKE '%' || ?3 || '%' ESCAPE '\\') \
                AND (?4 IS NULL OR doc_id = ?4) \
              ORDER BY id ASC LIMIT ?5",
         )?;
         let rows = stmt.query_map(
-            params![
-                name_contains,
-                object_type,
-                property_contains,
-                doc_id,
-                limit as i64,
-            ],
+            params![name_like, object_type, prop_like, doc_id, limit,],
             row_to_object,
         )?;
         let mut out = Vec::new();
@@ -1220,9 +1306,13 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
             // Check both event name and description for death keywords.
             // The old code only checked the name, missing deaths described
             // in the `properties.description` field (NEW-K8).
+            //
+            // NO bare single characters: `死` matched "死战不退"/"生死之交"
+            // and `卒` matched "士卒" — false death flags. Only multi-char
+            // death phrases count (mirrors ingest's DEATH_KW fix).
             let death_kws = [
-                "战死", "去世", "身亡", "阵亡", "死亡", "死", "病逝", "病故", "殒命", "毙命",
-                "驾崩", "圆寂", "陨落", "卒",
+                "战死", "去世", "身亡", "阵亡", "死亡", "病逝", "病故", "殒命", "毙命", "驾崩",
+                "圆寂", "陨落",
             ];
             if death_kws
                 .iter()
@@ -1454,7 +1544,15 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         // Clamp to avoid `usize::MAX as i64` overflow (which becomes -1 and is
         // treated as "no limit" by SQLite) and to bound memory use.
         let limit = limit.min(10_000) as i64;
-        let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        // Escape the backslash FIRST (so the `\%`/`\_` inserted below are not
+        // re-escaped), then the LIKE wildcards. Without the backslash escape,
+        // a query containing `\` (e.g. `C:\`) produced a malformed pattern
+        // where the trailing `\` swallowed the closing `%` (audit finding).
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let like = format!("%{escaped}%");
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match doc_title {
             Some(t) => (
                 "SELECT e.content, c.chapter_no, d.title
@@ -2071,6 +2169,37 @@ mod tests {
         assert!(all.iter().any(|o| o.id == p2), "unfiltered returns all");
     }
 
+    /// Objective: Verify `search_objects` escapes LIKE wildcards in the
+    /// query — a `%`/`_` in the name must match literally, not act as a
+    /// wildcard matching everything (previously `%` returned the whole table).
+    /// Invariants: query "%" → only the object whose name literally contains
+    /// %; query "_" behaves likewise.
+    #[tokio::test]
+    async fn search_objects_escapes_like_wildcards() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "特殊名").await;
+        let percent = seed_person(&store, did, "100%完成", json!({})).await;
+        let underscore = seed_person(&store, did, "a_b", json!({})).await;
+        let normal = seed_person(&store, did, "张三", json!({})).await;
+        let _ = (percent, underscore, normal);
+
+        // `%` must NOT match every row — only the literal-% name.
+        let pct = store
+            .search_objects(Some("%"), None, None, None, 20)
+            .await
+            .expect("search percent");
+        assert_eq!(pct.len(), 1, "`%` must be literal, got {} rows", pct.len());
+        assert_eq!(pct[0].name, "100%完成");
+
+        // `_` must NOT act as the single-char wildcard matching 张三/a_b.
+        let us = store
+            .search_objects(Some("a_b"), None, None, None, 20)
+            .await
+            .expect("search underscore");
+        assert_eq!(us.len(), 1, "`_` must be literal, got {} rows", us.len());
+        assert_eq!(us[0].name, "a_b");
+    }
+
     /// Objective: Verify `graph_counts` reports accurate row counts.
     /// Invariants: after seeding one doc + three objects, counts match;
     /// an empty fresh store reports all-zero.
@@ -2495,5 +2624,45 @@ mod tests {
         assert_eq!(hits[0].chapter, 41);
         assert_eq!(hits[0].doc, "三国演义");
         assert_eq!(hits[0].confidence, 1.0);
+    }
+
+    /// Objective: Verify a query containing a literal backslash (`C:\`) is
+    /// escaped before the LIKE pattern — previously the trailing `\` escaped
+    /// the closing `%`, so the search silently matched the wrong rows.
+    /// Invariants: a query with `\` finds the exact backslash content and
+    /// does not error; `%`/`_` remain literal (wildcard-free).
+    #[tokio::test]
+    async fn search_evidence_escapes_backslash() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "日志").await;
+        let cid = seed_chapter(&store, did, 1).await;
+        for content in ["路径 C:\\data 在此", "普通文本无符号", "百分之五十 50%"] {
+            store
+                .create_evidence(&Evidence {
+                    id: 0,
+                    doc_id: did,
+                    chapter_id: cid,
+                    start_offset: None,
+                    end_offset: None,
+                    content: content.into(),
+                    created_at: now_ts(),
+                })
+                .await
+                .expect("create evidence");
+        }
+        // Backslash query must match only the backslash row, not all rows.
+        let hits = store
+            .search_evidence("C:\\data", Some("日志"), 10)
+            .await
+            .expect("search with backslash");
+        assert_eq!(hits.len(), 1, "backslash query must be exact");
+        assert_eq!(hits[0].text, "路径 C:\\data 在此");
+        // A bare `%` query must NOT act as a wildcard matching everything.
+        let pct = store
+            .search_evidence("%", Some("日志"), 10)
+            .await
+            .expect("search with percent");
+        assert_eq!(pct.len(), 1, "`%` must be literal, not a wildcard");
+        assert_eq!(pct[0].text, "百分之五十 50%");
     }
 }

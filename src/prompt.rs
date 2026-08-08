@@ -75,7 +75,16 @@ impl PromptBuilder {
             parts.push("## Recent".to_string());
             for msg in recent_messages.iter().rev().take(3).rev() {
                 let c: String = msg.content.chars().take(200).collect();
-                let s = if msg.content.len() > 200 { "…" } else { "" };
+                // Ellipsis decision must use the SAME unit as the truncation
+                // (characters). The old `msg.content.len() > 200` compared
+                // bytes: a Chinese message of 100 chars (300 bytes) got a
+                // spurious "…" even though nothing was cut, and messages
+                // between 200 and 600 bytes were truncated without any marker.
+                let s = if msg.content.chars().count() > 200 {
+                    "…"
+                } else {
+                    ""
+                };
                 parts.push(format!("{}: {}{}", msg.role, c, s));
             }
         }

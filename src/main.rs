@@ -109,10 +109,16 @@ impl ToolHandler for MemorySearchTool {
             .and_then(Value::as_u64)
             .unwrap_or(5)
             .min(200) as usize;
-        let memory_type_filter = args
-            .get("memory_type")
-            .and_then(Value::as_str)
-            .and_then(|s| s.parse::<MemoryType>().ok());
+        // Reject an invalid memory_type instead of silently swallowing it
+        // (the old `.ok()` made the filter a no-op and returned unfiltered
+        // results — callers believed the filter had applied).
+        let memory_type_filter = match args.get("memory_type").and_then(Value::as_str) {
+            Some(s) => Some(
+                s.parse::<MemoryType>()
+                    .map_err(|e| Error::InvalidInput(format!("invalid memory_type `{s}`: {e}")))?,
+            ),
+            None => None,
+        };
 
         let results = self
             .engine
@@ -1096,7 +1102,14 @@ async fn main() -> AnyhowResult<()> {
                     let addr: std::net::SocketAddr = http_addr
                         .parse()
                         .context("invalid --http-addr; expected host:port")?;
-                    serve_http_addr(server, addr, http_token).await?;
+                    // HTTP serving exposes the MCP server over the network;
+                    // require an explicit token so an unauthenticated listener
+                    // is never started by accident.
+                    let token = http_token
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "HTTP transport requires --http-token (refusing to serve without authentication)"
+                        ))?;
+                    serve_http_addr(server, addr, Some(token)).await?;
                 }
                 "stdio" => {
                     let mut transport = StdioTransport::new();

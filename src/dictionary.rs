@@ -150,7 +150,7 @@ struct DictionaryFile {
 // ── Dictionary struct ───────────────────────────────────────────────────────
 
 /// Runtime dictionary loaded from `config/dictionary.json`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Dictionary {
     /// All lexemes indexed by their lemma (lowercased).
     lexemes_by_lemma: HashMap<String, Vec<Lexeme>>,
@@ -356,9 +356,21 @@ impl Dictionary {
 // ── Global singleton ────────────────────────────────────────────────────────
 
 static DICT: LazyLock<RwLock<Dictionary>> = LazyLock::new(|| {
-    RwLock::new(
-        Dictionary::load_default().expect("config/dictionary.json must be present and valid"),
-    )
+    // Fail soft instead of panicking on first use: a missing/corrupt
+    // `config/dictionary.json` used to abort the process the moment any
+    // caller touched the global dictionary. Degrade to an EMPTY dictionary
+    // (stop-word/verb lookups just miss) and log the cause, so a deployment
+    // without the config stays alive and diagnosable.
+    let dict = match Dictionary::load_default() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!(
+                "warning: config/dictionary.json failed to load ({e}); using an empty dictionary"
+            );
+            Dictionary::default()
+        }
+    };
+    RwLock::new(dict)
 });
 
 /// Reload the global dictionary from its default path (for hot-reload or testing).

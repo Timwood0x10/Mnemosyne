@@ -141,7 +141,7 @@ pub fn extract_profiles(
                     }
                 };
                 if let Some(v) = val {
-                    profiles.push((pp.key.as_str(), v));
+                    profiles.push((pp.key.as_str(), strip_leading_entity(&v, &entity_name)));
                 }
             }
         }
@@ -172,7 +172,7 @@ pub fn extract_profiles(
                     }
                 };
                 if let Some(value) = value {
-                    profiles.push((definition.key, value));
+                    profiles.push((definition.key, strip_leading_entity(&value, &entity_name)));
                 }
             }
         }
@@ -190,6 +190,7 @@ pub fn extract_profiles(
                     }
                 };
                 if let Some(v) = val {
+                    let v = strip_leading_entity(&v, &entity_name);
                     if !profiles.iter().any(|(k, _)| *k == key && v.contains(k)) {
                         profiles.push((key, v));
                     }
@@ -546,6 +547,22 @@ fn extract_before(line: &str, suffix: &str) -> Option<String> {
         .rev()
         .collect();
     if value.is_empty() { None } else { Some(value) }
+}
+
+/// Strip a leading known entity name from an extracted profile value.
+///
+/// `extract_before` grabs the whole segment before the pattern, so when the
+/// entity name immediately precedes it ("张飞涿郡人也" → birthplace
+/// "张飞涿郡") the name pollutes the value. Removing it leaves only the
+/// attribute text ("涿郡").
+fn strip_leading_entity(value: &str, entity_name: &str) -> String {
+    if let Some(rest) = value.strip_prefix(entity_name) {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return rest.to_string();
+        }
+    }
+    value.to_string()
 }
 
 /// Extract text between prefix and suffix.

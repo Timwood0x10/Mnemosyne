@@ -95,8 +95,34 @@ impl ToolHandler for ContextCheckTool {
             // original reason text). Grayscale ON → empty injection slot
             // (plan P3: below the gate we inject nothing, preserving the
             // host's context window).
-            let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-            let facts = self.fact_store.get_facts(user_entity_id)?;
+            //
+            // Read-only resolve: a below-threshold diagnostic must NOT
+            // materialize an entity for a user who never chatted (audit:
+            // read-only tools writing via resolve_user). find_entity never
+            // writes; unknown users simply report zero facts.
+            let norm_tenant = if tenant_id.trim().is_empty() {
+                "default"
+            } else {
+                tenant_id.trim()
+            };
+            let norm_user = if user_id.trim().is_empty() {
+                "default"
+            } else {
+                user_id.trim()
+            };
+            let name = if norm_user == "default" {
+                "User".to_string()
+            } else {
+                format!("User:{norm_user}")
+            };
+            let user_entity_id = self
+                .fact_store
+                .find_entity(norm_tenant, Some(norm_user), &name)?
+                .map(|(id, _, _)| id);
+            let facts = match user_entity_id {
+                Some(id) => self.fact_store.get_facts(id)?,
+                None => Vec::new(),
+            };
             let mut payload = serde_json::Map::new();
             payload.insert("context_usage_percent".into(), json!(context_usage));
             payload.insert("threshold_percent".into(), json!(threshold));

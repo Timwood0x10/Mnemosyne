@@ -91,13 +91,16 @@ impl ConversationFacts {
 ///
 /// Mirrors the decision-detection vocabulary in `conversation_compiler.rs` so
 /// agent-action detection stays consistent with the legacy compiler.
+///
+/// Deliberately NO bare single character `已`: it appears inside common
+/// fillers ("已经确认", "已完成一半") and made nearly any assistant message
+/// count as a completed action. Only multi-char completion phrases survive.
 const COMPLETION_MARKERS: &[&str] = &[
     "done",
     "implemented",
     "replaced",
     "completed",
     "fixed",
-    "已",
     "完成",
     "替换",
     "修复",

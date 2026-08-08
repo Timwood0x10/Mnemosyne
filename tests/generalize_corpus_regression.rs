@@ -109,7 +109,7 @@ async fn full_corpus_compile_and_inspect_regression() {
             std::fs::read_to_string(&full).unwrap_or_else(|e| panic!("read `{path}` failed: {e}"));
         let title = title_of(path);
         let source = RawTextSource::new(title.clone(), *path, text, "text");
-        verify_corpus(*path, &source, &title).await;
+        verify_corpus(path, &source, &title).await;
     }
 
     // 2. 对话语料：从 JSON 的 `messages` 数组构建 DialogSource。
