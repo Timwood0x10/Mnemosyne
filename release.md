@@ -1,4 +1,4 @@
-# Mnemosyne v0.1.0
+# Mnemosyne v0.1.1
 
 **Mnemosyne** (Greek: Μνημοσύνη) — the Memory Distillation Engine.
 
@@ -23,8 +23,7 @@ consistent persona without an LLM in the loop.
 | Windows | x86_64 | `mnemosyne-x86_64-pc-windows-msvc.exe` |
 
 All binaries are single-file, statically configured (SQLite-only, no API key
-required), and ~5–6 MB after release optimization (opt-level=z + fat LTO +
-strip).
+required), and ~6–8 MB after release optimization.
 
 ## Quick start
 
@@ -70,15 +69,20 @@ strip).
 - **Deterministic pipeline** — Aho-Corasick verb matching, rule-driven event
   extraction, 8-stage distillation. No LLM guessing anywhere.
 
-## Changelog (v0.1.0)
+## Changelog (v0.1.1)
 
-- Rebranded to **Mnemosyne** (formerly LoreScope): package, binary, docs.
-- MCP hardening: SSE session isolation, mandatory HTTP auth with
-  constant-time token compare, file-allowlist for transfer tools.
-- War and Peace tests sample the corpus (opening 100k chars) — full suite:
-  **728 tests pass in ~18s**.
-- Deep code review: 1 finding fixed (README remote URL → real `/sse` route).
-- Release binaries slimmed to ~5–6 MB.
+- **Rebrand to Mnemosyne** (formerly LoreScope): package, binary, docs,
+  Makefile, repository.
+- **MCP hardening**: HTTP requires `--http-token` with constant-time compare;
+  per-session SSE isolation (`x-mcp-session-id`); `memory_export/import` path
+  allowlist.
+- **Faster CI/release**: new `[profile.ci]` (thin LTO + 16 units) for builds;
+  release runs after CI succeeds, builds all 5 platforms, verifies assets
+  before publishing, version tag from `release.md`.
+- **Self-contained tests**: all corpus-dependent tests removed (corpus is
+  gitignored); suite runs fully on CI with synthetic data only.
+- **Wire fix**: `ToolDefinition.input_schema` now serializes as `inputSchema`
+  (MCP camelCase contract).
 
 ## Docs
 
