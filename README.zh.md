@@ -32,16 +32,16 @@
                 语言前端 (Language Frontend)
                      │
                      ▼
-             观察编译器 (Observation Compiler)
+             观察编译器
                      │
                      ▼
-             知识编译器 (Knowledge Compiler)
+             知识编译器
                      │
                      ▼
-              快照构建器 (Snapshot Builder)
+              快照构建器
                      │
                      ▼
-              认知上下文 (Cognitive Context)
+              认知上下文
 ```
 
 ### 编译管线

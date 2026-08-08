@@ -1,6 +1,7 @@
 # Mnemosyne — Memory Distillation Engine
 
-> **Mnemosyne**（希腊记忆女神摩涅莫绪涅）—— 记忆不死、可重构、跨会话延续。
+> **Mnemosyne** — the Greek goddess of memory: memory never dies, is always
+> reconstructable, and persists across sessions.
 
 Compile any long-term interaction into an **evolving human cognitive model**: identity, preference, goal, emotion, relationship. Designed for companion AIs to maintain consistent persona across sessions.
 
@@ -12,18 +13,18 @@ Compile any long-term interaction into an **evolving human cognitive model**: id
 
 ## About the Name
 
-**Mnemosyne**（摩涅莫绪涅）is the Greek goddess of memory — mother of the nine
+**Mnemosyne** is the Greek goddess of memory — mother of the nine
 Muses, keeper of everything that must not be forgotten. The name is a promise
 made concrete by this engine:
 
-- **记忆不死**（memory never dies）— facts are persisted in SQLite and survive
+- **Memory never dies** — facts are persisted in SQLite and survive
   across sessions, independent of the context window; `memory_export`/`memory_import`
   back them up and move them between machines intact.
-- **可重构**（reconstructable）— every fact carries an evidence chain
+- **Reconstructable** — every fact carries an evidence chain
   (EvidenceRef) and a scoring rule, so a persona's evolution timeline can be
   rebuilt from raw history at any time — nothing is guessed, everything is
   traceable.
-- **跨会话延续**（continuity across sessions）— cognition is *in the model,
+- **Continuity across sessions** — cognition is *in the model,
   not in the prompt*: the store, not the context window, is the source of truth.
 
 Just as Mnemosyne let poets and heroes *remember*, this engine lets a companion
@@ -114,7 +115,8 @@ AI *remember its user* — deterministically, without an LLM in the loop.
 
 ### Companion Persona Tools
 
-Persona-consistency tools for companion AIs ("陪伴型AI维护人设不崩"): inject a structured
+Persona-consistency tools for companion AIs (keeping the persona stable across
+sessions): inject a structured
 persona card, guard a draft reply against the stored persona, track the agent↔user
 relationship, and rebuild the persona's evolution timeline.
 
@@ -124,7 +126,7 @@ relationship, and rebuild the persona's evolution timeline.
 | `persona_check` | Guard the agent's draft reply against the accumulated persona facts; report `conflicts` + `drift` (no LLM, keyword fallback) | `agent_id`, `draft` |
 | `relationship_update` | Incrementally update the agent↔user relationship state from message emotion signals (intimacy / stage / trend / recent topics) | `agent_id`, `user_id`, `messages[]` |
 | `relationship_query` | Read the current relationship snapshot for a tenant/agent/user triple | `agent_id`, `user_id` |
-| `persona_timeline` | Rebuild an entity's persona evolution timeline (`起点 → 关键转变点 → 现状`) from accumulated facts (mem0 v3 ADD-only) | `entity_id` |
+| `persona_timeline` | Rebuild an entity's persona evolution timeline (`origin → turning point → current state`) from accumulated facts (mem0 v3 ADD-only) | `entity_id` |
 | `story_bridge` | Novel-character bridge: compile a protagonist's knowledge-graph story events into fact-store persona facts, providing cold-start baseline for `persona_timeline`/`persona_check` | `name` |
 | `memory_decay` | Deterministic memory decay / forgetting: down-weight and archive stale facts, never delete (protects high-value persona facts) | — |
 
@@ -318,7 +320,7 @@ entity profile packs in `config/entity_profiles/`.
 | `PrideAndPrejudice.txt` | en | novel text | `generalize_corpus_regression` |
 | `巴黎圣母院.pdf` (Notre-Dame de Paris) | zh | PDF | e2e PDF (skipped if absent) |
 | `2.pdf` | — | PDF | e2e PDF (skipped if absent) |
-| `bailiusu_escape.json` (白流苏逃出白家) | zh | dialog | `caoren_*`, companion MCP loop |
+| `bailiusu_escape.json` (Bai Liusu flees the Bai household) | zh | dialog | `caoren_*`, companion MCP loop |
 | `warpeace_pierre.json` (War and Peace · Pierre) | en | dialog | companion MCP loop |
 | `raskolnikov_porfiry.json` | zh | dialog | `generalize_corpus_regression` (dialog path) |
 | `sonia_raskolnikov.json` | zh | dialog | `generalize_corpus_regression` (dialog path) |
@@ -373,7 +375,7 @@ make fmt        # Format code
 
 ### Module Documentation
 
-| Module | English | 中文 |
+| Module | English | Chinese |
 |--------|---------|------|
 | System architecture | [docs/en/architecture.md](docs/en/architecture.md) | [docs/zh/architecture.md](docs/zh/architecture.md) |
 | Narrative compilation pipeline | [docs/en/compiler.md](docs/en/compiler.md) | [docs/zh/compiler.md](docs/zh/compiler.md) |

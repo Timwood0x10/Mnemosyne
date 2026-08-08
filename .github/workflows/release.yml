@@ -13,8 +13,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Static analysis gate: fmt + clippy + check must pass before any platform
+  # build is dispatched. Keeps the matrix fast-failing on obvious issues.
+  lint:
+    name: Static analysis (fmt + clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
   build:
     name: ${{ matrix.target }}
+    needs: lint
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -80,11 +110,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Extract the version from release.md (first line: "# Mnemosyne v0.1.0").
+      - name: Read version from release.md
+        id: version
+        run: |
+          VER=$(grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' release.md | head -1)
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
       - name: Download all platform binaries
         uses: actions/download-artifact@v4
         with:
           path: dist
-          merge-multiple: false
+          # Merge every artifact's files into dist/ root so a plain
+          # `files: dist/*` glob picks up all five binaries (no nested
+          # per-artifact subdirectories to mismatch).
+          merge-multiple: true
+
+      - name: List downloaded binaries
+        run: ls -la dist/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -92,10 +135,10 @@ jobs:
           # Body is read verbatim from release.md at the repo root.
           body_path: release.md
           # Attach every downloaded binary (mac×2, linux×2, windows×1).
-          files: dist/mnemosyne-*/*
-          # Tag/name from the Cargo package version (v0.1.0).
-          tag_name: v${{ github.run_number }}
-          name: Mnemosyne v${{ github.run_number }}
+          files: dist/*
+          # Tag/name taken from release.md's version line (e.g. v0.1.0).
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Mnemosyne ${{ steps.version.outputs.version }}
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
