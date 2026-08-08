@@ -73,17 +73,21 @@ pub async fn ensure_sanguo_db() -> &'static str {
     DB_PATH
 }
 
-/// Cache file for the full War-and-Peace compile (entities/events/relations).
-///
-/// Compiling the full 84k-sentence English corpus takes ~2 minutes per test
-/// binary; both `war_peace` and `war_mcp` compile it. This helper serializes
-/// the compiled IR once and replays it on subsequent runs, keyed on the
-/// corpus file's mtime so a corpus change invalidates the cache.
-/// Cache file for the full War-and-Peace compile (entities/events/relations).
-/// Public so tests can report which cache they replayed.
-pub const WAR_CACHE_PATH: &str = "/tmp/lorescope_war_compile.json";
-/// Corpus file the War-and-Peace cache is keyed on (mtime invalidation).
+/// Corpus file the War-and-Peace sample is compiled from.
 pub const WAR_CORPUS: &str = "corpus/WarandPeace.txt";
+
+/// How many leading characters of War-and-Peace to compile.
+///
+/// The full 84k-sentence novel takes ~2 minutes to compile — far too slow for
+/// a default test run. The opening chapters already contain the protagonists
+/// (Anna, Pierre, ...), so compiling just the first [`WAR_SAMPLE_CHARS`]
+/// characters exercises the same English pipeline in well under a second.
+const WAR_SAMPLE_CHARS: usize = 100_000;
+
+/// Take the opening sample of the corpus (character-boundary safe).
+fn war_sample(text: &str) -> String {
+    text.chars().take(WAR_SAMPLE_CHARS).collect()
+}
 
 /// Serializable slice of the War-and-Peace compile result.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -94,42 +98,15 @@ pub struct WarCompile {
     pub profiles: Vec<lore_scope::compiler::EntityProfile>,
 }
 
-/// Compile War and Peace (or replay the disk cache when valid).
+/// Compile the opening sample of War and Peace.
 ///
 /// # Panics
 ///
 /// Panics if the corpus is missing or compilation fails.
 pub fn ensure_war_compile() -> WarCompile {
-    // Fast path: cache exists and the corpus has not changed since it was
-    // written (mtime in the file's `_meta`). Saves ~2 minutes per test.
-    let corpus_mtime = std::fs::metadata(WAR_CORPUS)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        });
-    if let Ok(raw) = std::fs::read_to_string(WAR_CACHE_PATH) {
-        if let Ok(cached) = serde_json::from_str::<WarCompile>(&raw) {
-            if let Ok(meta) = std::fs::metadata(WAR_CACHE_PATH) {
-                let cache_mtime = meta.modified().ok().map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0)
-                });
-                // Cache is stale if the corpus changed AFTER the cache was
-                // written.
-                if cache_mtime.unwrap_or(0) >= corpus_mtime.unwrap_or(u64::MAX) {
-                    return cached;
-                }
-            }
-        }
-    }
-
-    // Slow path: full compile, then persist.
     let doc = Document::from_file(WAR_CORPUS).expect("WarandPeace.txt");
-    let text = &doc.text;
+    let text = war_sample(&doc.text);
+    let text = text.as_str();
     let mut ctx = CompileContext {
         document_title: "War and Peace".into(),
         ..Default::default()
@@ -174,22 +151,11 @@ pub fn ensure_war_compile() -> WarCompile {
         relations: ctx.relations,
         profiles: ctx.profiles,
     };
-    if let Ok(json) = serde_json::to_string(&compiled) {
-        let _ = std::fs::write(WAR_CACHE_PATH, json);
-    }
     compiled
 }
 
-/// Cache file for the war_mcp variant (JsonEntityProvider-backed compile).
-///
-/// `war_mcp` uses `config/entity_profiles/warandpeace.json` via
-/// `JsonEntityProvider`, so its IR differs from `ensure_war_compile()`'s
-/// default-dictionary compile. Keep a separate cache keyed on the same corpus
-/// mtime; a corpus change invalidates BOTH.
-const WAR_MCP_CACHE_PATH: &str = "/tmp/lorescope_war_mcp_compile.json";
-
-/// Compile War and Peace with the warandpeace.json entity provider (or replay
-/// the disk cache). Mirrors `tests/war_mcp.rs`'s original compile block.
+/// Compile the opening sample of War and Peace with the warandpeace.json
+/// entity provider. Mirrors `tests/war_mcp.rs`'s compile block.
 ///
 /// # Panics
 ///
@@ -198,31 +164,9 @@ pub fn ensure_war_mcp_compile() -> WarCompile {
     use lore_scope::compiler::entity::{EntityRegistry, JsonEntityProvider};
     use std::sync::Arc;
 
-    let corpus_mtime = std::fs::metadata(WAR_CORPUS)
-        .and_then(|m| m.modified())
-        .ok()
-        .map(|t| {
-            t.duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-        });
-    if let Ok(raw) = std::fs::read_to_string(WAR_MCP_CACHE_PATH) {
-        if let Ok(cached) = serde_json::from_str::<WarCompile>(&raw) {
-            if let Ok(meta) = std::fs::metadata(WAR_MCP_CACHE_PATH) {
-                let cache_mtime = meta.modified().ok().map(|t| {
-                    t.duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0)
-                });
-                if cache_mtime.unwrap_or(0) >= corpus_mtime.unwrap_or(u64::MAX) {
-                    return cached;
-                }
-            }
-        }
-    }
-
     let doc = Document::from_file(WAR_CORPUS).expect("WarandPeace.txt");
-    let text = &doc.text;
+    let text = war_sample(&doc.text);
+    let text = text.as_str();
     let mut ctx = CompileContext {
         document_title: "War and Peace".into(),
         ..Default::default()
@@ -279,8 +223,5 @@ pub fn ensure_war_mcp_compile() -> WarCompile {
         relations: ctx.relations,
         profiles: ctx.profiles,
     };
-    if let Ok(json) = serde_json::to_string(&compiled) {
-        let _ = std::fs::write(WAR_MCP_CACHE_PATH, json);
-    }
     compiled
 }

@@ -8,23 +8,30 @@ use std::sync::Arc;
 use lore_scope::compiler::writer::{EvidenceBatch, EvidenceWriter};
 use lore_scope::knowledge::{KnowledgeStore, SQLiteKnowledgeStore};
 
-const DB: &str = "/tmp/warpeace_mcp.db";
-
+/// Objective: Verify War-and-Peace compiles with the warandpeace.json entity
+/// provider and lands in the MCP knowledge store, then Anna is queryable.
+/// Invariants: compile completes; Anna resolves; knowledge rows exist.
+///
+/// Compiles only the opening sample (see `common::ensure_war_mcp_compile`) so
+/// the test runs in well under a second; the knowledge DB lives in a tempdir
+/// so parallel/CI runs never collide on a hardcoded `/tmp` path.
 #[tokio::test]
 async fn war_mcp() {
-    let _ = std::fs::remove_file(DB);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("warpeace_mcp.db");
+    let db = db_path.to_str().expect("utf8 path");
     println!("========== War and Peace → MCP Store ==========\n");
 
-    // Full 84k-sentence compile with the warandpeace.json provider is ~2
-    // minutes; replay the shared disk cache (mtime-invalidated).
+    // Opening-sample compile (fast); the shared disk cache was removed in
+    // favor of sampling the first 100k characters.
     let compiled = common::ensure_war_mcp_compile();
     println!("Compiled: {} events\n", compiled.events.len());
 
     // 2. Bootstrap MCP store
-    let k_init = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
+    let k_init = Arc::new(SQLiteKnowledgeStore::open(db).await.unwrap());
     drop(k_init);
 
-    let conn = rusqlite::Connection::open(DB).unwrap();
+    let conn = rusqlite::Connection::open(db).unwrap();
     conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
     conn.execute(
         "INSERT INTO knowledge_objects (doc_id, object_type, name, properties, confidence, created_at)
@@ -42,7 +49,7 @@ async fn war_mcp() {
         [doc_id],
     )
     .unwrap();
-    let k = Arc::new(SQLiteKnowledgeStore::open(DB).await.unwrap());
+    let k = Arc::new(SQLiteKnowledgeStore::open(db).await.unwrap());
 
     // 3. Write entities + events + evidence
     let mut ec = 0usize;

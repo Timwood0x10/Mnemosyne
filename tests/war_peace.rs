@@ -5,6 +5,12 @@ mod common;
 
 use std::collections::HashMap;
 
+/// Objective: Verify the English compiler pipeline handles a full-length novel
+/// (War and Peace) — entities, events, relations, profiles.
+/// Invariants: compile completes and produces a non-trivial entity/event set.
+///
+/// Compiles only the opening sample (see `common::ensure_war_compile`) so the
+/// test runs in well under a second instead of the ~2-minute full compile.
 #[tokio::test]
 async fn war_peace() {
     println!("========== War and Peace · Analysis ==========\n");
@@ -30,7 +36,7 @@ async fn war_peace() {
     println!("━━━ Events & entities ━━━━━━━━━━━━━━━━━━━\n");
     println!("Entities:  {}", compiled.entities.len());
     println!("Events:    {}", compiled.events.len());
-    println!("Sentences: {} (cached compile)\n", common::WAR_CACHE_PATH);
+    println!("Sample:    first 100k chars (opening chapters)\n");
 
     println!("Top 15 by event count:\n");
     for (name, count) in ranked.iter().take(15) {
