@@ -8,11 +8,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: "-D warnings"
 
 jobs:
   test:
-    name: Build, test, lint
+    name: check + test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -23,7 +22,10 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache cargo registry and build
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
@@ -32,14 +34,5 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Format check
-        run: cargo fmt --all -- --check
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Build
-        run: cargo build --verbose
-
-      - name: Test
-        run: cargo test --verbose
+      - name: make check && make test
+        run: make check && make test

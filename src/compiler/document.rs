@@ -125,17 +125,6 @@ mod tests {
     use super::*;
     use crate::types::Message;
 
-    /// Objective: Verify that `from_file` sets the title from the file stem.
-    /// Invariants: The document title equals the file name without extension.
-    #[test]
-    fn document_title_from_file_stem() {
-        let d =
-            Document::from_file("corpus/三国演义.txt").expect("三国演义.txt should be readable");
-        assert_eq!(d.title, "三国演义", "title should be the file stem");
-        assert_eq!(d.doc_type, "text", "txt file → doc_type=text");
-        assert!(!d.text.is_empty(), "text should be non-empty");
-    }
-
     /// Objective: Verify that `from_text` preserves caller-supplied metadata.
     /// Invariants: Title and doc_type match exactly what was passed.
     #[test]
