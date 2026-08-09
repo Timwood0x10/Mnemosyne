@@ -100,6 +100,15 @@ impl ToolHandler for MemoryCompileTool {
             .distill_if_requested(args, tenant_id, user_id, &messages, &compiled.compatibility)
             .await?;
 
+        // Persist compiled knowledge into the memories table (not just the
+        // response projection): a conversation that yields knowledge must
+        // survive in the store, otherwise it only lives in the JSON reply and
+        // is lost on the next run. Runs regardless of the `distill` flag.
+        if let Some(distiller) = &self.distiller {
+            persist_compatible_knowledge(distiller, tenant_id, &compiled.compatibility.knowledge)
+                .await?;
+        }
+
         let payload = serde_json::json!({
             "knowledge": compiled.compatibility.knowledge,
             "decisions": compiled.compatibility.decisions,
@@ -189,6 +198,45 @@ async fn persist_compatible_decisions(
             content,
             decision.importance,
         );
+        experience.source = "compile".to_string();
+        distiller.store().create(&experience).await?;
+    }
+    Ok(())
+}
+
+/// Persist compiled knowledge (`CompiledConversation.knowledge`) into the
+/// memories table. Previously this list only appeared in the JSON response
+/// projection and was never stored, so a compiled conversation's knowledge
+/// vanished on the next run. Filters noise/secrets and dedupes against
+/// existing Knowledge rows, mirroring [`persist_compatible_decisions`].
+async fn persist_compatible_knowledge(
+    distiller: &PipelineDistiller,
+    tenant_id: &str,
+    knowledge: &[crate::types::Memory],
+) -> Result<(), Error> {
+    let noise_filter = crate::filter::NoiseFilter::new();
+    let security_filter = crate::filter::SecurityFilter::new();
+    let existing = distiller
+        .store()
+        .get_by_memory_type(tenant_id, MemoryType::Knowledge)
+        .await?;
+
+    for memory in knowledge {
+        let content = memory.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let probe = Message::new("user", content);
+        if security_filter.is_sensitive(&probe)
+            || noise_filter.is_noise(&probe)
+            || existing
+                .iter()
+                .any(|experience| experience.content == content)
+        {
+            continue;
+        }
+        let mut experience =
+            Experience::new(tenant_id, MemoryType::Knowledge, content, memory.importance);
         experience.source = "compile".to_string();
         distiller.store().create(&experience).await?;
     }
