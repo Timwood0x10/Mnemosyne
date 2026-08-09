@@ -317,6 +317,17 @@ pub fn extract_self_cognition(messages: &[Message]) -> Vec<SelfCognition> {
     out
 }
 
+/// Single-character stop words distilled from [`THEME_STOP`]; a 2-char bigram
+/// touching one of these straddles a function word ("操的", "我是", "这样")
+/// and must not become a topic keyword.
+static THEME_STOP_CHARS: LazyLock<std::collections::HashSet<char>> = LazyLock::new(|| {
+    THEME_STOP
+        .iter()
+        .filter(|s| s.chars().count() == 1)
+        .flat_map(|s| s.chars())
+        .collect()
+});
+
 /// Topic keywords clustered across turns (>=2 turns → a "recurring theme").
 #[must_use]
 pub fn extract_repeated_themes(messages: &[Message]) -> Vec<ThemeSignal> {
@@ -333,10 +344,23 @@ pub fn extract_repeated_themes(messages: &[Message]) -> Vec<ThemeSignal> {
             if w[0].is_ascii_alphabetic() || w[1].is_ascii_alphabetic() {
                 continue;
             }
-            if w[0].is_whitespace() || w[1].is_whitespace() {
+            // Reject bigrams touching any non-alphanumeric char (whitespace,
+            // ASCII or CJK punctuation): "0.", "吧。", "，不" are extraction
+            // fragments, never topics.
+            if !w[0].is_alphanumeric() || !w[1].is_alphanumeric() {
+                continue;
+            }
+            // Reject bigrams straddling a single-character stop word
+            // ("操的", "我是", "他的") — they fragment around a function word.
+            if THEME_STOP_CHARS.contains(&w[0]) || THEME_STOP_CHARS.contains(&w[1]) {
                 continue;
             }
             let kw: String = w.iter().collect();
+            // Defensive: a 2-char window can never be empty, but never emit an
+            // empty keyword even if the candidate source changes.
+            if kw.is_empty() {
+                continue;
+            }
             if THEME_STOP.contains(&kw.as_str()) {
                 continue;
             }
@@ -437,6 +461,74 @@ mod tests {
         assert!(
             t.iter().all(|s| s.keyword != "天气"),
             "one-off word must not be a theme"
+        );
+    }
+
+    /// Objective: Verify punctuation/digit fragments never become themes.
+    /// Invariants: "0.", ".9", "2.", "吧。" (from "54M 是不是有点大啊？")
+    /// and "，不" must all be rejected as topic keywords.
+    #[test]
+    fn punctuation_fragments_are_rejected() {
+        let m = msgs(&[
+            ("user", "54M 是不是有点大啊？"),
+            ("assistant", "加 -ldflags 从 54M 降到 33.5M。"),
+        ]);
+        let t = extract_repeated_themes(&m);
+        for noise in ["0.", ".9", "2.", ".2", "吧。", "，不", "级到", "是曹"] {
+            assert!(
+                t.iter().all(|s| s.keyword != noise),
+                "fragment `{noise}` must not be a theme, got {t:?}"
+            );
+        }
+        // The meaningful bigram (54) survives as a topic.
+        assert!(
+            t.iter().any(|s| s.keyword == "54"),
+            "54 must survive filtering, got {t:?}"
+        );
+    }
+
+    /// Objective: Verify bigrams straddling a single-char stop word are
+    /// rejected — the "操的/我是/他的" class of fragmented keywords.
+    /// Invariants: none of the stop-word straddlers appear; real words like
+    /// 曹操 and 欣赏 still recur.
+    #[test]
+    fn stop_word_straddlers_are_rejected() {
+        let m = msgs(&[
+            ("user", "我喜欢曹操，欣赏他的雄才大略"),
+            ("assistant", "我是曹操的推崇者，他的用人不拘一格"),
+            ("user", "曹操的知人善任，特别欣赏"),
+        ]);
+        let t = extract_repeated_themes(&m);
+        for noise in ["操的", "我是", "他的", "我特", "这样", "赏曹", "样的"] {
+            assert!(
+                t.iter().all(|s| s.keyword != noise),
+                "straddler `{noise}` must not be a theme, got {t:?}"
+            );
+        }
+        assert!(
+            t.iter().any(|s| s.keyword == "曹操"),
+            "曹操 must survive filtering, got {t:?}"
+        );
+    }
+
+    /// Objective: Verify an empty message list produces no themes (no panic).
+    /// Invariants: empty input → empty output.
+    #[test]
+    fn empty_messages_produce_no_themes() {
+        let t = extract_repeated_themes(&[]);
+        assert!(t.is_empty(), "no messages → no themes");
+    }
+
+    /// Objective: Verify a single message (one turn) never forms a theme.
+    /// Invariants: recurring requires >=2 distinct turns, even when a word
+    /// repeats inside one long message.
+    #[test]
+    fn single_turn_repeats_do_not_form_theme() {
+        let m = msgs(&[("user", "曹操曹操曹操，都是曹操")]);
+        let t = extract_repeated_themes(&m);
+        assert!(
+            t.iter().all(|s| s.keyword != "曹操"),
+            "same-turn repeats must not count as recurring, got {t:?}"
         );
     }
 
