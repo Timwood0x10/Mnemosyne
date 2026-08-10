@@ -941,7 +941,9 @@ static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
             }
         },
         Err(e) => {
-            eprintln!("warning: config/dictionary.json failed to load ({e}); using an empty registry");
+            eprintln!(
+                "warning: config/dictionary.json failed to load ({e}); using an empty registry"
+            );
             empty_registry()
         }
     };

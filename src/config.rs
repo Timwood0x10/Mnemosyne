@@ -36,7 +36,9 @@ fn resource_root() -> PathBuf {
         return cwd;
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() && looks_like_root(dir) {
+        if let Some(dir) = exe.parent()
+            && looks_like_root(dir)
+        {
             return dir.to_path_buf();
         }
     }

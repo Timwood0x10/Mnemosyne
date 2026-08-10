@@ -289,19 +289,36 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
         surface: "User".to_string(),
         canonical_name: "User".to_string(),
     };
+    // Marker → action verb. The marker set must cover the common
+    // preference/emotion/goal/plan vocabulary (ZH + EN) so ordinary
+    // conversations produce facts — previously only 12 words were matched and
+    // a message like "我很焦虑，压力很大" compiled ZERO observations, so the
+    // facts table stayed empty and persona_check had nothing to query.
     let actions = [
         ("喜欢", "喜欢"),
         ("偏好", "喜欢"),
+        ("欣赏", "喜欢"),
+        ("讨厌", "喜欢"),
         ("love", "love"),
         ("like", "like"),
         ("准备", "准备"),
         ("打算", "打算"),
         ("计划", "plan"),
+        ("希望", "plan"),
+        ("想要", "want"),
         ("want", "want"),
         ("压力", "feel"),
         ("焦虑", "feel"),
+        ("担心", "feel"),
+        ("害怕", "feel"),
+        ("开心", "feel"),
+        ("难过", "feel"),
         ("stress", "feel"),
         ("tired", "feel"),
+        ("happy", "feel"),
+        ("sad", "feel"),
+        ("worry", "feel"),
+        ("afraid", "feel"),
     ];
 
     messages
@@ -458,6 +475,36 @@ mod tests {
         ];
         let r = compiler.compile("t1", &msgs);
         assert!(r.session.open_problems.iter().any(|p| p.contains("性能")));
+    }
+
+    /// Objective: Verify ordinary emotion/preference messages now produce
+    /// observations (the expanded marker set). Previously only 12 hardcoded
+    /// words matched, so "我很焦虑，压力很大" compiled zero facts and the
+    /// facts table stayed empty.
+    /// Invariants: each emotion message yields an observation carrying the
+    /// original content as evidence.
+    #[test]
+    fn compile_user_observations_covers_emotion_and_preference() {
+        let msgs = vec![
+            Message::new("user", "我很焦虑，压力很大。"),
+            Message::new("user", "我欣赏曹操的知人善任。"),
+            Message::new("user", "我打算下周发布新版本。"),
+        ];
+        let obs = compile_user_observations(&msgs, 1);
+        assert!(
+            obs.iter()
+                .any(|o| o.action == "feel" && o.evidence.is_some()),
+            "焦虑/压力 must yield a feel observation, got {obs:?}"
+        );
+        assert!(
+            obs.iter()
+                .any(|o| o.action == "喜欢" && o.evidence.is_some()),
+            "欣赏 must yield a 喜欢 observation, got {obs:?}"
+        );
+        assert!(
+            obs.iter().any(|o| o.action == "打算"),
+            "打算 must yield an observation, got {obs:?}"
+        );
     }
 
     #[test]
