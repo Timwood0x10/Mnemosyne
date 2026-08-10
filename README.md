@@ -241,7 +241,7 @@ endpoint URL:
 {
   "mcpServers": {
     "mnemosyne": {
-      "url": "http://host:8080/sse",
+      "url": "http://host:5609/sse",
       "headers": {
         "Authorization": "Bearer <your-token>",
         "x-mcp-session-id": "<stable-id-per-client>"

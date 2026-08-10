@@ -1,9 +1,43 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+
+/// Resolve a runtime resource file (config/lexicon JSON) to a usable path.
+///
+/// Priority (first match wins):
+/// 1. `env_var` — explicit override (e.g. `DICTIONARY_PATH`).
+/// 2. relative to the **current working directory** (`config/…`).
+/// 3. relative to the **executable's directory** (installed binary layout).
+///
+/// The last fallback is the cwd-relative path, so callers that resolve a
+/// missing file still report a predictable path instead of a compile-time
+/// `env!("CARGO_MANIFEST_DIR")` baked into the binary (which made releases
+/// fail on every machine except the CI builder — the bug this replaces).
+#[must_use]
+pub fn resolve_resource_path(env_var: &str, relative: &str) -> PathBuf {
+    if let Ok(p) = std::env::var(env_var) {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    let cwd_relative = PathBuf::from(relative);
+    if cwd_relative.is_file() {
+        return cwd_relative;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let exe_relative = dir.join(relative);
+            if exe_relative.is_file() {
+                return exe_relative;
+            }
+        }
+    }
+    cwd_relative
+}
 
 /// Top-level server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,8 +442,8 @@ pub struct CliArgs {
     #[arg(long, env = "MEMORY_TRANSPORT", default_value = "stdio")]
     pub transport: String,
 
-    /// Listen address for `--transport http` (e.g. `127.0.0.1:8080`).
-    #[arg(long, env = "MEMORY_HTTP_ADDR", default_value = "127.0.0.1:8080")]
+    /// Listen address for `--transport http` (e.g. `127.0.0.1:5609`).
+    #[arg(long, env = "MEMORY_HTTP_ADDR", default_value = "127.0.0.1:5609")]
     pub http_addr: String,
 
     /// Optional bearer token required for `--transport http`. When unset the
@@ -543,7 +577,7 @@ mod tests {
             retrieval_mode: "keyword".into(),
             openai_api_key: None,
             transport: "stdio".into(),
-            http_addr: "127.0.0.1:8080".into(),
+            http_addr: "127.0.0.1:5609".into(),
             http_token: None,
         };
         let cfg = args.into_config().expect("config");

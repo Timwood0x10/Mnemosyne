@@ -219,7 +219,7 @@ HTTP 传输暴露两个端点：`GET /sse`（Server-Sent Events 流）与 `POST 
 {
   "mcpServers": {
     "mnemosyne": {
-      "url": "http://host:8080/sse",
+      "url": "http://host:5609/sse",
       "headers": {
         "Authorization": "Bearer <your-token>",
         "x-mcp-session-id": "<stable-id-per-client>"

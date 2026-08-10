@@ -912,7 +912,14 @@ fn simple_hash(lexemes: &[Lexeme]) -> String {
 // ── Global registry instance ────────────────────────────────────────────────
 
 static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
-    let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+    // Resolve the core lexicon at runtime (DICTIONARY_PATH env override, then
+    // cwd, then the executable's directory) instead of baking a compile-time
+    // `env!("CARGO_MANIFEST_DIR")` into the binary — a baked path made every
+    // release fail with FileLoad except on the CI builder.
+    let core_path = crate::config::resolve_resource_path(
+        "DICTIONARY_PATH",
+        "config/dictionary.json",
+    );
     let registry = RegistryBuilder::new()
         .load_core(&core_path)
         .expect("Failed to load core lexicon from config/dictionary.json")
@@ -933,7 +940,10 @@ pub fn global() -> std::sync::RwLockReadGuard<'static, LexiconRegistry> {
 
 /// Reload the global registry from the default core path.
 pub fn reload() -> Result<(), LexiconError> {
-    let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+    let core_path = crate::config::resolve_resource_path(
+        "DICTIONARY_PATH",
+        "config/dictionary.json",
+    );
     let registry = RegistryBuilder::new().load_core(&core_path)?.build()?;
     // The assignment below cannot panic while holding the write guard, so
     // this expect never fires.

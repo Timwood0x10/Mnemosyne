@@ -32,7 +32,7 @@ required), and ~6–8 MB after release optimization.
 ./mnemosyne serve
 
 # 2. Remote HTTP+SSE mode (token required; session isolation per client)
-./mnemosyne --transport http --http-addr 0.0.0.0:8080 --http-token <your-token> serve
+./mnemosyne --transport http --http-addr 0.0.0.0:5609 --http-token <your-token> serve
 ```
 
 ### IDE integration

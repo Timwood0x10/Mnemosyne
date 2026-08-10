@@ -394,7 +394,7 @@ pub async fn serve_http(
 /// Bind a TCP listener to `addr` and serve the MCP server over HTTP+SSE.
 ///
 /// Convenience wrapper for `serve_http` when the caller has an address rather
-/// than a pre-bound listener (e.g. a `--addr 127.0.0.1:8080` CLI flag).
+/// than a pre-bound listener (e.g. a `--addr 127.0.0.1:5609` CLI flag).
 ///
 /// # Errors
 ///
