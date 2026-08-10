@@ -19,6 +19,175 @@ use crate::types::{
 static FUNCTIONAL_MATCHER: LazyLock<crate::lexicon::LexiconMatcher> =
     LazyLock::new(crate::lexicon::LexiconMatcher::from_global_registry);
 
+/// Observation action markers: `{"feel": ["开心", "疲惫", …], "plan": […], …}`.
+///
+/// Loaded once from the two shipped files — `config/markers_zh.json`
+/// (Chinese) and `config/markers_en.json` (English) — which ship with the
+/// binary so users can customize the vocabulary without recompiling. Each
+/// file that loads successfully contributes its markers; if BOTH are missing
+/// or corrupt the loader degrades to [`DEFAULT_OBSERVATION_MARKERS`] so a
+/// config-less deployment keeps compiling facts (same fail-soft pattern as
+/// the lexicon and dictionary loaders).
+static OBSERVATION_MARKERS: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    let zh = crate::config::resolve_resource_path("config/markers_zh.json");
+    let en = crate::config::resolve_resource_path("config/markers_en.json");
+    merge_marker_files(&[zh, en])
+});
+
+/// Merge the marker files (each `{"action": ["marker", …]}`) into flat
+/// `(marker, action)` pairs. Every file that parses contributes its markers;
+/// when NONE of them yields any marker, the built-in default table is used so
+/// a config-less deployment keeps compiling facts.
+///
+/// The `_meta` documentation key (an object, not a marker list) is skipped —
+/// it exists so users can read the file's purpose in a JSON viewer.
+fn merge_marker_files(paths: &[std::path::PathBuf]) -> Vec<(String, String)> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    let mut loaded_any = false;
+    for path in paths {
+        let Some(raw) = std::fs::read_to_string(path).ok() else {
+            eprintln!("warning: {} failed to load; skipping", path.display());
+            continue;
+        };
+        // Parse as Value and walk keys manually so the `_meta` documentation
+        // object does not fail the whole file (it is not a marker list).
+        let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
+        else {
+            eprintln!("warning: {} failed to parse; skipping", path.display());
+            continue;
+        };
+        for (action, markers) in map {
+            if action == "_meta" {
+                continue;
+            }
+            let serde_json::Value::Array(items) = markers else {
+                continue;
+            };
+            for marker in items {
+                if let Some(m) = marker.as_str() {
+                    if !m.is_empty() {
+                        pairs.push((m.to_string(), action.clone()));
+                    }
+                }
+            }
+        }
+        loaded_any = true;
+    }
+    if loaded_any && !pairs.is_empty() {
+        pairs
+    } else {
+        eprintln!("warning: no observation marker config loaded; using built-in defaults");
+        default_markers_owned()
+    }
+}
+
+/// Convert the built-in fallback table into owned `(String, String)` pairs.
+fn default_markers_owned() -> Vec<(String, String)> {
+    DEFAULT_OBSERVATION_MARKERS
+        .iter()
+        .map(|(m, a)| (m.to_string(), a.to_string()))
+        .collect()
+}
+
+/// Built-in fallback markers, used when the JSON config is missing/corrupt.
+/// Mirrors the shipped `config/markers_zh.json` + `config/markers_en.json`.
+const DEFAULT_OBSERVATION_MARKERS: &[(&str, &str)] = &[
+    // 偏好正向
+    ("喜欢", "喜欢"),
+    ("偏好", "喜欢"),
+    ("欣赏", "喜欢"),
+    ("羡慕", "喜欢"),
+    ("热爱", "喜欢"),
+    ("满意", "喜欢"),
+    ("认可", "喜欢"),
+    ("佩服", "喜欢"),
+    ("崇拜", "喜欢"),
+    ("感恩", "喜欢"),
+    ("讨厌", "喜欢"),
+    ("love", "love"),
+    ("like", "like"),
+    // 目标 / 计划
+    ("准备", "准备"),
+    ("打算", "plan"),
+    ("计划", "plan"),
+    ("希望", "plan"),
+    ("目标", "plan"),
+    ("梦想", "plan"),
+    ("志向", "plan"),
+    ("决心", "plan"),
+    // 意愿（防单字"想"误匹配）
+    ("想要", "want"),
+    ("想学", "want"),
+    ("想买", "want"),
+    ("想换", "want"),
+    ("想找", "want"),
+    ("想去", "want"),
+    ("想见", "want"),
+    ("want", "want"),
+    // 情绪正向
+    ("开心", "feel"),
+    ("高兴", "feel"),
+    ("快乐", "feel"),
+    ("幸福", "feel"),
+    ("欣慰", "feel"),
+    ("安心", "feel"),
+    ("满足", "feel"),
+    ("轻松", "feel"),
+    ("愉快", "feel"),
+    ("兴奋", "feel"),
+    ("舒服", "feel"),
+    ("自在", "feel"),
+    ("喜悦", "feel"),
+    // 情绪负向
+    ("难过", "feel"),
+    ("伤心", "feel"),
+    ("失落", "feel"),
+    ("沮丧", "feel"),
+    ("崩溃", "feel"),
+    ("紧张", "feel"),
+    ("压抑", "feel"),
+    ("无奈", "feel"),
+    ("迷茫", "feel"),
+    ("无助", "feel"),
+    ("绝望", "feel"),
+    ("心累", "feel"),
+    ("孤单", "feel"),
+    ("孤独", "feel"),
+    ("愤怒", "feel"),
+    ("失望", "feel"),
+    ("痛苦", "feel"),
+    ("烦恼", "feel"),
+    ("委屈", "feel"),
+    ("烦躁", "feel"),
+    ("郁闷", "feel"),
+    ("生气", "feel"),
+    ("心疼", "feel"),
+    // 状态 / 身体感受
+    ("疲惫", "feel"),
+    ("好累", "feel"),
+    ("太累", "feel"),
+    ("困倦", "feel"),
+    ("生病", "feel"),
+    ("感冒", "feel"),
+    ("发烧", "feel"),
+    ("头疼", "feel"),
+    ("头晕", "feel"),
+    ("失眠", "feel"),
+    ("熬夜", "feel"),
+    ("加班", "feel"),
+    ("应酬", "feel"),
+    ("压力", "feel"),
+    ("焦虑", "feel"),
+    ("担心", "feel"),
+    ("害怕", "feel"),
+    ("stress", "feel"),
+    ("tired", "feel"),
+    ("happy", "feel"),
+    ("sad", "feel"),
+    ("worry", "feel"),
+    ("afraid", "feel"),
+];
+
 static MODULE_NAMES: &[&str] = &[
     "compiler",
     "distiller",
@@ -294,32 +463,18 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
     // conversations produce facts — previously only 12 words were matched and
     // a message like "我很焦虑，压力很大" compiled ZERO observations, so the
     // facts table stayed empty and persona_check had nothing to query.
-    let actions = [
-        ("喜欢", "喜欢"),
-        ("偏好", "喜欢"),
-        ("欣赏", "喜欢"),
-        ("讨厌", "喜欢"),
-        ("love", "love"),
-        ("like", "like"),
-        ("准备", "准备"),
-        ("打算", "打算"),
-        ("计划", "plan"),
-        ("希望", "plan"),
-        ("想要", "want"),
-        ("want", "want"),
-        ("压力", "feel"),
-        ("焦虑", "feel"),
-        ("担心", "feel"),
-        ("害怕", "feel"),
-        ("开心", "feel"),
-        ("难过", "feel"),
-        ("stress", "feel"),
-        ("tired", "feel"),
-        ("happy", "feel"),
-        ("sad", "feel"),
-        ("worry", "feel"),
-        ("afraid", "feel"),
-    ];
+    //
+    // Entries are deliberately multi-character where a single character would
+    // false-positive inside unrelated words: "累" matches 积累/劳累, "困"
+    // matches 困难, "想" matches 想象/想法 — so we use 好累/困倦/想念/想学
+    // etc. instead. Each marker is matched with `find`, so a longer marker is
+    // always safe.
+    // Marker → action verb pairs come from `config/markers_zh.json` +
+    // `config/markers_en.json` (loaded once via OBSERVATION_MARKERS, editable
+    // without recompiling), falling back to the built-in default table when
+    // the config is missing. See OBSERVATION_MARKERS for the multi-character
+    // false-positive notes.
+    let actions = OBSERVATION_MARKERS.as_slice();
 
     messages
         .iter()
@@ -434,6 +589,87 @@ pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i32) 
 mod tests {
     use super::*;
 
+    /// Objective: Verify the two shipped marker files merge — Chinese words
+    /// (幸福 → feel) and English words (excited → feel, adore → love) both
+    /// contribute; users can customize each language's file independently.
+    /// Invariants: merged pairs contain zh and en markers with their actions.
+    #[test]
+    fn marker_files_merge_zh_and_en() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zh = dir.path().join("markers_zh.json");
+        let en = dir.path().join("markers_en.json");
+        std::fs::write(&zh, r#"{"feel": ["幸福", "失眠"], "plan": ["目标"]}"#).expect("write zh");
+        std::fs::write(
+            &en,
+            r#"{"feel": ["excited", "burned out"], "love": ["adore"]}"#,
+        )
+        .expect("write en");
+
+        let pairs = merge_marker_files(&[zh, en]);
+        assert!(
+            pairs.contains(&("幸福".to_string(), "feel".to_string())),
+            "zh feel marker merged, got {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("目标".to_string(), "plan".to_string())),
+            "zh plan marker merged, got {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("excited".to_string(), "feel".to_string())),
+            "en feel marker merged, got {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("adore".to_string(), "love".to_string())),
+            "en love marker merged, got {pairs:?}"
+        );
+    }
+
+    /// Objective: Verify the fail-soft fallback — when BOTH marker files are
+    /// missing/corrupt, the built-in default table is used so a config-less
+    /// deployment keeps compiling facts.
+    /// Invariants: merge of two nonexistent paths yields the default table
+    /// (non-empty, includes the core 喜欢 and feel markers).
+    #[test]
+    fn marker_files_fallback_to_defaults_when_missing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist.json");
+        let pairs = merge_marker_files(&[missing.clone(), missing]);
+        assert!(
+            !pairs.is_empty(),
+            "fallback must be non-empty, got {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("喜欢".to_string(), "喜欢".to_string())),
+            "default 喜欢 marker present, got {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("疲惫".to_string(), "feel".to_string())),
+            "default feel marker present, got {pairs:?}"
+        );
+        assert!(
+            pairs.contains(&("love".to_string(), "love".to_string())),
+            "default English marker present, got {pairs:?}"
+        );
+    }
+
+    /// Objective: Verify one valid + one missing file still yields the valid
+    /// file's markers (partial load is not an all-or-nothing failure).
+    /// Invariants: only the valid zh file's markers appear.
+    #[test]
+    fn marker_files_partial_load_keeps_valid_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let zh = dir.path().join("markers_zh.json");
+        std::fs::write(&zh, r#"{"want": ["想学"]}"#).expect("write zh");
+        let missing = dir.path().join("markers_en.json");
+
+        let pairs = merge_marker_files(&[zh, missing]);
+        assert!(
+            pairs.contains(&("想学".to_string(), "want".to_string())),
+            "valid file markers kept, got {pairs:?}"
+        );
+        assert_eq!(pairs.len(), 1, "no extra markers from the missing file");
+    }
+
     #[test]
     fn compile_extracts_knowledge() {
         let compiler = ConversationCompiler::new();
@@ -502,8 +738,85 @@ mod tests {
             "欣赏 must yield a 喜欢 observation, got {obs:?}"
         );
         assert!(
-            obs.iter().any(|o| o.action == "打算"),
-            "打算 must yield an observation, got {obs:?}"
+            obs.iter().any(|o| o.action == "plan"),
+            "打算 must yield a plan observation, got {obs:?}"
+        );
+    }
+
+    /// Objective: Verify MODERN vernacular speech — words the classic novel
+    /// lexicon does not carry (加班/应酬/失眠/疲惫/孤独) — now yields feel
+    /// observations. Daily-life conversations previously compiled zero facts.
+    /// Invariants: a message about overwork/insomnia produces a feel
+    /// observation; a loneliness message produces one too.
+    #[test]
+    fn modern_vernacular_speech_produces_observations() {
+        let msgs = vec![
+            Message::new("user", "最近天天加班，应酬也多，晚上还失眠。"),
+            Message::new("user", "一个人在外地，有时候挺孤独的。"),
+        ];
+        let obs = compile_user_observations(&msgs, 1);
+        assert!(
+            obs.iter()
+                .any(|o| o.action == "feel" && o.evidence.is_some()),
+            "加班/应酬/失眠 must yield a feel observation, got {obs:?}"
+        );
+        let evidence_texts: Vec<&str> = obs
+            .iter()
+            .filter_map(|o| o.evidence.as_ref().map(|e| e.text.as_str()))
+            .collect();
+        assert!(
+            evidence_texts.iter().any(|t| t.contains("加班")),
+            "evidence must reference the 加班 message, got {evidence_texts:?}"
+        );
+        assert!(
+            evidence_texts.iter().any(|t| t.contains("孤独")),
+            "孤独 message must also produce evidence, got {evidence_texts:?}"
+        );
+    }
+
+    /// Objective: Verify the broadened high-frequency Chinese vocabulary —
+    /// positive emotions (幸福/高兴/满足), negative emotions (烦恼/绝望/
+    /// 崩溃), plans (目标/梦想), and wants (想学/想去) — all produce
+    /// observations with evidence, and that multi-char markers prevent
+    /// single-char false positives ("想" alone would match 想象/想法).
+    /// Invariants: each category message yields its mapped action.
+    #[test]
+    fn high_frequency_chinese_vocabulary_produces_observations() {
+        let msgs = vec![
+            Message::new("user", "今天很幸福，也很高兴能和你聊天。"),
+            Message::new("user", "最近特别烦恼，感觉快崩溃了。"),
+            Message::new("user", "我的目标是明年发布自己的产品，这是我的梦想。"),
+            Message::new("user", "我想学钢琴，想去欧洲旅行。"),
+        ];
+        let obs = compile_user_observations(&msgs, 1);
+        let evidence_texts: Vec<&str> = obs
+            .iter()
+            .filter_map(|o| o.evidence.as_ref().map(|e| e.text.as_str()))
+            .collect();
+        assert!(
+            evidence_texts.iter().any(|t| t.contains("幸福")),
+            "幸福 must yield evidence, got {evidence_texts:?}"
+        );
+        assert!(
+            evidence_texts.iter().any(|t| t.contains("崩溃")),
+            "崩溃 must yield evidence, got {evidence_texts:?}"
+        );
+        assert!(
+            obs.iter()
+                .any(|o| o.action == "plan" && o.evidence.is_some()),
+            "目标/梦想 must yield a plan observation, got {obs:?}"
+        );
+        assert!(
+            obs.iter()
+                .any(|o| o.action == "want" && o.evidence.is_some()),
+            "想学/想去 must yield a want observation, got {obs:?}"
+        );
+        // Single-char 想 must not fire on 想象: "想" alone is not a marker.
+        let imagination = Message::new("user", "我的想象里有一片海。");
+        let obs2 = compile_user_observations(std::slice::from_ref(&imagination), 1);
+        assert!(
+            obs2.is_empty(),
+            "想象 must NOT match a bare 想 marker, got {obs2:?}"
         );
     }
 
