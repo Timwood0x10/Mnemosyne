@@ -53,19 +53,32 @@ impl ResolverPipeline {
     ///
     /// Returns the first `Matched` result, or `Unknown` if no stage matched.
     pub fn resolve(&self, mention: &str) -> ResolveResult {
+        self.resolve_with_stage(mention).0
+    }
+
+    /// Resolve `mention`, reporting which stage produced the result.
+    ///
+    /// Returns `(result, Some(stage_index))` when a stage returned a result
+    /// (the index identifies the winning stage, letting callers distinguish
+    /// an alias hit from an embedding hit), or `(Unknown, None)` when no
+    /// stage matched.
+    pub fn resolve_with_stage(&self, mention: &str) -> (ResolveResult, Option<usize>) {
         let ctx = ResolveContext {
             surface: mention.to_string(),
         };
 
-        for stage in &self.stages {
+        for (idx, stage) in self.stages.iter().enumerate() {
             if let Some(result) = stage.resolve(mention, &ctx) {
-                return result;
+                return (result, Some(idx));
             }
         }
 
-        ResolveResult::Unknown {
-            surface: mention.to_string(),
-        }
+        (
+            ResolveResult::Unknown {
+                surface: mention.to_string(),
+            },
+            None,
+        )
     }
 
     /// Number of stages in the pipeline.

@@ -17,3 +17,7 @@ plan/
 corpus/*.pdf
 corpus/*.txt
 corpus/*.json
+
+# memory_export/import 的导出目录：导出的记忆快照可能含用户数据，
+# 禁止提交进仓库。
+exports/

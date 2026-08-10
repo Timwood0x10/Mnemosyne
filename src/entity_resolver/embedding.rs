@@ -103,7 +103,40 @@ impl ResolverStage for EmbeddingStage {
     fn resolve(&self, mention: &str, _ctx: &ResolveContext) -> Option<ResolveResult> {
         // 1. Cache check (read-only, no lock needed — just use get)
         if let Some(vec) = self.cache.lock().ok().and_then(|c| c.get(mention)) {
-            let results = self.index.search(&vec, 1).ok()?;
+            // A failed search on a cached vector must NOT abort resolution:
+            // fall through to the re-embed branch instead of returning None
+            // early (the bug was that `.ok()?` skipped the fallback and a
+            // transient index error silently dropped the mention).
+            if let Ok(results) = self.index.search(&vec, 1) {
+                if let Some((id, score)) = results.into_iter().next() {
+                    if score >= RESOLVE_THRESHOLD {
+                        return Some(ResolveResult::Matched {
+                            entity_id: id,
+                            score,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Embed + search
+        let vec = match self.embedder.embed(mention) {
+            Ok(v) => v,
+            Err(e) => {
+                // A genuine embedding failure is not a "no match": log it so
+                // the error is observable, then defer to the next stage. The
+                // stage API cannot return the error, but a silent `.ok()?`
+                // made failures indistinguishable from a clean miss.
+                eprintln!("entity resolver: embed failed for `{mention}`: {e}");
+                return None;
+            }
+        };
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.put(mention, vec.clone());
+        }
+        // A failed search after a fresh embed has no fallback left: report a
+        // clean miss rather than crashing the pipeline.
+        if let Ok(results) = self.index.search(&vec, 1) {
             if let Some((id, score)) = results.into_iter().next() {
                 if score >= RESOLVE_THRESHOLD {
                     return Some(ResolveResult::Matched {
@@ -111,21 +144,6 @@ impl ResolverStage for EmbeddingStage {
                         score,
                     });
                 }
-            }
-        }
-
-        // 2. Embed + search
-        let vec = self.embedder.embed(mention).ok()?;
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.put(mention, vec.clone());
-        }
-        let results = self.index.search(&vec, 1).ok()?;
-        if let Some((id, score)) = results.into_iter().next() {
-            if score >= RESOLVE_THRESHOLD {
-                return Some(ResolveResult::Matched {
-                    entity_id: id,
-                    score,
-                });
             }
         }
 
@@ -149,5 +167,113 @@ mod tests {
             Err(other) => panic!("expected Config error, got: {other:?}"),
             Ok(_) => {} // If model IS cached locally, that's OK too.
         }
+    }
+}
+
+#[cfg(test)]
+mod fallback_tests {
+    use super::*;
+    use crate::entity_resolver::cache::MemoryEmbeddingCache;
+    use crate::entity_resolver::pipeline::{ResolveContext, ResolverStage};
+    use std::sync::{Arc, Mutex};
+
+    /// Mock embedder: always returns a fixed vector.
+    struct MockEmbedder;
+    impl Embedder for MockEmbedder {
+        fn embed(&self, _text: &str) -> Result<Vec<f32>, Error> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    /// Mock embedder that always fails.
+    struct FailingEmbedder;
+    impl Embedder for FailingEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>, Error> {
+            Err(Error::Embedding(crate::error::EmbeddingError::Transport(
+                format!("mock failure for {text}"),
+            )))
+        }
+    }
+
+    /// Mock index: the first search fails (simulating a transient index
+    /// error on the cached-vector path), the second succeeds.
+    struct FlakyIndex {
+        searches: std::sync::atomic::AtomicUsize,
+    }
+    impl VectorIndex for FlakyIndex {
+        fn build(&mut self, _items: &[(i64, Vec<f32>)]) -> Result<(), Error> {
+            Ok(())
+        }
+        fn search(&self, _query: &[f32], _top_k: usize) -> Result<Vec<(i64, f32)>, Error> {
+            let n = self
+                .searches
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n == 0 {
+                Err(Error::Internal("transient index failure".into()))
+            } else {
+                Ok(vec![(42, 0.95)])
+            }
+        }
+        fn name(&self) -> &str {
+            "flaky"
+        }
+    }
+
+    /// Objective: Verify a failed search on the cached-vector path falls
+    /// through to the re-embed branch instead of silently dropping the
+    /// mention (the fixed bug: `.ok()?` aborted resolution on index error).
+    /// Invariants: with a warm cache and a first-search failure, the stage
+    /// still resolves via the fallback and returns Matched(42, 0.95).
+    #[test]
+    fn cached_vector_search_failure_falls_back_to_embed() {
+        let cache = Arc::new(Mutex::new(MemoryEmbeddingCache::new()));
+        // Warm the cache so the cached-vector path is taken first.
+        cache
+            .lock()
+            .expect("cache lock")
+            .put("玄德", vec![1.0, 0.0]);
+        let stage = EmbeddingStage::new(
+            Arc::new(MockEmbedder),
+            Arc::new(FlakyIndex {
+                searches: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            cache,
+        );
+        let result = stage.resolve(
+            "玄德",
+            &ResolveContext {
+                surface: "玄德".into(),
+            },
+        );
+        let matched = result.expect("fallback must resolve the mention");
+        assert_eq!(
+            matched.entity_id(),
+            Some(42),
+            "flaky first search must not abort resolution"
+        );
+    }
+
+    /// Objective: Verify an embedder failure is logged and reported as a
+    /// clean miss (None), not a panic or a fabricated match.
+    /// Invariants: FailingEmbedder → stage returns None.
+    #[test]
+    fn embedder_failure_returns_clean_miss() {
+        let stage = EmbeddingStage::new(
+            Arc::new(FailingEmbedder),
+            Arc::new(FlakyIndex {
+                searches: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Arc::new(Mutex::new(MemoryEmbeddingCache::new())),
+        );
+        let result = stage.resolve(
+            "玄德",
+            &ResolveContext {
+                surface: "玄德".into(),
+            },
+        );
+        assert!(
+            result.is_none(),
+            "embedder failure must pass through as a miss, got {result:?}"
+        );
     }
 }

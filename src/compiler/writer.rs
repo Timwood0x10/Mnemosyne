@@ -23,6 +23,8 @@
 
 use rusqlite::Connection;
 
+use crate::error::{Error, Result, StorageError};
+
 /// A single evidence record (to be inserted in batch).
 #[derive(Debug, Clone)]
 pub struct EvidenceBatch {
@@ -49,8 +51,12 @@ impl EvidenceWriter {
     ///
     /// `batch_size` controls how many rows are grouped into each SQL
     /// INSERT statement. 100–500 is reasonable for most SQLite configs.
+    /// A `batch_size` of 0 is clamped to 1 — `records.chunks(0)` would panic,
+    /// and an empty batch is a degenerate caller mistake, not a crash.
     pub fn new(batch_size: usize) -> Self {
-        EvidenceWriter { batch_size }
+        EvidenceWriter {
+            batch_size: batch_size.max(1),
+        }
     }
 
     /// Write all evidence records in a single transaction.
@@ -62,16 +68,47 @@ impl EvidenceWriter {
     ///
     /// # Returns
     ///
-    /// Number of rows successfully inserted.
-    pub fn write(&self, conn: &Connection, records: &[EvidenceBatch]) -> usize {
+    /// Number of rows successfully inserted, or a storage error.
+    ///
+    /// # Errors
+    ///
+    /// Any INSERT failure aborts the whole batch: the transaction is rolled
+    /// back (no partial data) and the error propagates to the caller. This is
+    /// deliberately strict — a silent `.ok()` skip previously left the table
+    /// partially written while still reporting success.
+    pub fn write(&self, conn: &Connection, records: &[EvidenceBatch]) -> Result<usize> {
         if records.is_empty() {
-            return 0;
+            return Ok(0);
         }
 
         // Use a transaction so the cost of the BEGIN / COMMIT is amortised
         // over all rows instead of being paid once per row.
-        conn.execute_batch("BEGIN TRANSACTION;").ok();
+        conn.execute_batch("BEGIN TRANSACTION;").map_err(|e| {
+            Error::Storage(StorageError::Sqlite(format!(
+                "begin evidence transaction: {e}"
+            )))
+        })?;
 
+        let written = self.write_inner(conn, records);
+        match written {
+            Ok(n) => {
+                conn.execute_batch("COMMIT;").map_err(|e| {
+                    Error::Storage(StorageError::Sqlite(format!(
+                        "commit evidence transaction: {e}"
+                    )))
+                })?;
+                Ok(n)
+            }
+            Err(e) => {
+                // Roll back so a mid-batch failure never leaves partial rows.
+                let _ = conn.execute_batch("ROLLBACK;");
+                Err(e)
+            }
+        }
+    }
+
+    /// The batched INSERT core, run between BEGIN and COMMIT.
+    fn write_inner(&self, conn: &Connection, records: &[EvidenceBatch]) -> Result<usize> {
         // Build batched INSERT statements. Each batch inserts `batch_size`
         // rows in a single SQL statement. This is ~100× faster than one
         // INSERT per row because:
@@ -92,13 +129,12 @@ impl EvidenceWriter {
                 "INSERT INTO evidence (doc_id, chapter_id, content, created_at) VALUES {}",
                 values.join(",")
             );
-            if conn.execute(&sql, []).is_ok() {
-                written += chunk.len();
-            }
+            conn.execute(&sql, []).map_err(|e| {
+                Error::Storage(StorageError::Sqlite(format!("insert evidence batch: {e}")))
+            })?;
+            written += chunk.len();
         }
-
-        conn.execute_batch("COMMIT;").ok();
-        written
+        Ok(written)
     }
 }
 
@@ -133,7 +169,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         create_evidence_table(&conn);
         let writer = EvidenceWriter::new(10);
-        let n = writer.write(&conn, &[]);
+        let n = writer.write(&conn, &[]).expect("empty write succeeds");
         assert_eq!(n, 0, "empty records should insert 0 rows");
     }
 
@@ -162,7 +198,7 @@ mod tests {
             },
         ];
         let writer = EvidenceWriter::new(10);
-        let n = writer.write(&conn, &records);
+        let n = writer.write(&conn, &records).expect("write succeeds");
         assert_eq!(n, 3, "should insert exactly 3 rows");
 
         let count: i64 = conn
@@ -185,7 +221,9 @@ mod tests {
             content: "Prince O'Brien's regiment".into(),
         }];
         let writer = EvidenceWriter::new(10);
-        writer.write(&conn, &records);
+        writer
+            .write(&conn, &records)
+            .expect("single-quote write succeeds");
 
         let content: String = conn
             .query_row("SELECT content FROM evidence WHERE id = 1", [], |row| {
@@ -193,5 +231,85 @@ mod tests {
             })
             .unwrap();
         assert_eq!(content, "Prince O'Brien's regiment");
+    }
+
+    /// Objective: Verify a mid-batch INSERT failure propagates and rolls back
+    /// the whole transaction (no partial rows survive).
+    /// Invariants: with batch_size=1 the first chunk inserts a row, then the
+    /// second chunk violates UNIQUE(content) → write returns Err and the
+    /// previously inserted row is rolled back (table ends empty).
+    #[test]
+    fn failing_batch_rolls_back_whole_transaction() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE evidence (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                doc_id      INTEGER NOT NULL,
+                chapter_id  INTEGER NOT NULL,
+                content     TEXT NOT NULL,
+                created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                UNIQUE(doc_id, chapter_id, content)
+            );",
+        )
+        .unwrap();
+
+        // Identical content → the second chunk violates the UNIQUE constraint.
+        let records = vec![
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 1,
+                content: "duplicate".into(),
+            },
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 1,
+                content: "duplicate".into(),
+            },
+        ];
+        // batch_size=1 forces the first row to commit to the transaction
+        // before the second chunk fails — proving rollback, not just a
+        // failed insert on an empty table.
+        let writer = EvidenceWriter::new(1);
+        let err = writer
+            .write(&conn, &records)
+            .expect_err("a failing batch must return Err instead of silently skipping");
+        assert!(
+            err.to_string().contains("insert evidence batch"),
+            "error names the failing insert, got: {err}"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "failed batch must roll back all rows");
+    }
+
+    /// Objective: Verify `batch_size = 0` does not panic (`chunks(0)` would)
+    /// and still writes every record.
+    /// Invariants: writing 3 records with batch_size 0 succeeds with count 3.
+    #[test]
+    fn zero_batch_size_does_not_panic() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_evidence_table(&conn);
+
+        let records = vec![
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 1,
+                content: "a".into(),
+            },
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 2,
+                content: "b".into(),
+            },
+            EvidenceBatch {
+                doc_id: 1,
+                chapter_id: 3,
+                content: "c".into(),
+            },
+        ];
+        let writer = EvidenceWriter::new(0);
+        let n = writer.write(&conn, &records).expect("write succeeds");
+        assert_eq!(n, 3, "batch_size 0 must be clamped, all rows written");
     }
 }
