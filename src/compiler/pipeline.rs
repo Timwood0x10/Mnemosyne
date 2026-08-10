@@ -109,6 +109,16 @@ pub async fn compile_source(
 
         // ③ Extract + persist one entity per document (title = entity name),
         //    with profile attributes collected from hint keywords.
+        //
+        //    Dialog/conversation documents are the deliberate exception: their
+        //    title is a session/conversation id, NOT a person, so materializing
+        //    a `person` object named after the title pollutes the graph with a
+        //    fake entity (observed: three empty `person` nodes whose names are
+        //    dialog titles). Dialog speakers are already captured by the
+        //    cognition layer (`agent_personality` / `companion_extract`) as
+        //    typed facts, so the general pipeline skips the title entity for
+        //    dialogs while still persisting evidence rows (they carry doc_id).
+        let is_dialog = doc.doc_type.contains("dialog") || doc.doc_type.contains("conversation");
         let mut attributes: Vec<(String, String)> = Vec::new();
         let mut relation_targets: Vec<String> = Vec::new();
         let mut evidence_texts: Vec<String> = Vec::new();
@@ -179,44 +189,51 @@ pub async fn compile_source(
             "doc_type": doc.doc_type,
         });
 
-        // ③b Entity upsert: reuse an existing object with the same title in
-        //     this document instead of creating a duplicate on every compile.
-        //     New attributes are merged in, so re-compiling the same source
-        //     enriches rather than duplicates the entity.
-        let entity_id = match store.find_object_by_name(&doc.title, Some(doc_id)).await? {
-            Some(existing) => {
-                store
-                    .update_object_properties(existing.id, &properties, Some(0.9))
-                    .await?;
-                existing.id
-            }
-            None => {
-                let obj = KnowledgeObject {
-                    id: 0,
-                    doc_id,
-                    object_type: ObjectType::Person,
-                    name: doc.title.clone(),
-                    properties,
-                    confidence: 0.8,
-                    created_at: now_ts(),
-                };
-                let id = store.create_object(&obj).await?;
-                stats.objects += 1;
-                id
-            }
-        };
+        // ③b+③c only apply to non-dialog documents; for dialogs `entity_id`
+        // stays `None` and evidence rows are persisted without an entity link.
+        let entity_id: Option<i64> = if is_dialog {
+            None
+        } else {
+            // ③b Entity upsert: reuse an existing object with the same title in
+            //     this document instead of creating a duplicate on every compile.
+            //     New attributes are merged in, so re-compiling the same source
+            //     enriches rather than duplicates the entity.
+            let entity_id = match store.find_object_by_name(&doc.title, Some(doc_id)).await? {
+                Some(existing) => {
+                    store
+                        .update_object_properties(existing.id, &properties, Some(0.9))
+                        .await?;
+                    existing.id
+                }
+                None => {
+                    let obj = KnowledgeObject {
+                        id: 0,
+                        doc_id,
+                        object_type: ObjectType::Person,
+                        name: doc.title.clone(),
+                        properties,
+                        confidence: 0.8,
+                        created_at: now_ts(),
+                    };
+                    let id = store.create_object(&obj).await?;
+                    stats.objects += 1;
+                    id
+                }
+            };
 
-        // ③c Sync the entity into the V7 world model (`world_entities` +
-        //     `world_entity_profiles`), so the general pipeline also lands in
-        //     the entity-centric tables that were previously left empty
-        //     ("V7 integration"). Attributes become key/value profiles;
-        //     upsert is idempotent by entity name and by (entity_id, key).
-        let world_entity_id = store.upsert_world_entity(&doc.title, "person", 0.5).await?;
-        for (key, value) in &attributes {
-            store
-                .upsert_world_profile(world_entity_id, key, value, 0.8)
-                .await?;
-        }
+            // ③c Sync the entity into the V7 world model (`world_entities` +
+            //     `world_entity_profiles`), so the general pipeline also lands in
+            //     the entity-centric tables that were previously left empty
+            //     ("V7 integration"). Attributes become key/value profiles;
+            //     upsert is idempotent by entity name and by (entity_id, key).
+            let world_entity_id = store.upsert_world_entity(&doc.title, "person", 0.5).await?;
+            for (key, value) in &attributes {
+                store
+                    .upsert_world_profile(world_entity_id, key, value, 0.8)
+                    .await?;
+            }
+            Some(entity_id)
+        };
 
         // ③d Corpus entity discovery — for non-dialog prose, detect the cast
         //     from the actual text (speakers before dialogue verbs) instead of
@@ -226,7 +243,11 @@ pub async fn compile_source(
         //     title. Entities already present or equal to the doc title are
         //     skipped (no duplication).
         if !(doc.doc_type.contains("dialog") || doc.doc_type.contains("conversation")) {
-            let corpus = CorpusEntityProvider::from_text(&doc.title, &doc.text, 1);
+            // ③d Corpus entity discovery. `min_frequency = 2` gates out
+            // one-off speaker fragments ("一壶", "何故" — a phrase or a
+            // narration word captured before a dialogue verb): a real cast
+            // member recurs across the text, a fragment usually does not.
+            let corpus = CorpusEntityProvider::from_text(&doc.title, &doc.text, 2);
             let mut cast: Vec<String> = vec![doc.title.clone()];
             for entry in corpus.entries() {
                 if entry.canonical_name == doc.title {
@@ -335,9 +356,14 @@ pub async fn compile_source(
                 created_at: now_ts(),
             };
             let ev_id = store.create_evidence(&ev).await?;
-            store
-                .link_evidence(EvidenceSourceType::Object, entity_id, ev_id)
-                .await?;
+            // Dialog documents have no title entity (their title is a session
+            // id, not a person), so the evidence row still exists — linked to
+            // the document via `doc_id` — but has no object link.
+            if let Some(entity_id) = entity_id {
+                store
+                    .link_evidence(EvidenceSourceType::Object, entity_id, ev_id)
+                    .await?;
+            }
             stats.evidence += 1;
         }
     }
@@ -356,10 +382,11 @@ mod tests {
         DomainProfile::load("conversation_cognition").expect("pack")
     }
 
-    /// Objective: Verify a dialog source compiles end-to-end into the general
-    /// model: document + entity + attributes + evidence rows.
-    /// Invariants: stats.documents == 1; stats.objects >= 1; evidence >= 1;
-    /// the entity carries the extracted preference attribute.
+    /// Objective: Verify a dialog source compiles into the general model
+    /// WITHOUT materializing a `person` object named after the session title
+    /// (a dialog title is a session id, not a person — the fixed modeling).
+    /// Invariants: stats.documents == 1; stats.objects == 0; evidence >= 1;
+    /// no object named after the session title exists.
     #[tokio::test]
     async fn dialog_compiles_into_general_model() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
@@ -375,28 +402,20 @@ mod tests {
             .await
             .expect("compile");
         assert_eq!(stats.documents, 1, "one dialog → one document");
-        assert!(
-            stats.objects >= 1,
-            "at least the main entity, got {stats:?}"
+        assert_eq!(
+            stats.objects, 0,
+            "dialog title must NOT become a person entity, got {stats:?}"
         );
         assert!(stats.evidence >= 1, "hint sentences become evidence");
 
-        // The entity must exist and carry the preference attribute.
-        let obj = store
-            .find_object_by_name("session-1", None)
-            .await
-            .expect("query")
-            .expect("entity");
-        let attrs = obj
-            .properties
-            .get("attributes")
-            .and_then(|a| a.as_array())
-            .expect("attributes array");
+        // The session title must not exist as a knowledge object.
         assert!(
-            attrs
-                .iter()
-                .any(|a| a[0].as_str() == Some("preference_keywords")),
-            "preference hint must be captured, got {attrs:?}"
+            store
+                .find_object_by_name("session-1", None)
+                .await
+                .expect("query")
+                .is_none(),
+            "dialog title must not be materialized as an object"
         );
     }
 
@@ -478,17 +497,18 @@ mod tests {
         assert_eq!(stats.evidence, 0);
     }
 
-    /// Objective: Verify entity upsert — compiling the same document title
-    /// twice reuses the existing entity instead of creating a duplicate.
+    /// Objective: Verify entity upsert — compiling the same non-dialog text
+    /// title twice reuses the existing entity instead of creating a duplicate.
     /// Invariants: first run objects == 1; second run objects == 0; exactly
     /// one persisted object named after the title.
     #[tokio::test]
     async fn recompile_same_title_reuses_entity() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let source = DialogSource::new(
+        let source = crate::knowledge::document_source::RawTextSource::new(
             "session-reuse",
             "export.json",
-            vec![Message::new("user", "我喜欢 Rust，目标是稳定可靠。")],
+            "我喜欢 Rust，目标是稳定可靠。",
+            "text",
         );
 
         let first = compile_source(&source, &profile(), &store, "t1")
@@ -517,16 +537,17 @@ mod tests {
     #[tokio::test]
     async fn relation_sentences_do_not_spawn_concepts() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let source = DialogSource::new(
+        let source = crate::knowledge::document_source::RawTextSource::new(
             "session-rels",
             "export.json",
-            vec![Message::new("user", "我喜欢简洁架构，目标是长期稳定。")],
+            "我喜欢简洁架构，目标是长期稳定。",
+            "text",
         );
 
         let stats = compile_source(&source, &profile(), &store, "t1")
             .await
             .expect("compile");
-        assert_eq!(stats.documents, 1, "one dialog → one document");
+        assert_eq!(stats.documents, 1, "one document → one document");
         assert_eq!(
             stats.objects, 1,
             "no phantom concept entities, got {stats:?}"
@@ -549,15 +570,18 @@ mod tests {
     /// Objective: Verify the general pipeline also lands in the V7 world model
     /// (`world_entities` + `world_entity_profiles`), which were previously
     /// left empty ("V7 integration").
-    /// Invariants: after compile, a `world_entities` row exists named after
-    /// the document, with at least one profile when hints were extracted.
+    /// Invariants: after compiling a text document, a `world_entities` row
+    /// exists named after the document, with at least one profile when hints
+    /// were extracted. Dialog titles are excluded by design (a session id is
+    /// not a person), so the V7 sync only covers non-dialog documents.
     #[tokio::test]
     async fn compile_writes_v7_world_entities() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let source = DialogSource::new(
+        let source = crate::knowledge::document_source::RawTextSource::new(
             "session-v7",
             "export.json",
-            vec![Message::new("user", "我喜欢简洁架构，目标是长期稳定。")],
+            "我喜欢简洁架构，目标是长期稳定。",
+            "text",
         );
 
         let stats = compile_source(&source, &profile(), &store, "t1")
@@ -574,6 +598,35 @@ mod tests {
         assert_eq!(world.name, "session-v7", "entity name matches document");
     }
 
+    /// Objective: Verify dialog titles do NOT leak into the V7 world model —
+    /// a session id must not become a world entity (same modeling fix as the
+    /// object graph).
+    /// Invariants: compiling a dialog yields no `world_entities` row named
+    /// after the session title.
+    #[tokio::test]
+    async fn dialog_title_not_in_v7_world_entities() {
+        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
+        let source = DialogSource::new(
+            "session-no-v7",
+            "export.json",
+            vec![Message::new("user", "我喜欢 Rust，目标是稳定可靠。")],
+        );
+
+        let stats = compile_source(&source, &profile(), &store, "t1")
+            .await
+            .expect("compile");
+        assert_eq!(stats.objects, 0, "dialog → no objects");
+
+        let world = store
+            .find_world_entity("session-no-v7")
+            .await
+            .expect("query");
+        assert!(
+            world.is_none(),
+            "dialog title must not become a world entity"
+        );
+    }
+
     /// Objective: Verify corpus entity discovery — a non-dialog text with
     /// several speakers yields entities for the main speakers, not just the
     /// doc-title anchor. This is the "entities come from the text, not a
@@ -583,14 +636,15 @@ mod tests {
     /// surface an honorary term, but the *data* always comes from the text,
     /// and the main speakers are always present. We assert the core cast is
     /// discovered (anchor + 刘备 + 关羽), not an exact object count.
-    /// Invariants: the three core entities exist and corpus ones are flagged.
+    /// Invariants: the three core entities exist and corpus ones are flagged;
+    /// every discovered corpus entity recurs >= 2 times (frequency gate).
     #[tokio::test]
     async fn corpus_text_discovers_multiple_entities() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
         let source = crate::knowledge::document_source::RawTextSource::new(
             "会谈纪要",
             "paste",
-            "刘备说道：此事需从长计议。关羽道：大哥所言极是。刘备又说道：那便依计行事。",
+            "刘备说道：此事需从长计议。关羽道：大哥所言极是。刘备又说道：那便依计行事。关羽曰：此计可行。",
             "text",
         );
 
@@ -613,6 +667,15 @@ mod tests {
                 assert_eq!(
                     obj.properties["discovered"], true,
                     "corpus entities are flagged as discovered"
+                );
+                let freq = obj.properties["frequency"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .parse::<usize>()
+                    .unwrap_or(0);
+                assert!(
+                    freq >= 2,
+                    "corpus entity `{name}` must recur >=2 times, got freq={freq}"
                 );
             }
         }

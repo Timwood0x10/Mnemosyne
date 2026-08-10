@@ -55,6 +55,47 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(
 );
 ";
 
+/// Read the embedding dimension baked into an existing `vec_memories`
+/// virtual table's DDL (`vector float[N]`), if the table already exists.
+///
+/// `CREATE VIRTUAL TABLE IF NOT EXISTS` silently keeps a stale schema, so a
+/// database created with one dimension would otherwise carry the old
+/// dimension into a process opened with a different one — the mismatch then
+/// only surfaces at query time (bug-audit store.rs:264-267). Returning the
+/// stored dimension lets `init` rebuild the table eagerly instead.
+///
+/// Returns `Ok(None)` when the table does not exist or its DDL has no
+/// `float[N]` marker (both mean "nothing to compare against").
+fn stored_vec_dim(conn: &Connection) -> Result<Option<usize>> {
+    let sql = match conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_memories'",
+        [],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(s) => Some(s),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => {
+            return Err(StorageError::Sqlite(format!("read vec schema: {e}")).into());
+        }
+    };
+    let Some(sql) = sql else {
+        return Ok(None);
+    };
+    let marker = "float[";
+    let Some(start) = sql.find(marker) else {
+        return Ok(None);
+    };
+    let rest = &sql[start + marker.len()..];
+    let Some(end) = rest.find(']') else {
+        return Ok(None);
+    };
+    rest[..end]
+        .trim()
+        .parse::<usize>()
+        .map(Some)
+        .map_err(|e| StorageError::InvalidData(format!("bad vec dim in DDL: {e}")).into())
+}
+
 static FTS_SCHEMA: &str = "
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content, problem, solution,
@@ -262,6 +303,18 @@ impl SQLiteVecStore {
             [],
         );
         if self.dim > 0 {
+            // Rebuild the vec table when an existing database was created
+            // with a different embedding dimension: `CREATE VIRTUAL TABLE IF
+            // NOT EXISTS` silently keeps the stale schema, so the mismatch
+            // would otherwise only surface at query time (bug-audit
+            // store.rs:264-267). Dropping first forces the table to be
+            // recreated with the current dimension.
+            if let Some(stored) = stored_vec_dim(&conn)? {
+                if stored != self.dim {
+                    conn.execute_batch("DROP TABLE IF EXISTS vec_memories;")
+                        .map_err(|e| StorageError::Schema(format!("drop stale vec table: {e}")))?;
+                }
+            }
             let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
             conn.execute_batch(&vec_sql)
                 .map_err(|e| StorageError::Schema(format!("init vec: {e}")))?;
@@ -415,11 +468,17 @@ impl ExperienceRepository for SQLiteVecStore {
         if ids.is_empty() {
             return Ok(());
         }
-        let conn = self.conn.lock().await;
+        let mut conn = self.conn.lock().await;
+        // Single transaction: either every id is removed from both tables or
+        // none is — a mid-batch failure must not leave a half-deleted state
+        // while reporting success (the previous per-row `let _ =` swallowed
+        // errors and could silently skip rows).
+        let tx = conn.transaction()?;
         for id in ids {
-            let _ = conn.execute("DELETE FROM memories WHERE id = ?1", params![id]);
-            let _ = conn.execute("DELETE FROM vec_memories WHERE id = ?1", params![id]);
+            tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+            tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -754,6 +813,126 @@ mod tests {
         );
     }
 
+    /// Objective: Verify an existing database created with one embedding
+    /// dimension is rebuilt with the new dimension on reopen — the vec table
+    /// must not silently keep the stale schema (bug-audit store.rs:264-267).
+    /// Invariants: after opening dim=4, then reopening the SAME file with
+    /// dim=8, the stored vec table DDL reports float[8] and a dim-8 write
+    /// round-trips through search_by_vector.
+    #[tokio::test]
+    async fn reopen_with_new_dimension_rebuilds_vec_table() {
+        let dir = tempfile::TempDir::new().expect("temp dir for dim reopen");
+        let db_path = dir.path().join("dim.db");
+
+        // First open: dim=4, write one 4-dim memory.
+        {
+            let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 4)
+                .await
+                .expect("open with dim 4");
+            let mut exp = sample_exp("t1", MemoryType::Knowledge, "four-dim");
+            exp.vector = vec![1.0_f32, 0.0, 0.0, 0.0];
+            store.create(&exp).await.expect("create with dim 4");
+        } // store dropped → connection closed
+
+        // Reopen the same file with dim=8: the stale vec table must be
+        // rebuilt (dropped + recreated at the new dimension).
+        let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 8)
+            .await
+            .expect("open with dim 8");
+        assert_eq!(store.dim, 8, "store reports the new dimension");
+        let conn = store.conn.lock().await;
+        let stored = stored_vec_dim(&conn)
+            .expect("read stored dim")
+            .expect("vec table exists after reopen");
+        assert_eq!(
+            stored, 8,
+            "vec table must be rebuilt at the new dimension, stored={stored}"
+        );
+        drop(conn);
+
+        // A dim-8 write round-trips through vector search.
+        let mut exp = sample_exp("t1", MemoryType::Knowledge, "eight-dim");
+        exp.vector = vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        store.create(&exp).await.expect("create with dim 8");
+        let hits = store
+            .search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], "t1", 5)
+            .await
+            .expect("dim-8 search works");
+        assert!(
+            hits.iter().any(|e| e.id == exp.id),
+            "dim-8 memory is retrievable after rebuild"
+        );
+    }
+
+    /// Objective: Verify reopening with the SAME dimension does NOT rebuild
+    /// the vec table (stored dimension matches — no spurious drop).
+    /// Invariants: stored DDL still reports the original dimension and the
+    /// previously written memory remains searchable.
+    #[tokio::test]
+    async fn reopen_with_same_dimension_keeps_vec_table() {
+        let dir = tempfile::TempDir::new().expect("temp dir for dim reopen");
+        let db_path = dir.path().join("dim-same.db");
+
+        {
+            let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 4)
+                .await
+                .expect("open with dim 4");
+            let mut exp = sample_exp("t1", MemoryType::Knowledge, "keep-me");
+            exp.vector = vec![1.0_f32, 0.0, 0.0, 0.0];
+            store.create(&exp).await.expect("create");
+        }
+
+        let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 4)
+            .await
+            .expect("reopen with dim 4");
+        let conn = store.conn.lock().await;
+        let stored = stored_vec_dim(&conn)
+            .expect("read stored dim")
+            .expect("vec table exists");
+        assert_eq!(stored, 4, "same dimension keeps the original vec table");
+        drop(conn);
+
+        // The memory written before the reopen is still searchable (no data
+        // loss from a spurious rebuild).
+        let hits = store
+            .search_by_vector(&[1.0_f32, 0.0, 0.0, 0.0], "t1", 5)
+            .await
+            .expect("search");
+        assert!(
+            hits.iter().any(|e| e.content == "keep-me"),
+            "memory survives a same-dimension reopen"
+        );
+    }
+
+    /// Objective: Verify `stored_vec_dim` parses the dimension from the vec
+    /// table DDL and returns None when the table is absent.
+    /// Invariants: "float[8]" → 8; no vec table → None.
+    #[test]
+    fn stored_vec_dim_parses_ddl() {
+        // The raw connection needs the vec0 extension loaded before it can
+        // create a vec0 virtual table (mirrors SQLiteVecStore::open).
+        ensure_vec_loaded();
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory conn");
+        assert!(
+            stored_vec_dim(&conn)
+                .expect("no table → Ok(None)")
+                .is_none(),
+            "absent vec table yields None"
+        );
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE vec_memories USING vec0(
+                id TEXT PRIMARY KEY,
+                vector float[8] distance_metric=cosine
+            );",
+        )
+        .expect("create vec table");
+        assert_eq!(
+            stored_vec_dim(&conn).expect("parse").expect("dim"),
+            8,
+            "float[8] parses to 8"
+        );
+    }
+
     #[tokio::test]
     async fn get_missing_returns_none() {
         let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -837,6 +1016,105 @@ mod tests {
             .delete_batch(&[])
             .await
             .expect("empty batch should not error");
+    }
+
+    /// Objective: Verify delete_batch removes every requested id from both
+    /// the memories table and the vec index, and reports no error.
+    /// Invariants: after the batch, all three ids are gone.
+    #[tokio::test]
+    async fn delete_batch_removes_all_ids() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+        let mut ids = Vec::new();
+        for content in ["a", "b", "c"] {
+            let exp = sample_exp("t1", MemoryType::Knowledge, content);
+            store.create(&exp).await.expect("create");
+            ids.push(exp.id.clone());
+        }
+        store
+            .delete_batch(&ids)
+            .await
+            .expect("batch delete must succeed");
+        for id in &ids {
+            assert!(
+                store.get(id).await.expect("get").is_none(),
+                "id {id} must be gone after batch delete"
+            );
+        }
+    }
+
+    /// Objective: Verify a failed batch DELETE surfaces its error instead of
+    /// silently succeeding — the previous `let _ =` swallowed per-row errors
+    /// and reported Ok even when rows were skipped. A BEFORE DELETE trigger
+    /// forces the second row to abort; the error must propagate.
+    /// Invariants: delete_batch returns Err mentioning the trigger message,
+    /// and the first (already-deleted-in-transaction) row is rolled back —
+    /// the batch is atomic, not partially applied.
+    #[tokio::test]
+    async fn delete_batch_propagates_errors_and_rolls_back() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+        let keep = sample_exp("t1", MemoryType::Knowledge, "keep");
+        let doomed = sample_exp("t1", MemoryType::Knowledge, "doomed");
+        store.create(&keep).await.expect("create keep");
+        store.create(&doomed).await.expect("create doomed");
+
+        // Abort the delete of the "doomed" row mid-batch. Order matters:
+        // keep is deleted first inside the transaction, then doomed trips the
+        // trigger — proving rollback of the prior delete, not just a failed
+        // delete on an untouched table.
+        let conn = store.conn.lock().await;
+        conn.execute_batch(
+            "CREATE TRIGGER abort_doomed BEFORE DELETE ON memories
+             WHEN OLD.content = 'doomed'
+             BEGIN SELECT RAISE(ABORT, 'doomed-delete-triggered'); END;",
+        )
+        .expect("create abort trigger");
+        drop(conn);
+
+        let err = store
+            .delete_batch(&[keep.id.clone(), doomed.id.clone()])
+            .await
+            .expect_err("mid-batch failure must surface as Err");
+        assert!(
+            err.to_string().contains("doomed-delete-triggered"),
+            "error names the failing delete, got: {err}"
+        );
+
+        // Atomicity: the first delete was rolled back with the batch.
+        assert!(
+            store.get(&keep.id).await.expect("get").is_some(),
+            "mid-batch failure must roll back prior deletes, not leave a half-deleted state"
+        );
+    }
+
+    /// Objective: Verify delete_batch tolerates an orphan vec row (present in
+    /// vec_memories but absent from memories) without panicking and without
+    /// corrupting the surviving data.
+    /// Invariants: batch delete succeeds, and the real memory is removed.
+    #[tokio::test]
+    async fn delete_batch_tolerates_orphan_vec_row() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+        let exp = sample_exp("t1", MemoryType::Knowledge, "keep");
+        store.create(&exp).await.expect("create");
+
+        // A vec row with no matching memories row (legal vector JSON, so the
+        // vec extension accepts it).
+        let orphan_id = "orphan-vec-row";
+        let conn = store.conn.lock().await;
+        conn.execute(
+            "INSERT INTO vec_memories (id, vector) VALUES (?1, ?2)",
+            rusqlite::params![orphan_id, "[0.0,0.0,0.0,0.0]"],
+        )
+        .expect("insert orphan vec row");
+        drop(conn);
+
+        store
+            .delete_batch(&[orphan_id.to_string(), exp.id.clone()])
+            .await
+            .expect("batch delete succeeds despite the orphan row");
+        assert!(
+            store.get(&exp.id).await.expect("get").is_none(),
+            "the real memory is deleted"
+        );
     }
 
     /// Objective: Verify forget_expired removes only expired tenant memories.

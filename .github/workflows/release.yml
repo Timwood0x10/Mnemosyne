@@ -2,12 +2,16 @@ name: Release Build
 
 # Build Mnemosyne binaries for macOS (arm64 + x86_64), Linux (arm64 + x86_64)
 # and Windows (x86_64) on native runners, then create a GitHub Release whose
-# body is taken verbatim from `release.md` and attach all binaries. Triggered
-# on every push to `main` (or manually via workflow_dispatch).
+# body is taken verbatim from `release.md` and attach all binaries.
+#
+# Ordering: triggered by the CI workflow's completion, so it runs AFTER
+# `make check && make test` succeed on the same push (never in parallel with
+# tests). Manual trigger via workflow_dispatch is also supported.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,9 +22,16 @@ jobs:
   lint:
     name: Static analysis (fmt + clippy)
     runs-on: ubuntu-latest
+    # Gate: only run the release pipeline when the triggering CI run actually
+    # succeeded (workflow_dispatch bypasses the check).
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # workflow_run events default to the default branch; check out the
+          # exact commit that triggered the CI run instead.
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -35,6 +46,10 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-lint-cargo-${{ hashFiles('**/Cargo.lock') }}
+          # Reuse the previous cache when Cargo.lock is unchanged (fast
+          # incremental rebuilds between pushes).
+          restore-keys: |
+            ${{ runner.os }}-lint-cargo-
 
       - name: Format check
         run: cargo fmt --all -- --check
@@ -75,6 +90,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -89,9 +106,14 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-cargo-
 
+      # Use the `ci` profile (thin LTO + 16 codegen units) — fat LTO + 1 unit
+      # from `release` makes every platform compile take minutes longer for a
+      # binary-size gain that CI artifacts don't need.
       - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }} --bin mnemosyne
+        run: cargo build --profile ci --target ${{ matrix.target }} --bin mnemosyne
 
       # Rename the binary to a per-platform file name BEFORE uploading, so the
       # release job's merge-multiple download does not let the five binaries
@@ -118,6 +140,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       # Extract the version from release.md (first line: "# Mnemosyne v0.1.0").
       # Fail hard if no version is found — an empty tag would create a broken

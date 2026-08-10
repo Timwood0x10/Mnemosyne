@@ -237,6 +237,96 @@ async fn knowledge_ingest_materializes_into_graph() {
     );
 }
 
+/// Objective: Verify knowledge_ingest is FULLY idempotent — a second
+/// materialize of the same source must not duplicate chapters or evidence
+/// (documents were already deduped; the fix extends dedup to the other two
+/// row types).
+/// Invariants: second call reports documents_created == 0, chapters_created
+/// == 0, evidence_created == 0; the store holds exactly one chapter and one
+/// evidence row for the document.
+#[tokio::test]
+async fn knowledge_ingest_reingest_is_fully_idempotent() {
+    let registry = Arc::new(ExternalKnowledgeRegistry::new());
+    let linker: SharedEntityLinker = Arc::new(RwLock::new(EntityLinker::new()));
+    let store = Arc::new(SQLiteKnowledgeStore::open_in_memory().await.expect("open"));
+
+    // Attach a text document first.
+    let path = std::env::temp_dir().join("lorescope_reingest_test.txt");
+    std::fs::write(&path, "Liu Bei met Guan Yu in the peach garden.").expect("write txt");
+    let attach = KnowledgeAttachHandler {
+        registry: registry.clone(),
+        linker: linker.clone(),
+    };
+    attach
+        .call(&serde_json::json!({
+            "source_type": "document",
+            "path": path.to_string_lossy(),
+            "source_name": "reingest-src"
+        }))
+        .await
+        .expect("attach");
+    let _ = std::fs::remove_file(&path);
+
+    let ingest = KnowledgeIngestHandler {
+        registry: registry.clone(),
+        store: store.clone(),
+    };
+    let args = serde_json::json!({
+        "source_name": "reingest-src",
+        "mode": "materialize"
+    });
+
+    // First ingest: creates doc + chapter + evidence.
+    let first = ingest.call(&args).await.expect("first ingest");
+    assert!(!first.is_error, "first ingest must not error");
+    let first_payload: Value =
+        serde_json::from_str(&first.content[0].text.clone().unwrap_or_default())
+            .expect("first response JSON");
+    assert_eq!(first_payload["documents_created"].as_u64(), Some(1));
+    assert_eq!(first_payload["chapters_created"].as_u64(), Some(1));
+    assert_eq!(first_payload["evidence_created"].as_u64(), Some(1));
+
+    // Second ingest: everything reused, nothing duplicated.
+    let second = ingest.call(&args).await.expect("second ingest");
+    assert!(!second.is_error, "second ingest must not error");
+    let second_payload: Value =
+        serde_json::from_str(&second.content[0].text.clone().unwrap_or_default())
+            .expect("second response JSON");
+    assert_eq!(
+        second_payload["documents_created"].as_u64(),
+        Some(0),
+        "re-ingest must not create a duplicate document"
+    );
+    assert_eq!(
+        second_payload["chapters_created"].as_u64(),
+        Some(0),
+        "re-ingest must not create a duplicate chapter"
+    );
+    assert_eq!(
+        second_payload["evidence_created"].as_u64(),
+        Some(0),
+        "re-ingest must not create a duplicate evidence row"
+    );
+
+    // The store must hold exactly one document/chapter/evidence each. The
+    // document title is the attached file's stem (not the source_name).
+    let docs = store.list_documents().await.expect("list docs");
+    assert_eq!(docs.len(), 1, "exactly one document after two ingests");
+    let doc = &docs[0];
+    let chapters = store.get_chapter_by_no(doc.id, 1).await.expect("chapter");
+    assert!(chapters.is_some(), "exactly one chapter for the document");
+    let evidences = store
+        .list_evidence_by_document(doc.id)
+        .await
+        .expect("list evidence");
+    assert_eq!(
+        evidences.len(),
+        1,
+        "re-ingest must leave exactly one evidence row, got {}",
+        evidences.len()
+    );
+}
+
 /// Objective: Verify agent_fact_compile persists user facts by default and
 /// keeps the agent channel disabled until include_agent_facts=true.
 /// Invariants: user_facts_persisted >= 1 with include_agent_facts=false;

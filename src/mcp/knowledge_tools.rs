@@ -249,10 +249,17 @@ impl ToolHandler for CorrectRelationHandler {
         // entity from another document. `find_document_by_title` is the
         // public trait API (the private `resolve_doc_id` helper is not
         // visible from the handler module).
+        //
+        // An explicitly named document that does NOT exist is an error, not a
+        // silent downgrade to a global (doc_id=None) correction — the caller
+        // asked to scope the fix to a document, and silently applying it
+        // graph-wide would re-target same-named entities in other documents.
         let doc_id = match doc {
             Some(title) => match self.store.find_document_by_title(title).await? {
                 Some(d) => Some(d.id),
-                None => None,
+                None => {
+                    return Ok(err_result(format!("document `{title}` not found")));
+                }
             },
             None => None,
         };
@@ -697,6 +704,115 @@ mod tests {
         assert!(
             text.contains("totally-unknown-person"),
             "error message names the missing entity"
+        );
+    }
+
+    /// Objective: Verify correct_relation rejects an explicitly named but
+    /// nonexistent `doc` instead of silently downgrading to a global
+    /// (doc_id=None) correction that would re-target same-named entities in
+    /// other documents.
+    /// Invariants: with a graph containing the triple and a bogus doc title,
+    /// the handler returns an error result naming the document, and the edge
+    /// is left unchanged (not re-targeted graph-wide).
+    #[tokio::test]
+    async fn correct_relation_unknown_doc_is_rejected_not_global() {
+        let store = Arc::new(
+            crate::knowledge::SQLiteKnowledgeStore::open_in_memory()
+                .await
+                .expect("open"),
+        );
+        let did = store
+            .create_document(&Document {
+                id: 0,
+                title: "三国演义".into(),
+                author: None,
+                doc_type: Some("novel".into()),
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create doc");
+        let zhaoyun = store
+            .create_object(&KnowledgeObject {
+                id: 0,
+                doc_id: did,
+                object_type: ObjectType::Person,
+                name: "赵云".into(),
+                properties: json!({}),
+                confidence: 0.9,
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create 赵云");
+        let liubei = store
+            .create_object(&KnowledgeObject {
+                id: 0,
+                doc_id: did,
+                object_type: ObjectType::Person,
+                name: "刘备".into(),
+                properties: json!({}),
+                confidence: 0.9,
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create 刘备");
+        // The 关羽 object is not referenced by assertions (the correction is
+        // rejected before any edge is re-targeted), but its creation keeps the
+        // graph fully seeded for the "would have applied globally" scenario.
+        let _guanyu = store
+            .create_object(&KnowledgeObject {
+                id: 0,
+                doc_id: did,
+                object_type: ObjectType::Person,
+                name: "关羽".into(),
+                properties: json!({}),
+                confidence: 0.9,
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create 关羽");
+        store
+            .create_edge(&crate::knowledge::KnowledgeEdge {
+                id: 0,
+                source_id: zhaoyun,
+                target_id: liubei,
+                predicate: "serves".into(),
+                properties: json!({}),
+                origin: crate::knowledge::Origin::Observed,
+                confidence: 0.8,
+                valid_from: None,
+                valid_to: None,
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create edge");
+
+        let handler = CorrectRelationHandler {
+            store: store.clone(),
+        };
+        let args = serde_json::json!({
+            "source": "赵云",
+            "predicate": "serves",
+            "old_target": "刘备",
+            "new_target": "关羽",
+            "doc": "不存在的书"
+        });
+        let result = handler.call(&args).await.expect("handler does not error");
+        assert!(
+            result.is_error,
+            "unknown doc must be rejected, not applied globally"
+        );
+        let text = result.content[0].text.clone().unwrap_or_default();
+        assert!(
+            text.contains("不存在的书"),
+            "error names the missing document, got: {text}"
+        );
+
+        // The edge must be untouched (no graph-wide re-target).
+        let edges = store.get_edges_touching(zhaoyun).await.expect("get edges");
+        assert_eq!(edges.len(), 1, "edge count unchanged");
+        assert_eq!(
+            edges[0].target_id, liubei,
+            "edge still points at the original target"
         );
     }
 }

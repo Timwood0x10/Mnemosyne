@@ -442,32 +442,52 @@ impl KnowledgeIngestHandler {
             };
 
             // Create a chapter for the doc body. Chapter number comes from
-            // `ext.chapter` when present, else 1.
+            // `ext.chapter` when present, else 1. A chapter with the same
+            // (doc_id, chapter_no) is reused, not re-inserted — repeated
+            // ingest previously duplicated every chapter unconditionally
+            // (half-idempotent: documents were deduped but chapters and
+            // evidence piled up on every call).
             let chapter_no = ext.chapter.unwrap_or(1);
-            let chapter = Chapter {
-                id: 0,
-                doc_id,
-                chapter_no,
-                title: Some(ext.title.clone()),
-                content: ext.text.clone(),
-                start_offset: Some(0),
-                end_offset: Some(ext.text.len() as i64),
+            let chapter_id = match self.store.get_chapter_by_no(doc_id, chapter_no).await? {
+                Some(ch) => ch.id,
+                None => {
+                    let chapter = Chapter {
+                        id: 0,
+                        doc_id,
+                        chapter_no,
+                        title: Some(ext.title.clone()),
+                        content: ext.text.clone(),
+                        start_offset: Some(0),
+                        end_offset: Some(ext.text.len() as i64),
+                    };
+                    let cid = self.store.create_chapter(&chapter).await?;
+                    chapter_count += 1;
+                    cid
+                }
             };
-            let chapter_id = self.store.create_chapter(&chapter).await?;
-            chapter_count += 1;
 
             // Persist the body as evidence so `evidence` search can find it.
-            let evidence = Evidence {
-                id: 0,
-                doc_id,
-                chapter_id,
-                start_offset: Some(0),
-                end_offset: Some(ext.text.len() as i64),
-                content: ext.text.clone(),
-                created_at: chrono::Utc::now().timestamp(),
-            };
-            self.store.create_evidence(&evidence).await?;
-            evidence_count += 1;
+            // An evidence row with the same content already under this doc is
+            // skipped (idempotent re-ingest must not duplicate evidence).
+            let already_evidenced = self
+                .store
+                .list_evidence_by_document(doc_id)
+                .await?
+                .iter()
+                .any(|e| e.content == ext.text);
+            if !already_evidenced {
+                let evidence = Evidence {
+                    id: 0,
+                    doc_id,
+                    chapter_id,
+                    start_offset: Some(0),
+                    end_offset: Some(ext.text.len() as i64),
+                    content: ext.text.clone(),
+                    created_at: chrono::Utc::now().timestamp(),
+                };
+                self.store.create_evidence(&evidence).await?;
+                evidence_count += 1;
+            }
         }
 
         let payload = serde_json::json!({

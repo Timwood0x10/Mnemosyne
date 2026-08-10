@@ -44,10 +44,11 @@ pub struct EntityEngine {
 impl EntityEngine {
     /// Build an engine from a pre-configured registry.
     ///
-    /// # Panics
-    ///
-    /// Panics if the registry contains zero entries (the automaton would be
-    /// empty). Providers should supply at least one entry.
+    /// Empty canonical names / aliases (possible from a hand-edited JSON
+    /// profile) are skipped: aho-corasick rejects the empty string as a
+    /// pattern, and a panic here would crash the whole compile. If the
+    /// automaton still cannot be built, the engine degrades to an empty
+    /// matcher (matches nothing) instead of panicking.
     pub fn new(registry: EntityRegistry) -> Self {
         let dict = registry.build_dictionary();
         let mut patterns: Vec<String> = Vec::new();
@@ -55,15 +56,20 @@ impl EntityEngine {
         let mut short_specs: Vec<ShortSpec> = Vec::new();
 
         for entry in &dict.entries {
-            // Map the canonical name
-            alias_map.insert(
-                entry.canonical_name.clone(),
-                (entry.canonical_name.clone(), entry.object_type.clone(), 1.0),
-            );
-            patterns.push(entry.canonical_name.clone());
+            // Map the canonical name (skip empty — meaningless as a pattern).
+            if !entry.canonical_name.is_empty() {
+                alias_map.insert(
+                    entry.canonical_name.clone(),
+                    (entry.canonical_name.clone(), entry.object_type.clone(), 1.0),
+                );
+                patterns.push(entry.canonical_name.clone());
+            }
 
-            // Map each alias
+            // Map each alias (skip empty aliases for the same reason).
             for alias in &entry.aliases {
+                if alias.is_empty() {
+                    continue;
+                }
                 alias_map.insert(
                     alias.clone(),
                     (entry.canonical_name.clone(), entry.object_type.clone(), 0.9),
@@ -80,10 +86,21 @@ impl EntityEngine {
             }
         }
 
-        let ac = AhoCorasickBuilder::new()
+        let ac = match AhoCorasickBuilder::new()
             .match_kind(MatchKind::LeftmostLongest)
             .build(&patterns)
-            .expect("Aho-Corasick automaton must be buildable with non-empty patterns");
+        {
+            Ok(ac) => ac,
+            Err(e) => {
+                // Defensive degrade: never crash a compile because the
+                // automaton could not be built. An empty matcher finds
+                // nothing, which is strictly better than a panic.
+                eprintln!("entity engine: Aho-Corasick build failed ({e}); using empty matcher");
+                AhoCorasickBuilder::new()
+                    .build(Vec::<&str>::new())
+                    .expect("empty pattern list is always buildable")
+            }
+        };
 
         EntityEngine {
             _registry: registry,
@@ -255,5 +272,52 @@ mod tests {
         let engine = EntityEngine::new(reg);
         let mentions = engine.scan("", 0);
         assert!(mentions.is_empty());
+    }
+
+    /// Objective: Verify an empty canonical name / empty alias (hand-edited
+    /// JSON profile) does NOT panic the engine build (aho-corasick rejects
+    /// the empty string as a pattern).
+    /// Invariants: EntityEngine::new succeeds; the empty patterns are
+    /// skipped; the remaining valid alias still matches.
+    #[test]
+    fn empty_patterns_do_not_panic() {
+        let reg = make_registry(vec![EntityEntry {
+            canonical_name: String::new(),
+            aliases: vec![String::new(), "子龙".into()],
+            single_char: None,
+            object_type: "person".into(),
+            properties: HashMap::new(),
+        }]);
+        let engine = EntityEngine::new(reg);
+        // The empty canonical name is skipped; 子龙 survives as a pattern.
+        let mentions = engine.scan("子龙救阿斗", 0);
+        assert!(
+            !mentions.is_empty(),
+            "valid alias must still match after empty patterns are skipped, got {mentions:?}"
+        );
+        assert_eq!(
+            mentions[0].canonical_name, "",
+            "alias must map to the (empty) canonical name of its entry"
+        );
+    }
+
+    /// Objective: Verify a registry whose only entries are empty strings
+    /// degrades to an empty matcher instead of panicking.
+    /// Invariants: EntityEngine::new succeeds and finds nothing.
+    #[test]
+    fn all_empty_patterns_degrade_gracefully() {
+        let reg = make_registry(vec![EntityEntry {
+            canonical_name: String::new(),
+            aliases: vec![String::new()],
+            single_char: None,
+            object_type: "person".into(),
+            properties: HashMap::new(),
+        }]);
+        let engine = EntityEngine::new(reg);
+        let mentions = engine.scan("赵云救阿斗", 0);
+        assert!(
+            mentions.is_empty(),
+            "all-empty patterns must not match anything, got {mentions:?}"
+        );
     }
 }

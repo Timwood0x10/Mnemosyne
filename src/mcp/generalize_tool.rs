@@ -226,9 +226,11 @@ mod tests {
         )
     }
 
-    /// Objective: Verify a dialog compiles into at least one entity with the
-    /// conversation-cognition profile.
-    /// Invariants: one document; >= 1 object; result is not an error.
+    /// Objective: Verify a dialog compiles into the graph with the
+    /// conversation-cognition profile WITHOUT creating a `person` object named
+    /// after the session title (a session id is not a person — the fixed
+    /// modeling; speakers live in the cognition layer instead).
+    /// Invariants: one document; objects == 0; result is not an error.
     #[tokio::test]
     async fn dialog_compiles_to_entities() {
         let handler = GeneralizeCompileHandler {
@@ -252,8 +254,12 @@ mod tests {
             "result marks compiled, got: {text}"
         );
         assert!(
-            text.contains("\"objects\": 1") || text.contains("\"objects\": 2"),
-            ">=1 object"
+            text.contains("\"objects\": 0"),
+            "dialog title must not become an object, got: {text}"
+        );
+        assert!(
+            text.contains("\"documents\": 1"),
+            "one dialog document compiled, got: {text}"
         );
     }
 

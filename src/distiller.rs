@@ -607,6 +607,11 @@ impl PipelineDistiller {
             exp.extraction_method = extraction_method;
             exp.expires_at = Some(mem.expires_at);
             exp.metadata = mem.metadata.clone();
+            // Git-style summary (subject + causal body) rides in the metadata
+            // bag since `Experience` has no dedicated summary column. Insert
+            // AFTER the clone so it is not overwritten.
+            exp.metadata
+                .insert("summary", serde_json::Value::String(mem.summary.clone()));
             self.store.create(&exp).await?;
             self.metrics
                 .memories_created
@@ -723,13 +728,17 @@ impl Distiller for PipelineDistiller {
     }
 }
 
-/// Compress a problem-solution pair into a concise single-sentence summary.
-/// Compress a problem-solution pair into a concise summary.
-/// Truncates problem to 60 chars, solution to 120 chars,
-/// strips trailing question marks, and pairs as `problem: action`.
+/// Compress a problem-solution pair into a git-commit-style summary.
+///
+/// Format: a short subject line (the problem core) followed by a body that
+/// keeps the causal chain — `Problem: …` then `→ Solution: …` — instead of
+/// discarding it. This mirrors how a commit message pairs a one-line subject
+/// with a body that records why/how, so a compressed memory still shows what
+/// was asked, what was done, and the outcome.
 pub fn compress_pair(problem: &str, solution: &str) -> String {
     const MAX_PROBLEM: usize = 60;
-    const MAX_SOLUTION: usize = 120;
+    const MAX_BODY_PROBLEM: usize = 160;
+    const MAX_SOLUTION: usize = 200;
 
     let problem = problem.trim();
     let solution = solution.trim();
@@ -750,10 +759,13 @@ pub fn compress_pair(problem: &str, solution: &str) -> String {
         .map(str::trim)
         .unwrap_or(problem);
 
-    let core = truncate(stripped, MAX_PROBLEM);
+    // Subject: the problem core, truncated — one scannable line.
+    let subject = truncate(stripped, MAX_PROBLEM);
+    // Body: keep the causal chain (what was asked → what was done/result).
+    let body_problem = truncate(stripped, MAX_BODY_PROBLEM);
     let action = truncate(solution, MAX_SOLUTION);
 
-    format!("{core}：{action}")
+    format!("{subject}\nProblem: {body_problem}\n→ Solution: {action}")
 }
 
 /// Compute a stable content hash for deduplication.
@@ -913,11 +925,23 @@ mod tests {
         assert!(!out.is_empty(), "memory still produced without embeddings");
     }
 
-    /// Objective: Verify compress_pair produces expected summaries.
+    /// Objective: Verify compress_pair produces git-style summaries.
     #[test]
     fn compress_pair_basic() {
         let s = compress_pair("如何用serde解析JSON？", "使用 serde_json::from_str。");
-        assert_eq!(s, "如何用serde解析JSON：使用 serde_json::from_str。");
+        // Subject line (no trailing question mark) + causal body.
+        assert!(
+            s.starts_with("如何用serde解析JSON\n"),
+            "subject line first: {s}"
+        );
+        assert!(
+            s.contains("Problem: 如何用serde解析JSON"),
+            "body keeps the problem: {s}"
+        );
+        assert!(
+            s.contains("→ Solution: 使用 serde_json::from_str。"),
+            "body keeps the solution: {s}"
+        );
     }
 
     /// Objective: Verify empty inputs return empty.
@@ -1069,10 +1093,12 @@ mod tests {
             s.contains("Create a binary crate"),
             "first sentence preserved: {s}"
         );
-        // Density: each segment carries meaning
+        // Density: the git-style format is bounded by the subject+body limits
+        // (60 + 160 + 200 chars plus labels), not by raw input size — a short
+        // problem appears once in the subject and once in the body by design.
         assert!(
-            s.chars().count() <= problem.chars().count() + solution.chars().count(),
-            "compression should not expand"
+            s.chars().count() <= 60 + 160 + 200 + 32,
+            "output must respect the subject+body limits: {s}"
         );
         assert!(s.contains("memory-mcp"), "project name preserved: {s}");
     }
@@ -1126,8 +1152,9 @@ mod tests {
         assert!(s.contains("8-stage"), "key number preserved: {s}");
         // Truncation should produce valid output (no panic from byte slicing)
         assert!(!s.is_empty(), "output should not be empty");
-        // The core structure (problem：action) should be intact
-        assert!(s.contains('：'), "separator should be present");
+        // The core structure (subject line + causal body) should be intact
+        assert!(s.contains("\nProblem: "), "body keeps the problem: {s}");
+        assert!(s.contains("\n→ Solution: "), "body keeps the solution: {s}");
     }
 
     /// Objective: Verify that very short document snippets don't lose meaning
@@ -1137,13 +1164,19 @@ mod tests {
         let problem = "Go vs Rust?";
         let solution = "Rust for safety, Go for simplicity.";
         let s = compress_pair(problem, solution);
-        assert_eq!(
-            s, "Go vs Rust：Rust for safety, Go for simplicity.",
-            "short content should pass through unchanged"
+        // Subject line preserves the short problem; body keeps both halves.
+        assert!(s.starts_with("Go vs Rust\n"), "subject line first: {s}");
+        assert!(
+            s.contains("Problem: Go vs Rust"),
+            "body keeps problem verbatim: {s}"
+        );
+        assert!(
+            s.contains("→ Solution: Rust for safety, Go for simplicity."),
+            "body keeps solution verbatim: {s}"
         );
     }
 
-    /// Objective: Verify long solution is truncated to 120 chars.
+    /// Objective: Verify long solution is truncated to the body limit.
     #[test]
     fn compress_pair_truncates_long_solution() {
         let s = compress_pair(
@@ -1154,8 +1187,8 @@ mod tests {
         );
         assert!(!s.is_empty(), "output should not be empty");
         assert!(
-            s.len() <= 60 + 3 + 120,
-            "output should be truncated to reasonable length: {s}"
+            s.len() <= 60 + 160 + 200 + 32,
+            "output should be truncated to the subject+body limits: {s}"
         );
     }
 
@@ -1231,10 +1264,10 @@ mod tests {
                 !mem.summary.trim().is_empty(),
                 "summary must not be empty or whitespace-only"
             );
-            // Summary is shorter than combined input
+            // Summary is bounded (subject + causal body, not raw input)
             assert!(
-                mem.summary.len() < 200,
-                "summary should be condensed (<200 chars), got {}",
+                mem.summary.len() < 500,
+                "summary should be condensed (<500 chars), got {}",
                 mem.summary.len()
             );
         }

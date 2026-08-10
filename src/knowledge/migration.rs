@@ -107,13 +107,6 @@ impl<'a> Migrator<'a> {
     /// re-inserting, so a re-run is a clean per-novel rebuild rather than an
     /// accumulating append. The V1 character store is never touched.
     pub async fn migrate(&self) -> Result<MigrationStats> {
-        // Disable FK enforcement for the duration of the migration: the
-        // migrator inserts in parent→child order so enforcement is unnecessary,
-        // and cross-novel edges can transiently reference not-yet-migrated
-        // objects. Re-enable unconditionally afterwards so production queries
-        // keep FK integrity checking. This PRAGMA must run OUTSIDE the
-        // transaction below — SQLite ignores foreign_keys changes mid-transaction.
-        self.knowledge.set_foreign_keys_enabled(false).await?;
         // Snapshot the V1 source BEFORE opening the write transaction.
         // `ensure_sanguo_db` and production both point v1 and knowledge at the
         // SAME SQLite file: reading through the v1 connection while the
@@ -123,6 +116,24 @@ impl<'a> Migrator<'a> {
         // up front, outside the transaction, keeps the H6 atomicity (one
         // transaction, roll back on failure) while never touching v1 inside it.
         let snapshot = self.load_v1_snapshot().await?;
+
+        // Caller-owned transaction: if the caller already opened one on the
+        // knowledge connection, we must NOT nest a BEGIN/COMMIT pair — SQLite
+        // rejects the nested BEGIN, and a failed begin would corrupt the
+        // caller's transaction. Run the inner work directly inside the
+        // caller's transaction (the caller owns atomicity and FK policy).
+        if self.knowledge.in_transaction().await? {
+            return self.migrate_inner(&snapshot).await;
+        }
+
+        // Self-owned transaction: the original H6 path. Disable FK enforcement
+        // for the duration of the migration: the migrator inserts in
+        // parent→child order so enforcement is unnecessary, and cross-novel
+        // edges can transiently reference not-yet-migrated objects. Re-enable
+        // unconditionally afterwards so production queries keep FK integrity
+        // checking. This PRAGMA must run OUTSIDE the transaction below —
+        // SQLite ignores foreign_keys changes mid-transaction.
+        self.knowledge.set_foreign_keys_enabled(false).await?;
         self.knowledge.begin_transaction().await?;
         let result = self.migrate_inner(&snapshot).await;
         match &result {
@@ -773,6 +784,44 @@ mod tests {
         let _ = migrator.migrate().await.expect("first migrate");
         // Re-run must not error (documents reused, chapters appended).
         let _ = migrator.migrate().await.expect("second migrate is safe");
+    }
+
+    /// Objective: Verify migration runs inside a CALLER-owned transaction
+    /// without nesting a BEGIN (SQLite rejects nested BEGIN; a failed begin
+    /// would corrupt the caller's transaction). This is the "transaction is
+    /// caller-level, not connection-level" fix.
+    /// Invariants: after begin_transaction → migrate → commit, the migrated
+    /// rows are visible; no error surfaced from the nested migrate.
+    #[tokio::test]
+    async fn migrator_runs_inside_caller_transaction() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_tiny_corpus(tmp.path());
+        let v1 = SQLiteCharacterStore::open_in_memory().await.expect("v1");
+        seed_v1(&v1).await;
+        let knowledge = SQLiteKnowledgeStore::open_in_memory().await.expect("k");
+
+        // Caller opens a transaction first.
+        knowledge.begin_transaction().await.expect("caller begin");
+
+        let migrator = Migrator::new(&v1, &knowledge, tmp.path());
+        let stats = migrator.migrate().await.expect("migrate inside caller txn");
+
+        // The migration must have actually run (data written into the
+        // caller's transaction).
+        assert!(stats.documents >= 1, "migrated inside caller transaction");
+        assert!(
+            knowledge.in_transaction().await.expect("query txn state"),
+            "caller transaction must still be open after nested migrate"
+        );
+
+        // Caller commits — migrated rows become visible.
+        knowledge.commit_transaction().await.expect("caller commit");
+        let zhaoyun = knowledge
+            .find_object_by_name("赵云", None)
+            .await
+            .expect("query")
+            .expect("赵云 migrated and committed");
+        assert_eq!(zhaoyun.name, "赵云");
     }
 
     /// Objective: Verify migration does NOT create evidence with a dangling

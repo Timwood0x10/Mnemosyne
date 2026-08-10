@@ -311,9 +311,16 @@ struct AliasIndex {
 
 impl AliasIndex {
     fn build(dict: &EntityDictionary) -> Self {
+        // Single-character aliases (`single_char`: 云/飞/操) are excluded
+        // from the global Aho-Corasick automaton: a whole-text scan has no
+        // safety context, so "浮云" would wrongly resolve to 赵云. Single
+        // chars must only match via the context-checked shortname path
+        // (`EntityEngine::scan` / `ingest::extract::find_single_char_matches`),
+        // which requires punctuation-before + verb-after.
         let mut aliases: Vec<(String, String)> = dict
             .alias_to_canonical
             .iter()
+            .filter(|(k, _)| k.chars().count() >= 2)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
@@ -360,10 +367,13 @@ fn scan_mentions(
         }
         // Resolver fallback runs regardless of alias_index
     } else {
-        // Legacy path — build alias list on every call (fallback)
+        // Legacy path — build alias list on every call (fallback).
+        // Same single-char exclusion as AliasIndex::build: a bare "云" must
+        // never match via whole-text scan (浮云 → 赵云 false positive).
         let mut aliases: Vec<(String, String)> = dict
             .alias_to_canonical
             .iter()
+            .filter(|(k, _)| k.chars().count() >= 2)
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
@@ -554,6 +564,51 @@ mod tests {
         d.alias_to_canonical.insert("阿斗".into(), "阿斗".into());
         d.alias_to_canonical.insert("曹操".into(), "曹操".into());
         d
+    }
+
+    /// Objective: Verify single-char aliases (云/飞/操) are excluded from the
+    /// whole-text Aho-Corasick automaton so mid-word occurrences ("浮云") do
+    /// NOT resolve to a character (赵云).
+    /// Invariants: a dict carrying "云"→"赵云" matches "浮云" nowhere via the
+    /// global scan, while the multi-char alias "赵云" still matches.
+    #[test]
+    fn single_char_aliases_excluded_from_automaton() {
+        let mut dict = make_dict();
+        dict.alias_to_canonical.insert("云".into(), "赵云".into());
+        let idx = AliasIndex::build(&dict);
+        let ac = idx.ac.expect("automaton built with multi-char aliases");
+        assert!(
+            ac.find_iter("浮云蔽日").next().is_none(),
+            "bare 云 must not match inside 浮云"
+        );
+        assert!(
+            ac.find_iter("赵云救阿斗").next().is_some(),
+            "multi-char 赵云 still matches"
+        );
+        // The excluded single-char alias must not even be a pattern.
+        assert!(
+            idx.aliases.iter().all(|(k, _)| k.chars().count() >= 2),
+            "single-char aliases are filtered out of the index"
+        );
+    }
+
+    /// Objective: Verify the legacy (non-index) scan path applies the same
+    /// single-char exclusion.
+    /// Invariants: scan_mentions without an AliasIndex does not emit a 赵云
+    /// mention for "浮云蔽日", but still finds 曹操 in "曹操观云".
+    #[test]
+    fn legacy_path_excludes_single_char() {
+        let dict = make_dict();
+        let mentions = scan_mentions("浮云蔽日", &dict, None, None);
+        assert!(
+            mentions.is_empty(),
+            "bare 云 must not match in the legacy path, got {mentions:?}"
+        );
+        let mentions = scan_mentions("曹操观云", &dict, None, None);
+        assert!(
+            mentions.iter().any(|m| m.canonical_name == "曹操"),
+            "multi-char alias still found in legacy path"
+        );
     }
 
     /// Objective: Verify that a simple action sentence creates an Event.

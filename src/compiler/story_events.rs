@@ -266,7 +266,8 @@ mod tests {
 
     /// Objective: Verify dialog input does NOT spawn story events (the module
     /// is gated to non-dialog prose, so existing dialog behaviour is intact).
-    /// Invariants: a dialog compile keeps edges == 0 and objects == 1.
+    /// Invariants: a dialog compile keeps edges == 0 and objects == 0 (dialog
+    /// titles are session ids, not entities — no anchor object is created).
     #[tokio::test]
     async fn dialog_is_untouched_by_story_events() {
         let store = memory_store().await;
@@ -282,7 +283,7 @@ mod tests {
         let stats = compile_source(&source, &profile, &store, "t1")
             .await
             .expect("compile");
-        assert_eq!(stats.objects, 1, "dialog keeps a single anchor entity");
+        assert_eq!(stats.objects, 0, "dialog creates no anchor entity");
         assert_eq!(stats.edges, 0, "dialog never spawns story-event edges");
     }
 

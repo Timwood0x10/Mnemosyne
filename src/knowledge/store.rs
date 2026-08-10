@@ -188,6 +188,10 @@ pub trait KnowledgeStore: Send + Sync {
     // ── objects ───────────────────────────────────────────────
     async fn create_object(&self, o: &KnowledgeObject) -> Result<i64>;
     async fn get_object(&self, id: i64) -> Result<Option<KnowledgeObject>>;
+    /// Fetch many objects by id in one query. Ids missing from the store are
+    /// silently skipped (like a per-id `get_object` loop). Empty input returns
+    /// an empty vec without touching the DB.
+    async fn get_objects_bulk(&self, ids: &[i64]) -> Result<Vec<KnowledgeObject>>;
     async fn find_object_by_name(
         &self,
         name: &str,
@@ -240,6 +244,14 @@ pub trait KnowledgeStore: Send + Sync {
         &self,
         source_type: EvidenceSourceType,
         source_id: i64,
+    ) -> Result<Vec<Evidence>>;
+    /// Fetch evidence linked to any of the given source ids (one query instead
+    /// of N). Results are ordered by evidence id; empty input returns an empty
+    /// vec without touching the DB.
+    async fn get_evidence_for_many(
+        &self,
+        source_type: EvidenceSourceType,
+        source_ids: &[i64],
     ) -> Result<Vec<Evidence>>;
 
     // ── mentions ─────────────────────────────────────────────
@@ -449,6 +461,18 @@ impl SQLiteKnowledgeStore {
     pub async fn rollback_transaction(&self) -> Result<()> {
         let conn = self.conn.lock().await;
         conn.execute_batch("ROLLBACK;").map_err(Into::into)
+    }
+
+    /// Report whether a transaction is currently open on this connection.
+    ///
+    /// Used by callers like `Migrator::migrate` that would otherwise nest a
+    /// `BEGIN` inside a caller-owned transaction (SQLite rejects nested
+    /// BEGIN, and a failed `begin_transaction` would corrupt the outer
+    /// transaction's state). When this returns `true`, the caller must run
+    /// its inner work directly without opening or closing its own transaction.
+    pub async fn in_transaction(&self) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        Ok(!conn.is_autocommit())
     }
 
     /// Drop all general-model rows. Called by the migrator at the start of a
@@ -681,6 +705,24 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         }
     }
 
+    async fn get_objects_bulk(&self, ids: &[i64]) -> Result<Vec<KnowledgeObject>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One IN-clause query replaces N per-id lookups (inspect_entity /
+        // entity_timeline previously did one `get_object` per event/neighbor).
+        let placeholders = vec!["?"; ids.len()].join(",");
+        let sql = format!("SELECT * FROM knowledge_objects WHERE id IN ({placeholders})");
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(ids.iter()), row_to_object)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     async fn find_object_by_name(
         &self,
         name: &str,
@@ -871,6 +913,42 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
              ORDER BY e.id ASC",
         )?;
         let rows = stmt.query_map(params![source_type.as_str(), source_id], row_to_evidence)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    async fn get_evidence_for_many(
+        &self,
+        source_type: EvidenceSourceType,
+        source_ids: &[i64],
+    ) -> Result<Vec<Evidence>> {
+        if source_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // One IN-clause query replaces N per-edge lookups (inspect_entity
+        // previously called get_evidence_for once per relation edge).
+        let placeholders = vec!["?"; source_ids.len()].join(",");
+        let sql = format!(
+            "SELECT e.* FROM evidence e
+             JOIN knowledge_evidence ke ON ke.evidence_id = e.id
+             WHERE ke.source_type = ?1 AND ke.source_id IN ({placeholders})
+             ORDER BY e.id ASC"
+        );
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(&sql)?;
+        // First param is the source_type string, then the id list.
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(source_type.as_str().to_string())];
+        for id in source_ids {
+            params_vec.push(Box::new(*id));
+        }
+        let rows = stmt.query_map(
+            rusqlite::params_from_iter(params_vec.iter()),
+            row_to_evidence,
+        )?;
         let mut out = Vec::new();
         for r in rows {
             out.push(r?);
@@ -1250,14 +1328,12 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
             }
         }
 
-        let mut events: Vec<KnowledgeObject> = Vec::new();
-        for eid in &event_ids {
-            if let Some(ev) = self.get_object(*eid).await? {
-                events.push(ev);
-            }
-        }
+        // Events: one bulk fetch instead of one `get_object` per event id.
+        let event_ids_vec: Vec<i64> = event_ids.iter().copied().collect();
+        let events: Vec<KnowledgeObject> = self.get_objects_bulk(&event_ids_vec).await?;
 
         // Evidences: union of object evidence + each edge's evidence, deduped.
+        // One bulk fetch for all edges replaces one `get_evidence_for` per edge.
         let mut seen_ev: HashSet<i64> = HashSet::new();
         let mut evidences: Vec<Evidence> = Vec::new();
         for ev in self
@@ -1268,14 +1344,13 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
                 evidences.push(ev);
             }
         }
-        for e in &edges {
-            for ev in self
-                .get_evidence_for(EvidenceSourceType::Edge, e.id)
-                .await?
-            {
-                if seen_ev.insert(ev.id) {
-                    evidences.push(ev);
-                }
+        let edge_ids: Vec<i64> = edges.iter().map(|e| e.id).collect();
+        for ev in self
+            .get_evidence_for_many(EvidenceSourceType::Edge, &edge_ids)
+            .await?
+        {
+            if seen_ev.insert(ev.id) {
+                evidences.push(ev);
             }
         }
 
@@ -2428,6 +2503,114 @@ mod tests {
             matches!(err, Error::NotFound(_)),
             "unknown doc should be NotFound"
         );
+    }
+
+    /// Objective: Verify `get_objects_bulk` returns every requested object in
+    /// one call, silently skipping ids that do not exist (mirrors a per-id
+    /// `get_object` loop without the N queries).
+    /// Invariants: 2 of 3 requested ids exist → 2 objects returned; empty
+    /// input → empty vec.
+    #[tokio::test]
+    async fn get_objects_bulk_fetches_many() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "三国演义").await;
+        let zhaoyun = seed_person(&store, did, "赵云", json!({})).await;
+        let liubei = seed_person(&store, did, "刘备", json!({})).await;
+
+        let objs = store
+            .get_objects_bulk(&[zhaoyun, liubei, 99_999])
+            .await
+            .expect("bulk fetch");
+        let names: Vec<&str> = objs.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            names.contains(&"赵云") && names.contains(&"刘备"),
+            "both existing objects returned, got {names:?}"
+        );
+        assert_eq!(
+            objs.len(),
+            2,
+            "missing id 99999 must be skipped, got {names:?}"
+        );
+
+        let empty = store.get_objects_bulk(&[]).await.expect("empty bulk");
+        assert!(empty.is_empty(), "empty input → empty output");
+    }
+
+    /// Objective: Verify `get_evidence_for_many` returns evidence linked to
+    /// ANY of the given edge ids in one call (the inspect_entity N+1 fix).
+    /// Invariants: two edges sharing evidence → both edge links are returned
+    /// (the bulk method reports per-edge links; cross-edge dedup happens in
+    /// inspect_entity); empty input → empty vec.
+    #[tokio::test]
+    async fn get_evidence_for_many_fetches_across_edges() {
+        let store = fresh().await;
+        let did = seed_doc(&store, "三国演义").await;
+        let zhaoyun = seed_person(&store, did, "赵云", json!({})).await;
+        let liubei = seed_person(&store, did, "刘备", json!({})).await;
+        let cid = seed_chapter(&store, did, 41).await;
+
+        let eid = store
+            .create_evidence(&Evidence {
+                id: 0,
+                doc_id: did,
+                chapter_id: cid,
+                start_offset: None,
+                end_offset: None,
+                content: "赵云怀抱阿斗".into(),
+                created_at: now_ts(),
+            })
+            .await
+            .expect("create evidence");
+
+        // Two edges touching the same evidence.
+        let mut e1_id = 0i64;
+        let mut e2_id = 0i64;
+        for predicate in ["trusts", "protects"] {
+            let edge_id = store
+                .create_edge(&KnowledgeEdge {
+                    id: 0,
+                    source_id: zhaoyun,
+                    target_id: liubei,
+                    predicate: predicate.into(),
+                    properties: json!({}),
+                    origin: Origin::Observed,
+                    confidence: 0.8,
+                    valid_from: Some(41),
+                    valid_to: None,
+                    created_at: now_ts(),
+                })
+                .await
+                .expect("create edge");
+            store
+                .link_evidence(EvidenceSourceType::Edge, edge_id, eid)
+                .await
+                .expect("link edge evidence");
+            if e1_id == 0 {
+                e1_id = edge_id;
+            } else {
+                e2_id = edge_id;
+            }
+        }
+
+        let evs = store
+            .get_evidence_for_many(EvidenceSourceType::Edge, &[e1_id, e2_id])
+            .await
+            .expect("bulk evidence");
+        assert_eq!(
+            evs.len(),
+            2,
+            "two edge links to the same evidence → two rows (dedup is inspect_entity's job)"
+        );
+        assert!(
+            evs.iter().all(|e| e.content.contains("阿斗")),
+            "evidence content preserved on every row"
+        );
+
+        let empty = store
+            .get_evidence_for_many(EvidenceSourceType::Edge, &[])
+            .await
+            .expect("empty bulk");
+        assert!(empty.is_empty(), "empty input → empty output");
     }
 
     /// Objective: Verify `entity_timeline` orders entries by chapter and

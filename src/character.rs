@@ -321,8 +321,8 @@ impl SQLiteCharacterStore {
         // uses the same rollback-journal mode, and mixing WAL on one connection
         // with rollback journal on another connection to the SAME file leaves
         // `-wal`/`-shm` sidecars that the next process reads as "file is not a
-        // database". Both stores must agree on the journal mode for the shared
-        // DB used by integration tests (`/tmp/lorescope_sanguo.db`).
+        // database". Both stores must agree on the journal mode for a shared
+        // DB file (e.g. integration-test fixtures).
         conn.execute_batch(
             "PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;",

@@ -1,15 +1,15 @@
-# Contributing to memory_distill
+# Contributing to Mnemosyne
 
-Thanks for your interest in improving Cognitive Memory MCP Server! This
-document explains how to get set up, the conventions we follow, and how to
-submit changes.
+Thanks for your interest in improving the Mnemosyne memory distillation
+engine! This document explains how to get set up, the conventions we follow,
+and how to submit changes.
 
 ## Getting started
 
 ```bash
 # Clone and build
-git clone https://github.com/TimWood/memory_distill
-cd memory_distill
+git clone https://github.com/Timwood0x10/Mnemosyne
+cd Mnemosyne
 cargo build
 
 # Run the test suite (unit + doc tests)
