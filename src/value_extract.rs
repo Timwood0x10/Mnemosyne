@@ -48,12 +48,11 @@ impl AnchorSeeds {
     /// (unlike the validator's fallback tables, high-value categories are
     /// user-defined and have no sensible builtin default).
     pub fn load() -> Result<Self> {
-        let path = std::env::var("ANCHOR_SEEDS_PATH")
-            .unwrap_or_else(|_| "config/anchor_seeds.json".to_string());
+        let path = crate::config::resolve_resource_path("config/anchor_seeds.json");
         let raw = std::fs::read_to_string(&path)
-            .map_err(|e| crate::error::Error::Config(format!("read {path}: {e}")))?;
+            .map_err(|e| crate::error::Error::Config(format!("read {path:?}: {e}")))?;
         serde_json::from_str(&raw)
-            .map_err(|e| crate::error::Error::Config(format!("parse {path}: {e}")))
+            .map_err(|e| crate::error::Error::Config(format!("parse {path:?}: {e}")))
     }
 
     /// Flatten into `(category, seeds)` pairs for the classifier builder.

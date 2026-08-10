@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::cognition::FactStore;
-use crate::config::PERSONA_PROTOTYPES_PATH;
+use crate::config::resolve_resource_path;
 use crate::embed::EmbeddingService;
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
@@ -49,8 +49,7 @@ impl PersonaCheckTool {
         fact_store: Arc<SqliteFactStore>,
         embedder: Arc<dyn EmbeddingService>,
     ) -> Self {
-        let path = std::env::var("PERSONA_PROTOTYPES_PATH")
-            .unwrap_or_else(|_| PERSONA_PROTOTYPES_PATH.to_string());
+        let path = resolve_resource_path("config/persona_prototypes.json");
         let (cache, thresholds) = match load_prototype_config(&path) {
             Ok(cfg) => {
                 let thresholds = cfg.thresholds;

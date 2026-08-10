@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
@@ -8,35 +8,45 @@ use crate::error::{Error, Result};
 
 /// Resolve a runtime resource file (config/lexicon JSON) to a usable path.
 ///
-/// Priority (first match wins):
-/// 1. `env_var` — explicit override (e.g. `DICTIONARY_PATH`).
-/// 2. relative to the **current working directory** (`config/…`).
-/// 3. relative to the **executable's directory** (installed binary layout).
+/// A single optional override — `MNEMOSYNE_HOME` — sets the resource root;
+/// when unset the root is auto-detected: the current working directory if it
+/// looks like an install root (contains `config/` or `lexicon/`), otherwise
+/// the executable's directory. `relative` is a path under that root
+/// (`config/dictionary.json`, `lexicon/packs/…`).
 ///
-/// The last fallback is the cwd-relative path, so callers that resolve a
-/// missing file still report a predictable path instead of a compile-time
+/// This replaces the previous per-file `*_PATH` env vars (DICTIONARY_PATH,
+/// FACTION_MAP_PATH, …) with one root override, and kills the compile-time
 /// `env!("CARGO_MANIFEST_DIR")` baked into the binary (which made releases
-/// fail on every machine except the CI builder — the bug this replaces).
+/// fail on every machine except the CI builder).
 #[must_use]
-pub fn resolve_resource_path(env_var: &str, relative: &str) -> PathBuf {
-    if let Ok(p) = std::env::var(env_var) {
-        if !p.is_empty() {
-            return PathBuf::from(p);
+pub fn resolve_resource_path(relative: &str) -> PathBuf {
+    resource_root().join(relative)
+}
+
+/// Locate the resource root: `MNEMOSYNE_HOME` if set, else an install-looking
+/// cwd, else the executable's directory, else the cwd as a last resort.
+fn resource_root() -> PathBuf {
+    if let Ok(home) = std::env::var("MNEMOSYNE_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
         }
     }
-    let cwd_relative = PathBuf::from(relative);
-    if cwd_relative.is_file() {
-        return cwd_relative;
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if looks_like_root(&cwd) {
+        return cwd;
     }
     if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let exe_relative = dir.join(relative);
-            if exe_relative.is_file() {
-                return exe_relative;
-            }
+        if let Some(dir) = exe.parent() && looks_like_root(dir) {
+            return dir.to_path_buf();
         }
     }
-    cwd_relative
+    cwd
+}
+
+/// An install root carries either `config/` or `lexicon/` (the two resource
+/// trees the server reads at runtime).
+fn looks_like_root(dir: &Path) -> bool {
+    dir.join("config").is_dir() || dir.join("lexicon").is_dir()
 }
 
 /// Top-level server configuration.

@@ -17,7 +17,9 @@ use crate::cognition::{Fact, FactStore, FactType};
 use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
 
-/// Default config path used when the `DECAY_CONFIG_PATH` env var is unset.
+/// Default config path (relative to the resource root) for decay settings.
+/// The root itself is resolved at runtime via
+/// [`crate::config::resolve_resource_path`].
 pub const DECAY_CONFIG_PATH: &str = "config/decay_config.json";
 
 /// Seconds per day, used to convert a fact's age into days.
@@ -85,17 +87,16 @@ impl Default for DecayConfig {
 }
 
 impl DecayConfig {
-    /// Load the config from `DECAY_CONFIG_PATH` (default `config/decay_config.json`).
-    /// A missing or unreadable file silently falls back to defaults so the
-    /// server always runs.
+    /// Load the config from `config/decay_config.json` under the runtime
+    /// resource root. A missing or unreadable file silently falls back to
+    /// defaults so the server always runs.
     #[must_use]
     pub fn load() -> Self {
-        let path =
-            std::env::var("DECAY_CONFIG_PATH").unwrap_or_else(|_| DECAY_CONFIG_PATH.to_string());
-        match Self::load_from_path(&path) {
+        let path = crate::config::resolve_resource_path(DECAY_CONFIG_PATH);
+        match Self::load_from_path(&path.to_string_lossy()) {
             Ok(cfg) => cfg,
             Err(err) => {
-                tracing::warn!("decay config unavailable at {path}: {err}; using defaults");
+                tracing::warn!("decay config unavailable at {path:?}: {err}; using defaults");
                 Self::default()
             }
         }

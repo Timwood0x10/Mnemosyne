@@ -30,8 +30,7 @@ struct DialogAddressRuleConfig {
 }
 
 fn load_config() -> RelationRulesConfig {
-    let path = std::env::var("RELATION_RULES_PATH")
-        .unwrap_or_else(|_| "config/relation_rules.json".to_string());
+    let path = crate::config::resolve_resource_path("config/relation_rules.json");
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())

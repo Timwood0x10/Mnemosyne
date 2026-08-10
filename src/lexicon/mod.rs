@@ -911,20 +911,40 @@ fn simple_hash(lexemes: &[Lexeme]) -> String {
 
 // ── Global registry instance ────────────────────────────────────────────────
 
-static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
-    // Resolve the core lexicon at runtime (DICTIONARY_PATH env override, then
-    // cwd, then the executable's directory) instead of baking a compile-time
-    // `env!("CARGO_MANIFEST_DIR")` into the binary — a baked path made every
-    // release fail with FileLoad except on the CI builder.
-    let core_path = crate::config::resolve_resource_path(
-        "DICTIONARY_PATH",
-        "config/dictionary.json",
-    );
-    let registry = RegistryBuilder::new()
-        .load_core(&core_path)
-        .expect("Failed to load core lexicon from config/dictionary.json")
+/// A registry with no lexemes — the fail-soft fallback when the core lexicon
+/// cannot be loaded. An empty builder always builds successfully (an empty
+/// layer passes validation and merging trivially), so this never panics.
+fn empty_registry() -> LexiconRegistry {
+    RegistryBuilder::new()
         .build()
-        .expect("Core lexicon validation failed");
+        .expect("an empty registry always builds")
+}
+
+static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
+    // Resolve the core lexicon at runtime from the resource root
+    // (MNEMOSYNE_HOME override, else the install root) instead of baking a
+    // compile-time `env!("CARGO_MANIFEST_DIR")` into the binary — a baked
+    // path made every release fail with FileLoad except on the CI builder.
+    //
+    // Fail soft instead of panicking on first use (mirrors `dictionary::DICT`):
+    // a missing/corrupt core lexicon used to abort the process the moment any
+    // caller touched the global registry. Degrade to an EMPTY registry
+    // (lookups just miss) and log the cause, so a deployment without the
+    // config stays alive and diagnosable.
+    let core_path = crate::config::resolve_resource_path("config/dictionary.json");
+    let registry = match RegistryBuilder::new().load_core(&core_path) {
+        Ok(builder) => match builder.build() {
+            Ok(reg) => reg,
+            Err(e) => {
+                eprintln!("warning: core lexicon validation failed ({e}); using an empty registry");
+                empty_registry()
+            }
+        },
+        Err(e) => {
+            eprintln!("warning: config/dictionary.json failed to load ({e}); using an empty registry");
+            empty_registry()
+        }
+    };
     RwLock::new(registry)
 });
 
@@ -940,10 +960,7 @@ pub fn global() -> std::sync::RwLockReadGuard<'static, LexiconRegistry> {
 
 /// Reload the global registry from the default core path.
 pub fn reload() -> Result<(), LexiconError> {
-    let core_path = crate::config::resolve_resource_path(
-        "DICTIONARY_PATH",
-        "config/dictionary.json",
-    );
+    let core_path = crate::config::resolve_resource_path("config/dictionary.json");
     let registry = RegistryBuilder::new().load_core(&core_path)?.build()?;
     // The assignment below cannot panic while holding the write guard, so
     // this expect never fires.
