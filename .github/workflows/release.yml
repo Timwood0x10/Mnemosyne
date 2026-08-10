@@ -118,17 +118,33 @@ jobs:
       # Rename the binary to a per-platform file name BEFORE uploading, so the
       # release job's merge-multiple download does not let the five binaries
       # (all named `mnemosyne`) overwrite each other in dist/.
+      # Note: `--profile ci` outputs to target/<triple>/ci/ (not release/) —
+      # a custom profile's artifacts live in a directory named after itself.
       - name: Rename binary per platform
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/mnemosyne${{ matrix.ext }} \
+          cp target/${{ matrix.target }}/ci/mnemosyne${{ matrix.ext }} \
              mnemosyne-${{ matrix.target }}${{ matrix.ext }}
+
+      # Ship the customizable observation-marker word lists WITH the binary:
+      # the runtime resolves them from the executable's directory, so a
+      # download that puts the binary and the two markers_*.json files side by
+      # side works out of the box, and users can edit the JSON to customize
+      # what conversations produce facts. Copied to the artifact root so the
+      # release job's merge-multiple flattens them next to the binary.
+      - name: Stage marker word lists
+        shell: bash
+        run: |
+          cp config/markers_zh.json config/markers_en.json .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mnemosyne-${{ matrix.target }}
-          path: mnemosyne-${{ matrix.target }}${{ matrix.ext }}
+          path: |
+            mnemosyne-${{ matrix.target }}${{ matrix.ext }}
+            markers_zh.json
+            markers_en.json
           if-no-files-found: error
 
   release:

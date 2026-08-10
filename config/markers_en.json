@@ -4,8 +4,12 @@
     "actions": {
       "love": "preference (strong positive)",
       "like": "preference (positive)",
+      "dislike": "preference (negative)",
       "plan": "goal / plan",
       "want": "wish / desire",
+      "belief": "opinion / belief (think/believe/agree)",
+      "stuck": "difficulty / blocked",
+      "life_event": "major life event (moved/quit/breakup/married)",
       "feel": "emotion / body state"
     },
     "note": "Markers match case-sensitively with `find`; lowercase covers the common case ('I love it', 'she plans to'). Multi-word markers (burned out, heartbroken) avoid single-word false positives."
@@ -24,6 +28,22 @@
     "fond of",
     "keen on",
     "good at"
+  ],
+  "dislike": [
+    "hate",
+    "dislike",
+    "despise",
+    "loathe",
+    "can't stand",
+    "sick of",
+    "tired of",
+    "fed up with",
+    "annoying",
+    "disgusting",
+    "gross",
+    "cringe",
+    "nope",
+    "yikes"
   ],
   "plan": [
     "plan",
@@ -53,7 +73,58 @@
     "need to",
     "gotta",
     "wanna",
-    "dying to"
+    "dying to",
+    "would love to"
+  ],
+  "belief": [
+    "think",
+    "believe",
+    "feel that",
+    "agree",
+    "disagree",
+    "support",
+    "oppose",
+    "in my opinion",
+    "i feel like",
+    "i strongly believe",
+    "i'm convinced",
+    "personally i"
+  ],
+  "stuck": [
+    "stuck",
+    "struggling",
+    "can't figure out",
+    "blocked",
+    "confused",
+    "lost",
+    "don't know how",
+    "having trouble",
+    "hard time",
+    "giving up on",
+    "no idea",
+    "at a loss"
+  ],
+  "life_event": [
+    "moved",
+    "moving",
+    "quit",
+    "got fired",
+    "laid off",
+    "promoted",
+    "new job",
+    "broke up",
+    "break up",
+    "got married",
+    "divorced",
+    "graduated",
+    "graduating",
+    "pregnant",
+    "bought a house",
+    "started a business",
+    "retired",
+    "engaged",
+    "got back together",
+    "lost my job"
   ],
   "feel": [
     "happy",
@@ -137,6 +208,21 @@
     "unhinged",
     "big mood",
     "dead inside",
-    "fomo"
+    "fomo",
+    "rizz",
+    "mid",
+    "based",
+    "cap",
+    "no cap",
+    "lowkey",
+    "highkey",
+    "delulu",
+    "cooked",
+    "locked in",
+    "rent free",
+    "it's giving",
+    "iconic",
+    "chef's kiss",
+    "main character"
   ]
 }

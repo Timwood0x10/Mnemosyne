@@ -494,38 +494,52 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
                 }
             }
 
-            actions.iter().filter_map(move |(marker, action)| {
-                message.content.find(marker).map(|offset| {
-                    let mut modifiers = vec![crate::cognition::Modifier {
-                        key: "content".to_string(),
-                        value: message.content.clone(),
-                    }];
-                    if negated {
-                        modifiers.push(crate::cognition::Modifier {
-                            key: "negated".to_string(),
-                            value: "true".to_string(),
-                        });
+            // Collect every marker hit first, then emit ONE observation per
+            // action. A sentence matching several same-action markers
+            // (失眠+加班+压力+好累 → four feel markers) must yield a SINGLE
+            // feel observation — otherwise every near-identical fact pollutes
+            // the cognitive snapshot with repeated emotion rows.
+            let mut seen_actions: Vec<&str> = Vec::new();
+            let mut hits: Vec<(usize, &str, &str)> = Vec::new(); // (offset, action, marker)
+            for (marker, action) in actions {
+                if let Some(offset) = message.content.find(marker) {
+                    if !seen_actions.contains(&action.as_str()) {
+                        seen_actions.push(action.as_str());
+                        hits.push((offset, action.as_str(), marker.as_str()));
                     }
-                    if uncertain {
-                        modifiers.push(crate::cognition::Modifier {
-                            key: "uncertain".to_string(),
-                            value: "true".to_string(),
-                        });
-                    }
-                    Observation {
-                        subject: subject.clone(),
-                        action: (*action).to_string(),
-                        object: None,
-                        modifiers,
-                        timestamp: None,
-                        evidence: Some(crate::cognition::EvidenceRef {
-                            doc_id: 0,
-                            offset,
-                            length: marker.len(),
-                            text: message.content.clone(),
-                        }),
-                    }
-                })
+                }
+            }
+
+            hits.into_iter().map(move |(offset, action, marker)| {
+                let mut modifiers = vec![crate::cognition::Modifier {
+                    key: "content".to_string(),
+                    value: message.content.clone(),
+                }];
+                if negated {
+                    modifiers.push(crate::cognition::Modifier {
+                        key: "negated".to_string(),
+                        value: "true".to_string(),
+                    });
+                }
+                if uncertain {
+                    modifiers.push(crate::cognition::Modifier {
+                        key: "uncertain".to_string(),
+                        value: "true".to_string(),
+                    });
+                }
+                Observation {
+                    subject: subject.clone(),
+                    action: action.to_string(),
+                    object: None,
+                    modifiers,
+                    timestamp: None,
+                    evidence: Some(crate::cognition::EvidenceRef {
+                        doc_id: 0,
+                        offset,
+                        length: marker.len(),
+                        text: message.content.clone(),
+                    }),
+                }
             })
         })
         .collect()
@@ -817,6 +831,36 @@ mod tests {
         assert!(
             obs2.is_empty(),
             "想象 must NOT match a bare 想 marker, got {obs2:?}"
+        );
+    }
+
+    /// Objective: Verify duplicate-fact inflation is fixed — one message
+    /// matching several SAME-action markers must yield a single observation
+    /// for that action (失眠+加班+压力+好累 all → feel, so ONE feel obs, not
+    /// four near-identical ones), while DIFFERENT actions are kept.
+    /// Invariants: exactly one feel observation for the four-marker sentence;
+    /// a mixed sentence yields one obs per distinct action.
+    #[test]
+    fn same_action_markers_dedup_to_single_observation() {
+        // All four markers map to `feel`: previously 4 observations.
+        let msgs = vec![Message::new("user", "最近天天失眠，还加班，压力好大，好累")];
+        let obs = compile_user_observations(&msgs, 1);
+        let feel_count = obs.iter().filter(|o| o.action == "feel").count();
+        assert_eq!(
+            feel_count, 1,
+            "four feel markers in one sentence must yield ONE feel observation, got {obs:?}"
+        );
+        // Different actions in one sentence are all kept.
+        let mixed = vec![Message::new("user", "我打算学钢琴，也很开心")];
+        let obs2 = compile_user_observations(&mixed, 1);
+        let actions: Vec<&str> = obs2.iter().map(|o| o.action.as_str()).collect();
+        assert!(
+            actions.contains(&"plan"),
+            "plan marker kept alongside feel, got {actions:?}"
+        );
+        assert!(
+            actions.contains(&"feel"),
+            "feel marker kept alongside plan, got {actions:?}"
         );
     }
 

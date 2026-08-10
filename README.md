@@ -298,6 +298,13 @@ mnemosyne --version
 # Windows: rename to mnemosyne.exe and add its folder to PATH
 ```
 
+The release also ships `markers_zh.json` and `markers_en.json` — the
+customizable word lists that decide which conversations produce facts. Put
+them in the same directory as the binary (`/usr/local/bin/` in the example
+above, or any directory you run the binary from) to customize the vocabulary;
+edit them and re-run without recompiling. If they are absent the binary falls
+back to built-in defaults.
+
 ### Option 2 — Build from source
 
 Requires a Rust toolchain (see `rust-toolchain` / Cargo.toml for the MSRV).

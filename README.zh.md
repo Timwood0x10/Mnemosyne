@@ -272,6 +272,11 @@ mnemosyne --version
 # Windows：改名为 mnemosyne.exe，并把所在目录加入 PATH
 ```
 
+Release 同时附带 `markers_zh.json` 和 `markers_en.json` 两个词表文件——
+它们决定哪些对话内容能产出事实，可自行定制。把这两个文件放到二进制同目录
+（如上例的 `/usr/local/bin/`，或你运行二进制的任意目录）即可生效；直接编辑
+词表后重启即可，无需重新编译。缺失时二进制自动使用内置默认词表，功能不受影响。
+
 ### 方式二：源码构建
 
 需要 Rust 工具链（MSRV 见 `rust-toolchain` / Cargo.toml）。
