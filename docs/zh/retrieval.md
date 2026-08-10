@@ -50,8 +50,8 @@ flowchart TD
 **为什么**：
 - **零嵌入成本可用**：不依赖任何 embedding 服务也能完成检索——
   部署、测试、离线全部可行。
-- **渐进增强**：需要语义相似时再加向量（本地 ONNX `all-MiniLM-L6-v2`
-  或远程 provider），检索层对两种形态透明。
+- **渐进增强**：需要语义相似时再加向量（远程 embedding provider，
+  如 OpenAI/Ollama），检索层对两种形态透明。
 
 ### 3.2 为什么关键词要 FTS5 与 BM25 双路径？
 

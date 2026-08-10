@@ -160,9 +160,9 @@ matches are answered directly from the index — O(log n), no embedding needed.
 
 ### 2. Vector retrieval — cosine similarity
 
-When `MEMORY_VECTOR_DIM>0`, text is embedded once (local ONNX
-`all-MiniLM-L6-v2`, 384-dim, via the `local-embed` feature, or a remote
-provider) and queried by cosine similarity:
+When `MEMORY_VECTOR_DIM>0` and an embedding provider is configured
+(`MEMORY_EMBEDDING_PROVIDER=openai|ollama`, a remote API), text is embedded
+and queried by cosine similarity:
 
 - `brute_force.rs` — exact O(N) full scan (the ground truth);
 - `hnsw.rs` — approximate nearest neighbor for large graphs, with an agreed
@@ -276,36 +276,74 @@ cleartext.
 
 ## Installation
 
-### Option 1 — Prebuilt binaries (recommended)
+### Option 1 — Install script (recommended)
 
-Download the binary for your platform from the
+`scripts/install.sh` detects your platform/architecture, downloads the
+matching release archive, and unpacks it into a `.mnemosyne/` directory:
+
+```bash
+# macOS / Linux (bash)
+curl -fsSL https://raw.githubusercontent.com/Timwood0x10/Mnemosyne/main/scripts/install.sh | bash
+
+# Or clone and run it locally
+git clone https://github.com/Timwood0x10/Mnemosyne.git
+cd Mnemosyne
+./scripts/install.sh          # latest release
+./scripts/install.sh v0.1.2   # a specific version
+```
+
+What it produces — everything lives in one directory, so the binary always
+finds its resources next to itself:
+
+```
+~/.mnemosyne/
+├── mnemosyne            # the binary (mnemosyne.exe on Windows)
+├── markers_zh.json      # Chinese observation-marker word list (editable)
+└── markers_en.json      # English observation-marker word list (editable)
+```
+
+Run it:
+
+```bash
+~/.mnemosyne/mnemosyne serve
+```
+
+### Option 2 — Manual download
+
+Download the archive for your platform from the
 [Releases](https://github.com/Timwood0x10/Mnemosyne/releases) page:
 
-| Platform | File |
+| Platform | Archive |
 |---|---|
-| macOS (Apple Silicon) | `mnemosyne-aarch64-apple-darwin` |
-| macOS (Intel) | `mnemosyne-x86_64-apple-darwin` |
-| Linux (arm64) | `mnemosyne-aarch64-unknown-linux-gnu` |
-| Linux (x86_64) | `mnemosyne-x86_64-unknown-linux-gnu` |
-| Windows (x86_64) | `mnemosyne-x86_64-pc-windows-msvc.exe` |
+| macOS (Apple Silicon) | `mnemosyne-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `mnemosyne-x86_64-apple-darwin.tar.gz` |
+| Linux (arm64) | `mnemosyne-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux (x86_64) | `mnemosyne-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows (x86_64) | `mnemosyne-x86_64-pc-windows-msvc.tar.gz` |
 
 ```bash
 # macOS / Linux
-chmod +x mnemosyne-*
-sudo mv mnemosyne-* /usr/local/bin/mnemosyne
-mnemosyne --version
+mkdir -p ~/.mnemosyne && tar -xzf mnemosyne-<platform>.tar.gz -C ~/.mnemosyne
+chmod +x ~/.mnemosyne/mnemosyne
+~/.mnemosyne/mnemosyne --version
 
-# Windows: rename to mnemosyne.exe and add its folder to PATH
+# Windows: extract with your archive tool, then run mnemosyne.exe
 ```
 
-The release also ships `markers_zh.json` and `markers_en.json` — the
-customizable word lists that decide which conversations produce facts. Put
-them in the same directory as the binary (`/usr/local/bin/` in the example
-above, or any directory you run the binary from) to customize the vocabulary;
-edit them and re-run without recompiling. If they are absent the binary falls
-back to built-in defaults.
+### Customizing the marker word lists
 
-### Option 2 — Build from source
+`markers_zh.json` and `markers_en.json` decide which words in a conversation
+produce facts. Each file maps an action (`feel`, `plan`, `want`, `dislike`,
+`belief`, `stuck`, `life_event`, …) to a list of trigger words. Edit them to:
+
+- add your own vocabulary (modern slang, domain terms, personal quirks);
+- remove words that cause false positives;
+- tune what the engine extracts about the user.
+
+No recompile needed — just edit the JSON and restart. If the files are absent
+the binary falls back to built-in defaults.
+
+### Option 3 — Build from source
 
 Requires a Rust toolchain (see `rust-toolchain` / Cargo.toml for the MSRV).
 
@@ -391,25 +429,6 @@ the novel's canonical entity names/aliases for the compiler's dictionary
 | `MEMORY_EMBEDDING_PROVIDER` | `none` | `none` / `openai` / `ollama` |
 | `MEMORY_RETRIEVAL_MODE` | `keyword` | `keyword` / `vector` / `hybrid` |
 | `FACTION_MAP_PATH` | `config/faction_map.json` | Faction map configuration |
-
-### Local ONNX Embedding (`--features local-embed`)
-
-The project ships a self-contained ONNX embedder — **no remote server, no API
-key, nothing to deploy**:
-
-- Provider: `FastEmbedProvider` (`src/entity_resolver/embedding.rs`)
-- Model: `all-MiniLM-L6-v2` (ONNX local, **384-dim**), downloaded once on
-  first use and cached locally (~90 MB); offline afterwards.
-- Enable: build/test with the `local-embed` Cargo feature:
-
-```bash
-cargo test --features local-embed --test real_embed_probe   # real-embed probe
-cargo build --features local-embed                          # enable at build
-```
-
-- The `RemoteEmbedder` path (`MEMORY_EMBEDDING_PROVIDER=openai|ollama`) is the
-  **alternative** that needs an upstream server; the self-contained ONNX path
-  is the zero-deployment default for local use.
 
 ### Development
 

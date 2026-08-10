@@ -53,8 +53,8 @@ enables vector search; `RetrievalMode` can select `vector` / `hybrid`.
 **Why**:
 - **Usable at zero embedding cost**: retrieval works with no embedding service —
   deploy, test, offline all viable.
-- **Progressive enhancement**: add vectors (local ONNX `all-MiniLM-L6-v2` or a
-  remote provider) when semantic similarity is needed; the layer is transparent
+- **Progressive enhancement**: add vectors (remote embedding provider such as
+  OpenAI/Ollama) when semantic similarity is needed; the layer is transparent
   to both.
 
 ### 3.2 Why both FTS5 and BM25 for keywords?
