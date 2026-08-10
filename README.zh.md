@@ -150,8 +150,7 @@ LIKE 通配符已转义。精确与子串匹配直接走索引——O(log n)，�
 
 ### 2. 向量检索 — 余弦相似度
 
-当 `MEMORY_VECTOR_DIM>0`，文本嵌入一次（本地 ONNX `all-MiniLM-L6-v2`，384 维，
-经 `local-embed` 特性，或远程 provider）后按余弦相似度查询：
+当 `MEMORY_VECTOR_DIM>0` 且配置了嵌入 provider（`MEMORY_EMBEDDING_PROVIDER=openai|ollama`，远程 API）时，文本嵌入后按余弦相似度查询：
 
 - `brute_force.rs` — 精确 O(N) 全扫（ground truth）；
 - `hnsw.rs` — 大图近似最近邻；对退化输入有约定：零向量返回距离 `sqrt(2)`
@@ -219,7 +218,7 @@ HTTP 传输暴露两个端点：`GET /sse`（Server-Sent Events 流）与 `POST 
 {
   "mcpServers": {
     "mnemosyne": {
-      "url": "http://host:8080/sse",
+      "url": "http://host:5609/sse",
       "headers": {
         "Authorization": "Bearer <your-token>",
         "x-mcp-session-id": "<stable-id-per-client>"
@@ -251,28 +250,70 @@ HTTP 服务未提供 `--http-token` 时拒绝启动（见 [配置](#配置)）�
 
 ## 安装
 
-### 方式一：下载预编译二进制（推荐）
+### 方式一：安装脚本（推荐）
 
-从 [Releases](https://github.com/Timwood0x10/Mnemosyne/releases) 页面下载对应平台的二进制：
+`scripts/install.sh` 自动检测你的平台/架构，下载对应的 Release 压缩包，并解压到 `.mnemosyne/` 目录：
 
-| 平台 | 文件名 |
+```bash
+# macOS / Linux（bash）
+curl -fsSL https://raw.githubusercontent.com/Timwood0x10/Mnemosyne/main/scripts/install.sh | bash
+
+# 或 clone 后在本地运行
+git clone https://github.com/Timwood0x10/Mnemosyne.git
+cd Mnemosyne
+./scripts/install.sh          # 安装最新版本
+./scripts/install.sh v0.1.2   # 安装指定版本
+```
+
+安装后的目录结构——所有文件放在同一目录，二进制启动时自动在自身旁边找到资源：
+
+```
+~/.mnemosyne/
+├── mnemosyne            # 二进制（Windows 为 mnemosyne.exe）
+├── markers_zh.json      # 中文观察词表（可编辑）
+└── markers_en.json      # 英文观察词表（可编辑）
+```
+
+运行：
+
+```bash
+~/.mnemosyne/mnemosyne serve
+```
+
+### 方式二：手动下载
+
+从 [Releases](https://github.com/Timwood0x10/Mnemosyne/releases) 页面下载对应平台的压缩包：
+
+| 平台 | 压缩包 |
 |---|---|
-| macOS（Apple Silicon） | `mnemosyne-aarch64-apple-darwin` |
-| macOS（Intel） | `mnemosyne-x86_64-apple-darwin` |
-| Linux（arm64） | `mnemosyne-aarch64-unknown-linux-gnu` |
-| Linux（x86_64） | `mnemosyne-x86_64-unknown-linux-gnu` |
-| Windows（x86_64） | `mnemosyne-x86_64-pc-windows-msvc.exe` |
+| macOS（Apple Silicon） | `mnemosyne-aarch64-apple-darwin.tar.gz` |
+| macOS（Intel） | `mnemosyne-x86_64-apple-darwin.tar.gz` |
+| Linux（arm64） | `mnemosyne-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux（x86_64） | `mnemosyne-x86_64-unknown-linux-gnu.tar.gz` |
+| Windows（x86_64） | `mnemosyne-x86_64-pc-windows-msvc.tar.gz` |
 
 ```bash
 # macOS / Linux
-chmod +x mnemosyne-*
-sudo mv mnemosyne-* /usr/local/bin/mnemosyne
-mnemosyne --version
+mkdir -p ~/.mnemosyne && tar -xzf mnemosyne-<平台>.tar.gz -C ~/.mnemosyne
+chmod +x ~/.mnemosyne/mnemosyne
+~/.mnemosyne/mnemosyne --version
 
-# Windows：改名为 mnemosyne.exe，并把所在目录加入 PATH
+# Windows：用解压工具解压，然后运行 mnemosyne.exe
 ```
 
-### 方式二：源码构建
+### 自定义词表
+
+`markers_zh.json` 和 `markers_en.json` 决定对话中哪些词能产出事实。每个文件把
+动作（`feel`、`plan`、`want`、`dislike`、`belief`、`stuck`、`life_event` 等）
+映射到一组触发词。你可以：
+
+- 添加自己的词汇（网络流行语、领域术语、个人习惯表达）；
+- 删除产生误判的词；
+- 调整引擎从对话中提取用户信息的重点。
+
+无需重新编译——直接编辑 JSON 后重启即可。文件缺失时二进制自动使用内置默认词表。
+
+### 方式三：源码构建
 
 需要 Rust 工具链（MSRV 见 `rust-toolchain` / Cargo.toml）。
 
@@ -372,22 +413,6 @@ cargo test --test sanguo_compile e2e_sanguo -- --nocapture
 | `MEMORY_EMBEDDING_PROVIDER` | `none` | `none` / `openai` / `ollama` |
 | `MEMORY_RETRIEVAL_MODE` | `keyword` | `keyword` / `vector` / `hybrid` |
 | `FACTION_MAP_PATH` | `config/faction_map.json` | 阵营映射配置 |
-
-### 本地 ONNX 嵌入（`--features local-embed`）
-
-项目内置自包含 ONNX 嵌入器——**无远程服务器、无 API key、无需部署**：
-
-- Provider：`FastEmbedProvider`（`src/entity_resolver/embedding.rs`）
-- 模型：`all-MiniLM-L6-v2`（ONNX 本地，**384 维**），首次使用下载并缓存（约 90 MB），之后离线可用。
-- 启用：构建/测试时加 `local-embed` Cargo feature：
-
-```bash
-cargo test --features local-embed --test real_embed_probe
-cargo build --features local-embed
-```
-
-- `RemoteEmbedder`（`MEMORY_EMBEDDING_PROVIDER=openai|ollama`）是需要上游服务器的
-  **替代方案**；自包含 ONNX 是本地零部署默认。
 
 ---
 

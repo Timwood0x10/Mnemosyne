@@ -174,8 +174,13 @@ pub struct Dictionary {
 
 impl Dictionary {
     /// Load the dictionary from the default path (`config/dictionary.json`).
+    ///
+    /// The path is resolved at runtime from the resource root — the
+    /// `MNEMOSYNE_HOME` env override, else the install root — NOT a
+    /// compile-time `env!("CARGO_MANIFEST_DIR")` baked into the binary (which
+    /// made every release fail except on the CI builder).
     pub fn load_default() -> Result<Self, Box<dyn std::error::Error>> {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
+        let path = crate::config::resolve_resource_path("config/dictionary.json");
         Self::load(&path)
     }
 

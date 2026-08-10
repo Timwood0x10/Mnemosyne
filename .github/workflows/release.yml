@@ -115,20 +115,41 @@ jobs:
       - name: Build release binary
         run: cargo build --profile ci --target ${{ matrix.target }} --bin mnemosyne
 
-      # Rename the binary to a per-platform file name BEFORE uploading, so the
-      # release job's merge-multiple download does not let the five binaries
-      # (all named `mnemosyne`) overwrite each other in dist/.
+      # Rename the binary to a plain per-platform name (the archive keeps the
+      # platform in its FILENAME, the inner binary is uniformly `mnemosyne`
+      # so install.sh can extract and use it without platform-specific names).
+      # Note: `--profile ci` outputs to target/<triple>/ci/ (not release/) —
+      # a custom profile's artifacts live in a directory named after itself.
       - name: Rename binary per platform
         shell: bash
         run: |
-          cp target/${{ matrix.target }}/release/mnemosyne${{ matrix.ext }} \
-             mnemosyne-${{ matrix.target }}${{ matrix.ext }}
+          cp target/${{ matrix.target }}/ci/mnemosyne${{ matrix.ext }} \
+             mnemosyne${{ matrix.ext }}
+
+      # Ship the customizable observation-marker word lists WITH the binary:
+      # the runtime resolves them from the executable's directory, so a
+      # download that puts the binary and the two markers_*.json files side by
+      # side works out of the box, and users can edit the JSON to customize
+      # what conversations produce facts.
+      - name: Stage marker word lists
+        shell: bash
+        run: |
+          cp config/markers_zh.json config/markers_en.json .
+
+      # Package everything into ONE archive per platform. install.sh downloads
+      # this single file, extracts it into .mnemosyne/, and the binary finds
+      # the marker lists next to itself.
+      - name: Package platform archive
+        shell: bash
+        run: |
+          tar -czf mnemosyne-${{ matrix.target }}.tar.gz \
+              mnemosyne${{ matrix.ext }} markers_zh.json markers_en.json
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mnemosyne-${{ matrix.target }}
-          path: mnemosyne-${{ matrix.target }}${{ matrix.ext }}
+          path: mnemosyne-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -156,40 +177,40 @@ jobs:
           fi
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
 
-      - name: Download all platform binaries
+      - name: Download all platform archives
         uses: actions/download-artifact@v4
         with:
           path: dist
           # Merge every artifact's files into dist/ root so a plain
-          # `files: dist/*` glob picks up all five binaries (no nested
+          # `files: dist/*` glob picks up all five archives (no nested
           # per-artifact subdirectories to mismatch).
           merge-multiple: true
 
-      # Verify ALL five platform binaries exist BEFORE creating the release.
+      # Verify ALL five platform archives exist BEFORE creating the release.
       # softprops/action-gh-release creates the release first and uploads files
       # after — if files were missing it would publish a body-only release
       # (exactly the broken v0.1.0). Failing here prevents any release at all.
-      - name: Verify all 5 platform binaries present
+      - name: Verify all 5 platform archives present
         run: |
           MISSING=0
           for f in \
-            mnemosyne-aarch64-apple-darwin \
-            mnemosyne-x86_64-apple-darwin \
-            mnemosyne-aarch64-unknown-linux-gnu \
-            mnemosyne-x86_64-unknown-linux-gnu \
-            mnemosyne-x86_64-pc-windows-msvc.exe
+            mnemosyne-aarch64-apple-darwin.tar.gz \
+            mnemosyne-x86_64-apple-darwin.tar.gz \
+            mnemosyne-aarch64-unknown-linux-gnu.tar.gz \
+            mnemosyne-x86_64-unknown-linux-gnu.tar.gz \
+            mnemosyne-x86_64-pc-windows-msvc.tar.gz
           do
             if [ ! -f "dist/$f" ]; then echo "MISSING: $f"; MISSING=1; fi
           done
           if [ "$MISSING" -ne 0 ]; then exit 1; fi
-          echo "All 5 platform binaries present ✓"
+          echo "All 5 platform archives present ✓"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           # Body is read verbatim from release.md at the repo root.
           body_path: release.md
-          # Attach every downloaded binary (mac×2, linux×2, windows×1).
+          # Attach every downloaded archive (mac×2, linux×2, windows×1).
           files: dist/*
           # Tag/name taken from release.md's version line (e.g. v0.1.0).
           tag_name: ${{ steps.version.outputs.version }}

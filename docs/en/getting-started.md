@@ -44,7 +44,7 @@ The server starts in **stdio MCP mode**, listening for JSON-RPC 2.0 messages on 
 With the server running, send it a `tools/list` request (from another terminal):
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | nc -w1 localhost 8080
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | nc -w1 localhost 5609
 ```
 
 In stdio mode, you would typically connect through an MCP client. A quick test with a Python helper:

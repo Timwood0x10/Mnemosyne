@@ -22,7 +22,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::cognition::FactStore;
-use crate::config::PERSONA_CARDS_PATH;
+use crate::config::resolve_resource_path;
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
 use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
@@ -40,15 +40,14 @@ pub struct PersonaInjectTool {
 impl PersonaInjectTool {
     /// Construct the tool with the shared fact store.
     ///
-    /// The persona card JSON path is read from the `PERSONA_CARDS_PATH`
-    /// environment variable, defaulting to `config/persona_cards.json`.
+    /// The persona card JSON path is `config/persona_cards.json` under the
+    /// runtime resource root.
     #[must_use]
     pub fn new(fact_store: Arc<SqliteFactStore>) -> Self {
-        let path =
-            std::env::var("PERSONA_CARDS_PATH").unwrap_or_else(|_| PERSONA_CARDS_PATH.to_string());
+        let path = resolve_resource_path("config/persona_cards.json");
         Self {
             fact_store,
-            cards_path: path,
+            cards_path: path.to_string_lossy().into_owned(),
         }
     }
 }

@@ -44,7 +44,7 @@ cargo run --bin memory-mcp -- \
 服务器运行后，发送一个 `tools/list` 请求（从另一个终端）：
 
 ```bash
-echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | nc -w1 localhost 8080
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | nc -w1 localhost 5609
 ```
 
 在 stdio 模式下，通常通过 MCP 客户端连接。使用 Python 辅助快速测试：

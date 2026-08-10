@@ -30,10 +30,9 @@ pub struct NameValidationConfig {
     pub noun_tails: Vec<String>,
 }
 
-/// Load the config: env override → `config/name_validation.json` → fallback.
+/// Load the config: resource root `config/name_validation.json` → fallback.
 fn load_config() -> NameValidationConfig {
-    let path = std::env::var("NAME_VALIDATION_PATH")
-        .unwrap_or_else(|_| "config/name_validation.json".to_string());
+    let path = crate::config::resolve_resource_path("config/name_validation.json");
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())

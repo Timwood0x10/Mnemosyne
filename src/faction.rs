@@ -12,8 +12,7 @@ use std::sync::LazyLock;
 type FactionMap = HashMap<String, HashMap<&'static str, Vec<String>>>;
 
 fn load_faction_map() -> FactionMap {
-    let path =
-        std::env::var("FACTION_MAP_PATH").unwrap_or_else(|_| "config/faction_map.json".to_string());
+    let path = crate::config::resolve_resource_path("config/faction_map.json");
     // Parse with owned keys first, then leak the faction names once.
     let parsed: HashMap<String, HashMap<String, Vec<String>>> = std::fs::read_to_string(&path)
         .ok()

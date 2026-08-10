@@ -32,6 +32,39 @@ fn now_ts() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Whether a document title looks like a person name, i.e. worth
+/// materializing as the document's anchor `person` object.
+///
+/// Auto-generated titles (`generalize-1786331280`, session ids) and document
+/// filenames ("export.json") are NOT names — materializing them as `person`
+/// entities polluted the graph with fake nodes whose names were document
+/// titles. Only a CJK name-shaped title (2-6 ideographs) or a single
+/// Capitalized English word ("Alice", "Mr. Smith") qualifies.
+fn looks_like_person_name(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // CJK name: 2-6 contiguous ideographs.
+    let chars: Vec<char> = t.chars().collect();
+    if chars.iter().all(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
+        return (2..=6).contains(&chars.len());
+    }
+    // English name: a single Capitalized word, optionally with a title
+    // prefix ("Mr. Smith" → ends with a Capitalized surname).
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.is_empty() || words.len() > 3 {
+        return false;
+    }
+    let last = words[words.len() - 1];
+    let mut last_chars = last.chars();
+    let first = last_chars.next();
+    if !matches!(first, Some(c) if c.is_ascii_uppercase()) {
+        return false;
+    }
+    last_chars.all(|c| c.is_ascii_lowercase())
+}
+
 /// Counters for one pipeline run.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct PipelineStats {
@@ -189,9 +222,14 @@ pub async fn compile_source(
             "doc_type": doc.doc_type,
         });
 
-        // ③b+③c only apply to non-dialog documents; for dialogs `entity_id`
-        // stays `None` and evidence rows are persisted without an entity link.
-        let entity_id: Option<i64> = if is_dialog {
+        // ③b+③c only apply to non-dialog documents whose title is an actual
+        // person name; otherwise `entity_id` stays `None` and evidence rows
+        // are persisted without an entity link. Auto-generated titles
+        // ("generalize-1786331280") or filenames are NOT names — creating a
+        // `person` object named after them polluted the graph with fake
+        // entities (observed: knowledge_objects full of document titles
+        // instead of the characters inside the text).
+        let entity_id: Option<i64> = if is_dialog || !looks_like_person_name(&doc.title) {
             None
         } else {
             // ③b Entity upsert: reuse an existing object with the same title in
@@ -419,13 +457,20 @@ mod tests {
         );
     }
 
-    /// Objective: Verify a txt file compiles end-to-end (FileSource path).
-    /// Invariants: stats.documents == 1; objects >= 1.
+    /// Objective: Verify a txt file compiles end-to-end (FileSource path) and
+    /// extracts the person names from the body — not just the filename.
+    /// Invariants: stats.documents == 1; the character 刘备 from the body is
+    /// discovered (the old behavior materialized the FILE stem as a fake
+    /// `person` object instead of the text's people).
     #[tokio::test]
     async fn txt_compiles_into_general_model() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
         let path = std::env::temp_dir().join("lorescope_pipeline_test.txt");
-        std::fs::write(&path, "我计划下周发布新版本，决定用灰度方案。").expect("write");
+        std::fs::write(
+            &path,
+            "刘备说：我计划下周发布新版本。关羽答道：同意。刘备又说：那就按灰度方案来。关羽再道：好。",
+        )
+        .expect("write");
         let source = crate::knowledge::document_source::FileSource::new(&path);
         let stats = compile_source(&source, &profile(), &store, "t1")
             .await
@@ -433,7 +478,15 @@ mod tests {
         assert_eq!(stats.documents, 1);
         assert!(
             stats.objects >= 1,
-            "txt file must yield an entity, got {stats:?}"
+            "txt file must yield the body's people, got {stats:?}"
+        );
+        assert!(
+            store
+                .find_object_by_name("刘备", None)
+                .await
+                .expect("query")
+                .is_some(),
+            "刘备 (from the body) must be extracted as an entity"
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -500,12 +553,13 @@ mod tests {
     /// Objective: Verify entity upsert — compiling the same non-dialog text
     /// title twice reuses the existing entity instead of creating a duplicate.
     /// Invariants: first run objects == 1; second run objects == 0; exactly
-    /// one persisted object named after the title.
+    /// one persisted object named after the title (the title is a real name,
+    /// so it legitimately anchors the document's entity).
     #[tokio::test]
     async fn recompile_same_title_reuses_entity() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
         let source = crate::knowledge::document_source::RawTextSource::new(
-            "session-reuse",
+            "刘备",
             "export.json",
             "我喜欢 Rust，目标是稳定可靠。",
             "text",
@@ -522,11 +576,11 @@ mod tests {
         assert_eq!(second.objects, 0, "second run reuses, does not duplicate");
 
         let obj = store
-            .find_object_by_name("session-reuse", None)
+            .find_object_by_name("刘备", None)
             .await
             .expect("query")
             .expect("entity still present");
-        assert_eq!(obj.name, "session-reuse", "single entity persists");
+        assert_eq!(obj.name, "刘备", "single entity persists");
     }
 
     /// Objective: Verify relation sentences do NOT spawn placeholder Concept
@@ -538,7 +592,7 @@ mod tests {
     async fn relation_sentences_do_not_spawn_concepts() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
         let source = crate::knowledge::document_source::RawTextSource::new(
-            "session-rels",
+            "曹操",
             "export.json",
             "我喜欢简洁架构，目标是长期稳定。",
             "text",
@@ -555,7 +609,7 @@ mod tests {
         assert_eq!(stats.edges, 0, "no edges to placeholder targets");
 
         let obj = store
-            .find_object_by_name("session-rels", None)
+            .find_object_by_name("曹操", None)
             .await
             .expect("query")
             .expect("entity");
@@ -570,15 +624,15 @@ mod tests {
     /// Objective: Verify the general pipeline also lands in the V7 world model
     /// (`world_entities` + `world_entity_profiles`), which were previously
     /// left empty ("V7 integration").
-    /// Invariants: after compiling a text document, a `world_entities` row
-    /// exists named after the document, with at least one profile when hints
-    /// were extracted. Dialog titles are excluded by design (a session id is
-    /// not a person), so the V7 sync only covers non-dialog documents.
+    /// Invariants: after compiling a text document whose title is a real
+    /// person name, a `world_entities` row exists named after it, with at
+    /// least one profile when hints were extracted. Non-name titles (session
+    /// ids, generated ids) are excluded by design.
     #[tokio::test]
     async fn compile_writes_v7_world_entities() {
         let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
         let source = crate::knowledge::document_source::RawTextSource::new(
-            "session-v7",
+            "刘备",
             "export.json",
             "我喜欢简洁架构，目标是长期稳定。",
             "text",
@@ -590,12 +644,12 @@ mod tests {
         assert_eq!(stats.documents, 1, "one document compiled");
 
         let world = store
-            .find_world_entity("session-v7")
+            .find_world_entity("刘备")
             .await
             .expect("query world entity")
             .expect("world_entities row must be written by compile");
         assert_eq!(world.entity_type, "person", "default entity type");
-        assert_eq!(world.name, "session-v7", "entity name matches document");
+        assert_eq!(world.name, "刘备", "entity name matches the title");
     }
 
     /// Objective: Verify dialog titles do NOT leak into the V7 world model —

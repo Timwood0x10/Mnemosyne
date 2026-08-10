@@ -88,8 +88,7 @@ struct EmotionLexicon {
 }
 
 static LEXICON: LazyLock<EmotionLexicon> = LazyLock::new(|| {
-    let path = std::env::var("EMOTION_LEXICON_PATH")
-        .unwrap_or_else(|_| "config/emotion_lexicon.json".to_string());
+    let path = crate::config::resolve_resource_path("config/emotion_lexicon.json");
     std::fs::read_to_string(&path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())

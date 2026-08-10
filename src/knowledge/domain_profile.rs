@@ -45,11 +45,10 @@ impl DomainProfile {
     /// - [`Error::Io`] when the file is missing.
     /// - [`Error::Config`] when the JSON is unparseable.
     pub fn load(name: &str) -> Result<Self> {
-        let base = std::env::var("DOMAIN_PROFILES_PATH")
-            .unwrap_or_else(|_| "config/domain_profiles".to_string());
-        let path = format!("{base}/{name}.json");
+        let base = crate::config::resolve_resource_path("config/domain_profiles");
+        let path = base.join(format!("{name}.json"));
         let raw = std::fs::read_to_string(&path).map_err(Error::Io)?;
-        serde_json::from_str(&raw).map_err(|e| Error::Config(format!("parse {path}: {e}")))
+        serde_json::from_str(&raw).map_err(|e| Error::Config(format!("parse {path:?}: {e}")))
     }
 }
 

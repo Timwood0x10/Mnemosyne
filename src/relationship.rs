@@ -32,6 +32,14 @@ use crate::types::Message;
 const POSITIVE_DELTA: f64 = 0.02;
 /// Increment applied to `intimacy` per user negative-emotion message.
 const NEGATIVE_DELTA: f64 = 0.02;
+/// Increment applied per assistant positive-emotion message. The agent's own
+/// warm statements ("我很开心能认识你") also move the relationship — a
+/// companion bond is mutual — but with a lighter weight than the user's
+/// emotions, which remain the primary driver.
+const AGENT_POSITIVE_DELTA: f64 = 0.01;
+/// Decrement applied per assistant negative-emotion message (lighter than the
+/// user's, mirroring [`AGENT_POSITIVE_DELTA`]).
+const AGENT_NEGATIVE_DELTA: f64 = 0.01;
 /// Maximum number of recurring topics kept in the snapshot.
 const MAX_RECENT_TOPICS: usize = 10;
 
@@ -289,12 +297,27 @@ impl RelationshipStore {
                     RelationshipState::new(tenant_id, agent_entity_id, user_entity_id)
                 });
                 let mut intimacy = current.intimacy;
-                for msg in messages.iter().filter(|m| m.is_user()) {
-                    if has_positive_emotion(&msg.content) {
-                        intimacy += POSITIVE_DELTA;
-                    }
-                    if has_negative_emotion(&msg.content) {
-                        intimacy -= NEGATIVE_DELTA;
+                // Both sides of the conversation shape the bond: the user's
+                // emotions are the primary driver (full delta); the agent's
+                // own emotional statements count with a lighter weight.
+                // Previously only user messages were considered, so an
+                // assistant-heavy dialogue ("我很开心能认识你" / "我也很高兴")
+                // left intimacy pinned at 0.0 forever.
+                for msg in messages {
+                    if msg.is_user() {
+                        if has_positive_emotion(&msg.content) {
+                            intimacy += POSITIVE_DELTA;
+                        }
+                        if has_negative_emotion(&msg.content) {
+                            intimacy -= NEGATIVE_DELTA;
+                        }
+                    } else {
+                        if has_positive_emotion(&msg.content) {
+                            intimacy += AGENT_POSITIVE_DELTA;
+                        }
+                        if has_negative_emotion(&msg.content) {
+                            intimacy -= AGENT_NEGATIVE_DELTA;
+                        }
                     }
                 }
                 intimacy = intimacy.clamp(0.0, 1.0);
@@ -412,6 +435,59 @@ mod tests {
         );
         // Starting from 0.0, after clamping we still have 0.0 → delta is zero → Stable
         assert_eq!(state.emotion_trend, EmotionTrend::Stable);
+    }
+
+    /// Objective: Verify the AGENT's own emotional statements also move the
+    /// relationship — a companion bond is mutual. Previously only user
+    /// messages were counted, so an assistant-heavy warm dialogue left
+    /// intimacy pinned at 0.0 forever (the defect this fixes).
+    /// Invariants: three assistant positive-emotion messages raise intimacy
+    /// by 3 × AGENT_POSITIVE_DELTA; user messages still carry full weight.
+    #[test]
+    fn assistant_emotion_drives_intimacy() {
+        let store = store();
+        let messages = msgs(&[
+            ("assistant", "我很开心能认识你，谢谢你信任我。"),
+            ("assistant", "我也很高兴能陪着你。"),
+            ("assistant", "我们的相处让我感到温暖，真的很珍惜。"),
+        ]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "bob", &messages)
+            .expect("apply messages");
+        let expected = 3.0 * AGENT_POSITIVE_DELTA;
+        assert!(
+            (state.intimacy - expected).abs() < 1e-9,
+            "three assistant positive messages should raise intimacy to {expected}, got {}",
+            state.intimacy
+        );
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Rising,
+            "agent warmth must move the trend, not stay stable"
+        );
+    }
+
+    /// Objective: Verify mixed user + assistant emotions combine: user
+    /// messages count with full delta, assistant messages with the lighter
+    /// agent delta.
+    /// Invariants: one user positive (+0.02) + one assistant positive (+0.01)
+    /// → intimacy 0.03.
+    #[test]
+    fn mixed_user_and_agent_emotion_combine() {
+        let store = store();
+        let messages = msgs(&[
+            ("user", "谢谢你，今天很开心！"),
+            ("assistant", "我也很高兴能帮你。"),
+        ]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "carol", &messages)
+            .expect("apply messages");
+        let expected = POSITIVE_DELTA + AGENT_POSITIVE_DELTA;
+        assert!(
+            (state.intimacy - expected).abs() < 1e-9,
+            "user + agent positive should sum to {expected}, got {}",
+            state.intimacy
+        );
     }
 
     /// Objective: Verify intimacy is clamped to `[0, 1]` and the stage mapping

@@ -1,9 +1,55 @@
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+
+/// Resolve a runtime resource file (config/lexicon JSON) to a usable path.
+///
+/// A single optional override — `MNEMOSYNE_HOME` — sets the resource root;
+/// when unset the root is auto-detected: the current working directory if it
+/// looks like an install root (contains `config/` or `lexicon/`), otherwise
+/// the executable's directory. `relative` is a path under that root
+/// (`config/dictionary.json`, `lexicon/packs/…`).
+///
+/// This replaces the previous per-file `*_PATH` env vars (DICTIONARY_PATH,
+/// FACTION_MAP_PATH, …) with one root override, and kills the compile-time
+/// `env!("CARGO_MANIFEST_DIR")` baked into the binary (which made releases
+/// fail on every machine except the CI builder).
+#[must_use]
+pub fn resolve_resource_path(relative: &str) -> PathBuf {
+    resource_root().join(relative)
+}
+
+/// Locate the resource root: `MNEMOSYNE_HOME` if set, else an install-looking
+/// cwd, else the executable's directory, else the cwd as a last resort.
+fn resource_root() -> PathBuf {
+    if let Ok(home) = std::env::var("MNEMOSYNE_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if looks_like_root(&cwd) {
+        return cwd;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent()
+            && looks_like_root(dir)
+        {
+            return dir.to_path_buf();
+        }
+    }
+    cwd
+}
+
+/// An install root carries either `config/` or `lexicon/` (the two resource
+/// trees the server reads at runtime).
+fn looks_like_root(dir: &Path) -> bool {
+    dir.join("config").is_dir() || dir.join("lexicon").is_dir()
+}
 
 /// Top-level server configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -408,8 +454,8 @@ pub struct CliArgs {
     #[arg(long, env = "MEMORY_TRANSPORT", default_value = "stdio")]
     pub transport: String,
 
-    /// Listen address for `--transport http` (e.g. `127.0.0.1:8080`).
-    #[arg(long, env = "MEMORY_HTTP_ADDR", default_value = "127.0.0.1:8080")]
+    /// Listen address for `--transport http` (e.g. `127.0.0.1:5609`).
+    #[arg(long, env = "MEMORY_HTTP_ADDR", default_value = "127.0.0.1:5609")]
     pub http_addr: String,
 
     /// Optional bearer token required for `--transport http`. When unset the
@@ -543,7 +589,7 @@ mod tests {
             retrieval_mode: "keyword".into(),
             openai_api_key: None,
             transport: "stdio".into(),
-            http_addr: "127.0.0.1:8080".into(),
+            http_addr: "127.0.0.1:5609".into(),
             http_token: None,
         };
         let cfg = args.into_config().expect("config");
