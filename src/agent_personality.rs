@@ -184,6 +184,7 @@ pub fn agent_personality_facts_from_messages(
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
+            ..Fact::default()
         });
     }
     facts

@@ -45,6 +45,7 @@ fn persona_fact(fact_type: FactType, time: i32, negated: bool, content: &str) ->
         }),
         evidence_id: None,
         created_at: i64::from(time),
+        ..Fact::default()
     }
 }
 

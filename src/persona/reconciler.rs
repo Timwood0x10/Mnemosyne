@@ -248,6 +248,7 @@ mod tests {
             }),
             evidence_id: None,
             created_at: 1,
+            ..Fact::default()
         }
     }
 
@@ -440,6 +441,7 @@ mod tests {
             payload: serde_json::json!({"content": "我是白流苏"}),
             evidence_id: None,
             created_at: 1,
+            ..Fact::default()
         };
         assert_eq!(extract_negated(&fact), None, "missing negated → None");
     }

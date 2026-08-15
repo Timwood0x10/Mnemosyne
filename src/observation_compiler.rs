@@ -194,6 +194,7 @@ impl Rule for DefaultRule {
             payload,
             evidence_id: None,
             created_at: 0,
+            ..Fact::default()
         }]
     }
 }

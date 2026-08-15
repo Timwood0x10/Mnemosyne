@@ -475,6 +475,7 @@ mod tests {
             }),
             evidence_id: None,
             created_at: 1,
+            ..Fact::default()
         }
     }
 
@@ -671,6 +672,7 @@ mod tests {
             payload: serde_json::json!({"content": "我是白流苏"}),
             evidence_id: None,
             created_at: 1,
+            ..Fact::default()
         };
         assert!(!is_persona_fact(&untagged), "untagged fact is not persona");
     }

@@ -202,6 +202,7 @@ mod tests {
                 }),
                 evidence_id: None,
                 created_at: 1,
+                ..Fact::default()
             })
             .expect("insert persona fact");
     }

@@ -9,7 +9,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
-use crate::cognition::{Fact, FactStore, FactType};
+use crate::cognition::{Fact, FactStatus, FactStore, FactType};
 use crate::error::{Error, Result, StorageError};
 use crate::relationship::{EmotionTrend, RelationshipStage, RelationshipState};
 
@@ -34,7 +34,9 @@ CREATE TABLE IF NOT EXISTS facts (
     evidence_id  INTEGER,
     created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
     weight       REAL DEFAULT 1.0,
-    archived     INTEGER DEFAULT 0
+    archived     INTEGER DEFAULT 0,
+    status       TEXT NOT NULL DEFAULT 'active',
+    derived_from TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS evidence (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -126,6 +128,10 @@ impl SqliteFactStore {
         // deletes the row, so the persona evolution timeline stays intact.
         Self::ensure_column(conn, "facts", "weight", "REAL DEFAULT 1.0")?;
         Self::ensure_column(conn, "facts", "archived", "INTEGER DEFAULT 0")?;
+        // v0.3 cognitive-state columns: epistemic status (dual-read migration:
+        // legacy `archived`/`weight` stay; `status`/`derived_from` are additive).
+        Self::ensure_column(conn, "facts", "status", "TEXT NOT NULL DEFAULT 'active'")?;
+        Self::ensure_column(conn, "facts", "derived_from", "TEXT NOT NULL DEFAULT '[]'")?;
         conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_tenant_external
                  ON entities(tenant_id, external_key) WHERE external_key IS NOT NULL;
@@ -368,6 +374,12 @@ impl SqliteFactStore {
                 "fact payload is not valid JSON: {error}"
             )))
         })?;
+        let derived_from_text: String = row.get("derived_from")?;
+        let derived_from: Vec<i64> = serde_json::from_str(&derived_from_text).map_err(|error| {
+            Error::Storage(StorageError::InvalidData(format!(
+                "fact derived_from is not a valid id array: {error}"
+            )))
+        })?;
         Ok(Fact {
             id: Some(row.get("id")?),
             entity_id: row.get("entity_id")?,
@@ -376,6 +388,11 @@ impl SqliteFactStore {
             payload,
             evidence_id: row.get("evidence_id")?,
             created_at: row.get("created_at")?,
+            // Dual-read: `weight` (legacy decay score) IS the epistemic
+            // confidence — decay down-weights a fact, lowering its confidence.
+            confidence: row.get("weight")?,
+            derived_from,
+            status: FactStatus::parse(&row.get::<_, String>("status")?),
         })
     }
 
@@ -421,11 +438,53 @@ impl SqliteFactStore {
     /// Returns a storage error when the read fails.
     pub fn list_archived(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
+                    weight, status, derived_from
              FROM facts WHERE entity_id = ?1 AND archived = 1 ORDER BY time, created_at, id",
             entity_id,
             None,
         )
+    }
+
+    /// Fetch the original-text evidence row behind a fact's `evidence_id`.
+    ///
+    /// Returns `None` when the fact has no evidence anchor or the row vanished.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn get_evidence_content(&self, evidence_id: i64) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let content = conn
+            .query_row(
+                "SELECT content FROM evidence WHERE id = ?1",
+                params![evidence_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?;
+        Ok(content.flatten())
+    }
+
+    /// Insert an original-text evidence row and return its id.
+    ///
+    /// Facts reference evidence via `evidence_id`; this is the write path used
+    /// when a fact needs an auditable original-text anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the insert fails.
+    pub fn insert_evidence(
+        &self,
+        doc_id: Option<i64>,
+        chapter_id: Option<i64>,
+        content: &str,
+    ) -> Result<i64> {
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO evidence (doc_id, chapter_id, content) VALUES (?1, ?2, ?3)",
+            params![doc_id, chapter_id, content],
+        )?;
+        Ok(conn.last_insert_rowid())
     }
 
     /// List every entity id in the store, used when a decay pass scans the
@@ -635,10 +694,12 @@ fn load_relationship_unlocked(
 impl FactStore for SqliteFactStore {
     fn insert_fact(&self, fact: &Fact) -> Result<i64> {
         let payload = serde_json::to_string(&fact.payload)?;
+        let derived_from = serde_json::to_string(&fact.derived_from)?;
         let conn = self.lock_conn()?;
         conn.execute(
-            "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
+                                weight, status, derived_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 fact.entity_id,
                 Self::fact_type_name(fact.fact_type),
@@ -646,6 +707,9 @@ impl FactStore for SqliteFactStore {
                 payload,
                 fact.evidence_id,
                 fact.created_at,
+                fact.confidence,
+                fact.status.as_str(),
+                derived_from,
             ],
         )?;
         Ok(conn.last_insert_rowid())
@@ -659,11 +723,13 @@ impl FactStore for SqliteFactStore {
         let transaction = conn.transaction()?;
         {
             let mut stmt = transaction.prepare(
-                "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
+                                    weight, status, derived_from)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for fact in facts {
                 let payload = serde_json::to_string(&fact.payload)?;
+                let derived_from = serde_json::to_string(&fact.derived_from)?;
                 stmt.execute(params![
                     fact.entity_id,
                     Self::fact_type_name(fact.fact_type),
@@ -671,6 +737,9 @@ impl FactStore for SqliteFactStore {
                     payload,
                     fact.evidence_id,
                     fact.created_at,
+                    fact.confidence,
+                    fact.status.as_str(),
+                    derived_from,
                 ])?;
             }
         }
@@ -680,7 +749,8 @@ impl FactStore for SqliteFactStore {
 
     fn get_facts(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
+                    weight, status, derived_from
              FROM facts WHERE entity_id = ?1 ORDER BY time, created_at, id",
             entity_id,
             None,
@@ -689,7 +759,8 @@ impl FactStore for SqliteFactStore {
 
     fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
+                    weight, status, derived_from
              FROM facts WHERE entity_id = ?1 AND fact_type = ?2 ORDER BY time, created_at, id",
             entity_id,
             Some(fact_type),
@@ -698,11 +769,26 @@ impl FactStore for SqliteFactStore {
 
     fn get_timeline(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
+                    weight, status, derived_from
              FROM facts WHERE entity_id = ?1 ORDER BY time DESC, created_at DESC, id DESC",
             entity_id,
             None,
         )
+    }
+
+    fn get_fact_by_id(&self, fact_id: i64) -> Result<Option<Fact>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
+                    weight, status, derived_from
+             FROM facts WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![fact_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_fact(row)?)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -719,6 +805,7 @@ mod tests {
             payload: serde_json::json!({"test": true}),
             evidence_id: None,
             created_at: 0,
+            ..Fact::default()
         }
     }
 
@@ -971,6 +1058,106 @@ mod tests {
         assert!(
             matches!(error, Error::Storage(StorageError::InvalidData(_))),
             "Malformed persisted data must return StorageError::InvalidData, got {error:?}"
+        );
+    }
+
+    /// Objective: Verify the v0.3 provenance columns (confidence/status/
+    /// derived_from) round-trip through insert → select, and that the legacy
+    /// dual-read columns (weight/archived) stay intact as the source of
+    /// confidence.
+    /// Invariants: confidence is read back from weight; status and
+    /// derived_from survive exactly; legacy rows default to Active.
+    #[test]
+    fn provenance_columns_roundtrip_and_legacy_rows_default() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let id = store
+            .insert_fact(&Fact {
+                id: None,
+                entity_id: 7,
+                fact_type: FactType::Preference,
+                time: 2026,
+                payload: serde_json::json!({"content": "prefers Rust"}),
+                evidence_id: Some(3),
+                created_at: 2026,
+                confidence: 0.85,
+                derived_from: vec![4, 5],
+                status: FactStatus::Contradicted,
+            })
+            .expect("insert fact with provenance fields");
+        let facts = store.get_facts(7).expect("read facts back");
+        assert_eq!(facts.len(), 1, "one fact inserted");
+        let read = &facts[0];
+        assert_eq!(read.id, Some(id), "id round-trips");
+        assert_eq!(read.confidence, 0.85, "confidence stored and read back");
+        assert_eq!(
+            read.derived_from,
+            vec![4, 5],
+            "derived_from chain round-trips"
+        );
+        assert_eq!(read.status, FactStatus::Contradicted, "status round-trips");
+
+        // A legacy row inserted without the new columns must decode as Active.
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            conn.execute(
+                "INSERT INTO facts (entity_id, fact_type, time, payload, created_at) VALUES (8, 'identity', 1, '{}', 1)",
+                [],
+            )
+            .expect("insert legacy row without provenance columns");
+        }
+        let legacy = store.get_facts(8).expect("read legacy row");
+        assert_eq!(legacy.len(), 1, "legacy row present");
+        assert_eq!(
+            legacy[0].status,
+            FactStatus::Active,
+            "legacy row defaults to Active"
+        );
+        assert_eq!(
+            legacy[0].confidence, 1.0,
+            "legacy row defaults confidence to weight 1.0"
+        );
+        assert!(
+            legacy[0].derived_from.is_empty(),
+            "legacy row defaults to empty derivation chain"
+        );
+    }
+
+    /// Objective: Verify a pre-v0.3 database (facts table without the
+    /// status/derived_from columns) is migrated in place by ensure_column and
+    /// its existing rows survive with Active status.
+    /// Invariants: ensure_column adds exactly the missing columns; rows remain.
+    #[test]
+    fn legacy_schema_upgrades_in_place_without_data_loss() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            // Simulate a legacy schema: drop the v0.3 columns.
+            conn.execute("ALTER TABLE facts DROP COLUMN status", [])
+                .expect("drop status column to simulate legacy schema");
+            conn.execute("ALTER TABLE facts DROP COLUMN derived_from", [])
+                .expect("drop derived_from column to simulate legacy schema");
+            conn.execute(
+                "INSERT INTO facts (entity_id, fact_type, time, payload, created_at) VALUES (9, 'preference', 1, '{}', 1)",
+                [],
+            )
+            .expect("insert row under legacy schema");
+        }
+        // Re-run schema init on the same database: it must re-add the columns.
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            SqliteFactStore::initialize_schema(&conn)
+                .expect("schema migration re-adds v0.3 columns");
+        }
+        let facts = store.get_facts(9).expect("read migrated row");
+        assert_eq!(facts.len(), 1, "row survives migration");
+        assert_eq!(
+            facts[0].status,
+            FactStatus::Active,
+            "migrated row defaults to Active"
+        );
+        assert!(
+            facts[0].derived_from.is_empty(),
+            "migrated row defaults to empty derivation chain"
         );
     }
 }

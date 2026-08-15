@@ -150,5 +150,6 @@ pub fn signal_to_fact(
         }),
         evidence_id: None,
         created_at: i64::from(logical_time),
+        ..Fact::default()
     }
 }

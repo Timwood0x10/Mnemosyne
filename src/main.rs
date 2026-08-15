@@ -32,6 +32,7 @@ use mnemosyne::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use mnemosyne::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use mnemosyne::mcp::persona_check_tool::{PersonaCheckTool, persona_check_definition};
 use mnemosyne::mcp::persona_inject_tool::{PersonaInjectTool, persona_inject_definition};
+use mnemosyne::mcp::provenance_tool::{FactProvenanceTool, fact_provenance_definition};
 use mnemosyne::mcp::register_external_knowledge_tools;
 use mnemosyne::mcp::register_generalize_tool;
 use mnemosyne::mcp::register_graph_search_tool;
@@ -790,6 +791,18 @@ async fn build_server(
         .tool(
             persona_inject_definition(),
             Arc::new(PersonaInjectTool::new(shared_fact_store.clone())),
+        )
+        .await;
+
+    // ── Fact provenance (fact_provenance) ────────────────────
+    //
+    // `fact_provenance` — audits why a cognitive fact is believed: confidence,
+    // epistemic status (active/superseded/contradicted), the original-text
+    // evidence anchor, and the derived_from derivation chain. Read-only.
+    builder = builder
+        .tool(
+            fact_provenance_definition(),
+            Arc::new(FactProvenanceTool::new(shared_fact_store.clone())),
         )
         .await;
 

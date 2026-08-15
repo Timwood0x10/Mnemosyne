@@ -213,6 +213,7 @@ mod tests {
             payload,
             evidence_id: None,
             created_at: i64::from(time),
+            ..Fact::default()
         }
     }
 

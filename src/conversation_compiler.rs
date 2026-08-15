@@ -991,6 +991,7 @@ pub fn user_facts_from_memories(memories: &[Memory]) -> Vec<Fact> {
                 }),
                 evidence_id: None,
                 created_at: now,
+                ..Fact::default()
             }
         })
         .collect()

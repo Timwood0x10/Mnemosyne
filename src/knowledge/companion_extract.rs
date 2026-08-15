@@ -185,6 +185,7 @@ pub fn companion_facts_from_extract(
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
+            ..Fact::default()
         };
         push_companion_fact(fact, &emotion.role, &mut user_facts, &mut agent_facts);
     }
@@ -205,6 +206,7 @@ pub fn companion_facts_from_extract(
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
+            ..Fact::default()
         };
         push_companion_fact(fact, &cognition.role, &mut user_facts, &mut agent_facts);
     }
@@ -227,6 +229,7 @@ pub fn companion_facts_from_extract(
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
+            ..Fact::default()
         };
         push_companion_fact(fact, role, &mut user_facts, &mut agent_facts);
     }

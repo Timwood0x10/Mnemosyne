@@ -166,6 +166,7 @@ pub fn agent_facts_from_messages(
                 payload,
                 evidence_id: None,
                 created_at: i64::from(logical_time),
+                ..Fact::default()
             });
             continue;
         }
@@ -188,6 +189,7 @@ pub fn agent_facts_from_messages(
                 }),
                 evidence_id: None,
                 created_at: i64::from(logical_time),
+                ..Fact::default()
             });
         }
     }
@@ -350,6 +352,7 @@ pub fn derived_facts_from_messages(
                 }),
                 evidence_id: None,
                 created_at: i64::from(logical_time),
+                ..Fact::default()
             });
         }
     }

@@ -79,8 +79,71 @@ pub enum FactType {
     Habit,
 }
 
+/// Epistemic life-cycle status of a fact (v0.3 cognitive-state upgrade).
+///
+/// Strictly three states — do NOT extend (no Expired/Archived/Pending/...).
+/// `status` is orthogonal to `confidence` (epistemic confidence) and to decay:
+/// it answers "is this claim still believed to hold?", not "how confident are
+/// we?" nor "how stale is it?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FactStatus {
+    /// Currently still believed to hold.
+    #[default]
+    Active,
+    /// Superseded by a newer state (e.g. Python preference → Rust preference).
+    /// The old claim was once true but is now replaced.
+    Superseded,
+    /// In explicit conflict, but the evidence cannot decide which is true
+    /// (e.g. 喜欢独处 vs 喜欢热闹). Do NOT silently resolve by "newest wins".
+    Contradicted,
+}
+
+impl FactStatus {
+    /// Stable lowercase string stored in the `status` column.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FactStatus::Active => "active",
+            FactStatus::Superseded => "superseded",
+            FactStatus::Contradicted => "contradicted",
+        }
+    }
+
+    /// Parse the stored string back into a [`FactStatus`].
+    ///
+    /// Unknown or missing values fall back to [`FactStatus::Active`] so legacy
+    /// rows (which have no status column value) migrate cleanly.
+    #[must_use]
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "superseded" => FactStatus::Superseded,
+            "contradicted" => FactStatus::Contradicted,
+            _ => FactStatus::Active,
+        }
+    }
+}
+
+fn default_confidence() -> f64 {
+    1.0
+}
+
 /// A single atomic fact. Immutable once written.
 /// State is derived from facts via aggregation.
+///
+/// ## v0.3 provenance upgrade
+///
+/// A fact is the **evidence unit** of cognitive state, not the final product:
+///
+/// - `evidence_id` — the original-text evidence that justifies the fact
+///   (Why do we believe this?).
+/// - `confidence` — epistemic confidence, mapped from the legacy `weight`
+///   column (decay down-weights it over time).
+/// - `derived_from` — the fact ids this fact was derived from. This is a
+///   **derivation / provenance chain**, NOT causality: `F2 derived_from F1`
+///   means "F2 was inferred from F1", never "F1 caused F2". Causal claims
+///   (`causes`/`caused_by`) are deliberately out of scope for v0.3.
+/// - `status` — epistemic life-cycle (Active/Superseded/Contradicted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
     pub id: Option<i64>,
@@ -90,6 +153,29 @@ pub struct Fact {
     pub payload: serde_json::Value,
     pub evidence_id: Option<i64>,
     pub created_at: i64,
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+    #[serde(default)]
+    pub derived_from: Vec<i64>,
+    #[serde(default)]
+    pub status: FactStatus,
+}
+
+impl Default for Fact {
+    fn default() -> Self {
+        Fact {
+            id: None,
+            entity_id: 0,
+            fact_type: FactType::Event,
+            time: 0,
+            payload: serde_json::json!({}),
+            evidence_id: None,
+            created_at: 0,
+            confidence: 1.0,
+            derived_from: Vec::new(),
+            status: FactStatus::Active,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -282,6 +368,8 @@ pub trait FactStore: Send + Sync {
     fn get_facts(&self, entity_id: i64) -> Result<Vec<Fact>>;
     fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Result<Vec<Fact>>;
     fn get_timeline(&self, entity_id: i64) -> Result<Vec<Fact>>;
+    /// Fetch a single fact by its stable id, or `None` when it does not exist.
+    fn get_fact_by_id(&self, fact_id: i64) -> Result<Option<Fact>>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -441,6 +529,7 @@ mod tests {
             payload,
             evidence_id: None,
             created_at: i64::from(time),
+            ..Fact::default()
         }
     }
 
@@ -671,5 +760,101 @@ mod tests {
             md.contains("Identity attributes: 1"),
             "markdown reports one identity attribute, got:\n{md}"
         );
+    }
+
+    /// Objective: Verify `FactStatus` round-trips through its stable string and
+    /// falls back to Active for unknown/missing values.
+    /// Invariants: as_str/from_str are inverse for all three states; any other
+    /// stored string (legacy data, typos) decodes to Active, never panics.
+    #[test]
+    fn fact_status_roundtrips_and_falls_back_to_active() {
+        for status in [
+            FactStatus::Active,
+            FactStatus::Superseded,
+            FactStatus::Contradicted,
+        ] {
+            assert_eq!(
+                FactStatus::parse(status.as_str()),
+                status,
+                "as_str/parse must be inverse for {status:?}"
+            );
+        }
+        for unknown in ["", "expired", "archived", "PENDING", "superseded "] {
+            assert_eq!(
+                FactStatus::parse(unknown),
+                FactStatus::Active,
+                "unknown status `{unknown}` must fall back to Active"
+            );
+        }
+    }
+
+    /// Objective: Verify deserializing a legacy Fact JSON (without the v0.3
+    /// fields) fills defaults instead of failing — old persisted snapshots must
+    /// load cleanly.
+    /// Invariants: missing confidence → 1.0; missing derived_from → empty;
+    /// missing status → Active.
+    #[test]
+    fn legacy_fact_json_deserializes_with_defaults() {
+        let legacy = r#"{"id":1,"entity_id":7,"fact_type":"Preference","time":2026,
+                        "payload":{"content":"likes Rust"},"evidence_id":null,"created_at":1}"#;
+        let fact: Fact = serde_json::from_str(legacy).expect("legacy Fact JSON must deserialize");
+        assert_eq!(fact.confidence, 1.0, "missing confidence defaults to 1.0");
+        assert!(
+            fact.derived_from.is_empty(),
+            "missing derived_from defaults to empty derivation chain"
+        );
+        assert_eq!(
+            fact.status,
+            FactStatus::Active,
+            "missing status defaults to Active"
+        );
+    }
+
+    /// Objective: Verify the derived_from chain is preserved through JSON and
+    /// that FactStatus serializes to its stable snake_case string.
+    /// Invariants: a fact with status/derived_from round-trips losslessly.
+    #[test]
+    fn fact_provenance_fields_roundtrip_json() {
+        let original = Fact {
+            id: Some(9),
+            entity_id: 7,
+            fact_type: FactType::Preference,
+            time: 2026,
+            payload: serde_json::json!({"content": "prefers Rust"}),
+            evidence_id: Some(3),
+            created_at: 2026,
+            confidence: 0.85,
+            derived_from: vec![4, 5],
+            status: FactStatus::Superseded,
+        };
+        let json = serde_json::to_string(&original).expect("serialize Fact");
+        let decoded: Fact = serde_json::from_str(&json).expect("deserialize Fact");
+        assert_eq!(decoded.id, original.id, "id round-trips");
+        assert_eq!(decoded.confidence, 0.85, "confidence round-trips");
+        assert_eq!(decoded.derived_from, vec![4, 5], "derived_from round-trips");
+        assert_eq!(
+            decoded.status,
+            FactStatus::Superseded,
+            "status round-trips as snake_case"
+        );
+        assert!(
+            json.contains("\"status\":\"superseded\""),
+            "status serializes to stable snake_case string, got {json}"
+        );
+    }
+
+    /// Objective: Verify `Fact::default()` provides safe v0.3 field defaults so
+    /// every existing construction site can use `..Fact::default()`.
+    /// Invariants: default is Active, confidence 1.0, empty derivation chain.
+    #[test]
+    fn fact_default_has_safe_v03_fields() {
+        let fact = Fact::default();
+        assert_eq!(fact.status, FactStatus::Active, "default status is Active");
+        assert_eq!(fact.confidence, 1.0, "default confidence is 1.0");
+        assert!(
+            fact.derived_from.is_empty(),
+            "default derivation chain is empty"
+        );
+        assert_eq!(fact.id, None, "default fact has no id");
     }
 }

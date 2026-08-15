@@ -114,6 +114,7 @@ pub async fn bridge_story_events_to_persona(
             }),
             evidence_id: None,
             created_at: i64::from(time),
+            ..Fact::default()
         };
         fstore.insert_fact(&raw)?;
         stats.event_facts += 1;

@@ -22,6 +22,7 @@ pub mod memory_compile;
 pub mod memory_transfer_tools;
 pub mod persona_check_tool;
 pub mod persona_inject_tool;
+pub mod provenance_tool;
 pub mod relationship_tool;
 pub mod server;
 pub mod sse;
@@ -41,6 +42,7 @@ pub use knowledge_tools::register_knowledge_tools;
 pub use memory_transfer_tools::register_memory_transfer_tools;
 pub use persona_check_tool::{PersonaCheckTool, persona_check_definition};
 pub use persona_inject_tool::{PersonaInjectTool, persona_inject_definition};
+pub use provenance_tool::{FactProvenanceTool, fact_provenance_definition};
 pub use relationship_tool::{
     PersonaTimelineTool, RelationshipQueryTool, RelationshipUpdateTool,
     persona_timeline_definition, relationship_query_definition, relationship_update_definition,

@@ -412,6 +412,7 @@ mod tests {
             payload,
             evidence_id: None,
             created_at,
+            ..Fact::default()
         }
     }
 
@@ -628,6 +629,7 @@ mod tests {
                     payload: json!({"importance": 0.9}),
                     evidence_id: None,
                     created_at: 0,
+                    ..Fact::default()
                 })
                 .expect("insert old event");
         }
@@ -640,6 +642,7 @@ mod tests {
                 payload: json!({"attribution": AGENT_PERSONALITY_ATTRIBUTION}),
                 evidence_id: None,
                 created_at: 0,
+                ..Fact::default()
             })
             .expect("insert persona fact");
 
@@ -681,6 +684,7 @@ mod tests {
                 payload: json!({"importance": 0.9}),
                 evidence_id: None,
                 created_at: 0,
+                ..Fact::default()
             })
             .expect("insert old event");
 
