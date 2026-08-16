@@ -12,6 +12,7 @@
 
 pub mod context_aware;
 pub mod decay_tool;
+pub mod decision_tool;
 pub mod external_knowledge_tools;
 pub mod generalize_tool;
 pub mod graph_search_tool;
@@ -34,6 +35,9 @@ pub mod types;
 
 pub use context_aware::{ContextCheckTool, context_check_definition};
 pub use decay_tool::{MemoryDecayTool, memory_decay_definition};
+pub use decision_tool::{
+    DecisionSearchTool, DecisionTraceTool, decision_search_definition, decision_trace_definition,
+};
 pub use external_knowledge_tools::register_external_knowledge_tools;
 pub use generalize_tool::register_generalize_tool;
 pub use graph_search_tool::register_graph_search_tool;

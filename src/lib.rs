@@ -43,6 +43,7 @@ pub mod compiler;
 pub mod config;
 pub mod conversation_compiler;
 pub mod decay;
+pub mod decision;
 pub mod detector;
 pub mod dictionary;
 pub mod distiller;

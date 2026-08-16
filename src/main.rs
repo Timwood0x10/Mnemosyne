@@ -28,6 +28,9 @@ use mnemosyne::knowledge::store::KnowledgeStore;
 use mnemosyne::knowledge::{Migrator, SQLiteKnowledgeStore};
 use mnemosyne::mcp::context_aware::{ContextCheckTool, context_check_definition};
 use mnemosyne::mcp::decay_tool::{MemoryDecayTool, memory_decay_definition};
+use mnemosyne::mcp::decision_tool::{
+    DecisionSearchTool, DecisionTraceTool, decision_search_definition, decision_trace_definition,
+};
 use mnemosyne::mcp::key_events_tool::{KeyEventsTool, key_events_definition};
 use mnemosyne::mcp::memory_compile::{MemoryCompileTool, memory_compile_definition};
 use mnemosyne::mcp::persona_check_tool::{PersonaCheckTool, persona_check_definition};
@@ -818,6 +821,25 @@ async fn build_server(
         .tool(
             state_timeline_definition(),
             Arc::new(StateTimelineTool::new(shared_fact_store.clone())),
+        )
+        .await;
+
+    // ── Decisions (decision_trace / decision_search, v0.3.1) ─
+    //
+    // `decision_trace` — traces a decision back to the facts that supported
+    //   it (supporting evidence, not causality).
+    // `decision_search` — lightweight keyword search over a subject's
+    //   decisions. Both read-only; decisions follow their own lifecycle and
+    //   do NOT touch memory_decay semantics.
+    builder = builder
+        .tool(
+            decision_trace_definition(),
+            Arc::new(DecisionTraceTool::new(shared_fact_store.clone())),
+        )
+        .await
+        .tool(
+            decision_search_definition(),
+            Arc::new(DecisionSearchTool::new(shared_fact_store.clone())),
         )
         .await;
 

@@ -74,6 +74,19 @@ CREATE TABLE IF NOT EXISTS relationship_state (
     UNIQUE(tenant_id, agent_entity_id, user_entity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_relationship_user ON relationship_state(tenant_id, user_entity_id);
+CREATE TABLE IF NOT EXISTS decisions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject     INTEGER NOT NULL,
+    verb        TEXT NOT NULL,
+    object      TEXT NOT NULL,
+    made_at     INTEGER NOT NULL,
+    because     TEXT NOT NULL DEFAULT '[]',
+    outcome     TEXT,
+    status      TEXT NOT NULL DEFAULT 'open',
+    created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions(subject);
+CREATE INDEX IF NOT EXISTS idx_decisions_made_at ON decisions(subject, made_at);
 ";
 
 /// SQLite-backed fact store.
@@ -485,6 +498,161 @@ impl SqliteFactStore {
             params![doc_id, chapter_id, content],
         )?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Insert a decision and return its id.
+    ///
+    /// `because` is stored as a JSON array of supporting fact ids (supporting
+    /// evidence, not causality).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the insert fails.
+    pub fn insert_decision(&self, decision: &crate::decision::Decision) -> Result<i64> {
+        let because = serde_json::to_string(&decision.because)?;
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO decisions (subject, verb, object, made_at, because, outcome, status)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                decision.subject,
+                decision.verb,
+                decision.object,
+                decision.made_at,
+                because,
+                decision
+                    .outcome
+                    .map(crate::decision::DecisionOutcome::as_str),
+                decision.status.as_str(),
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// Fetch a single decision by id, or `None` when it does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn get_decision(&self, decision_id: i64) -> Result<Option<crate::decision::Decision>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, subject, verb, object, made_at, because, outcome, status
+             FROM decisions WHERE id = ?1",
+        )?;
+        let mut rows = stmt.query(params![decision_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(Self::row_to_decision(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Fetch every decision made by an entity, newest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn get_decisions(&self, subject: i64) -> Result<Vec<crate::decision::Decision>> {
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, subject, verb, object, made_at, because, outcome, status
+             FROM decisions WHERE subject = ?1 ORDER BY made_at DESC, id DESC",
+        )?;
+        let mut rows = stmt.query(params![subject])?;
+        let mut decisions = Vec::new();
+        while let Some(row) = rows.next()? {
+            decisions.push(Self::row_to_decision(row)?);
+        }
+        Ok(decisions)
+    }
+
+    /// Search decisions by keyword over `verb`/`object` (case-insensitive),
+    /// newest first. Lightweight companion-search: decisions deliberately do
+    /// not depend on the embedding-based retrieval engine.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn search_decisions(
+        &self,
+        subject: i64,
+        keyword: &str,
+    ) -> Result<Vec<crate::decision::Decision>> {
+        let pattern = format!("%{}%", keyword.to_lowercase());
+        let conn = self.lock_conn()?;
+        let mut stmt = conn.prepare(
+            "SELECT id, subject, verb, object, made_at, because, outcome, status
+             FROM decisions
+             WHERE subject = ?1
+               AND (lower(verb) LIKE ?2 OR lower(object) LIKE ?2)
+             ORDER BY made_at DESC, id DESC",
+        )?;
+        let mut rows = stmt.query(params![subject, pattern])?;
+        let mut decisions = Vec::new();
+        while let Some(row) = rows.next()? {
+            decisions.push(Self::row_to_decision(row)?);
+        }
+        Ok(decisions)
+    }
+
+    /// Update a decision's outcome and close it. Applies the outcome exactly
+    /// once (see [`crate::decision::apply_outcome`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the update fails or the id is unknown.
+    pub fn set_decision_outcome(
+        &self,
+        decision_id: i64,
+        outcome: crate::decision::DecisionOutcome,
+    ) -> Result<Option<crate::decision::Decision>> {
+        let Some(decision) = self.get_decision(decision_id)? else {
+            return Ok(None);
+        };
+        if decision.outcome.is_some() {
+            return Ok(Some(decision));
+        }
+        // Scope the connection guard: it must be dropped BEFORE the read-back
+        // below, which re-locks the connection. `lock_conn()` is a non-reentrant
+        // Mutex, so holding the guard across `get_decision` would deadlock.
+        {
+            let conn = self.lock_conn()?;
+            conn.execute(
+                "UPDATE decisions SET outcome = ?1, status = 'closed' WHERE id = ?2",
+                params![outcome.as_str(), decision_id],
+            )?;
+        }
+        let updated = self.get_decision(decision_id)?.expect("just updated");
+        Ok(Some(updated))
+    }
+
+    /// Decode a decision row into a [`crate::decision::Decision`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-data error when the `because` column is not a JSON
+    /// array of integer ids.
+    fn row_to_decision(row: &rusqlite::Row<'_>) -> Result<crate::decision::Decision> {
+        let because_text: String = row.get("because")?;
+        let because: Vec<i64> = serde_json::from_str(&because_text).map_err(|error| {
+            Error::Storage(StorageError::InvalidData(format!(
+                "decision because is not a valid id array: {error}"
+            )))
+        })?;
+        let outcome_raw: Option<String> = row.get("outcome")?;
+        let outcome = outcome_raw
+            .as_deref()
+            .and_then(crate::decision::DecisionOutcome::parse);
+        Ok(crate::decision::Decision {
+            id: Some(row.get("id")?),
+            subject: row.get("subject")?,
+            verb: row.get("verb")?,
+            object: row.get("object")?,
+            made_at: row.get("made_at")?,
+            because,
+            outcome,
+            status: crate::decision::DecisionStatus::parse(&row.get::<_, String>("status")?),
+        })
     }
 
     /// List every entity id in the store, used when a decay pass scans the
@@ -1158,6 +1326,163 @@ mod tests {
         assert!(
             facts[0].derived_from.is_empty(),
             "migrated row defaults to empty derivation chain"
+        );
+    }
+
+    // ── Decision CRUD (v0.3.1) ────────────────────────────────────────────
+
+    fn sample_decision(subject: i64, verb: &str, object: &str) -> crate::decision::Decision {
+        crate::decision::Decision {
+            id: None,
+            subject,
+            verb: verb.to_string(),
+            object: object.to_string(),
+            made_at: 2026,
+            because: vec![17, 23],
+            outcome: None,
+            status: crate::decision::DecisionStatus::Open,
+        }
+    }
+
+    /// Objective: Verify a decision round-trips insert → read, preserving the
+    /// supporting-evidence chain and the open status.
+    /// Invariants: id assigned; because/verb/object/made_at survive; status is
+    /// Open with no outcome.
+    #[test]
+    fn decision_insert_and_read_roundtrip() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let id = store
+            .insert_decision(&sample_decision(7, "promise", "陪用户明天去医院"))
+            .expect("insert decision");
+        let read = store
+            .get_decision(id)
+            .expect("read decision")
+            .expect("decision exists");
+        assert_eq!(read.subject, 7);
+        assert_eq!(read.verb, "promise");
+        assert_eq!(read.object, "陪用户明天去医院");
+        assert_eq!(read.because, vec![17, 23], "supporting facts preserved");
+        assert_eq!(read.status, crate::decision::DecisionStatus::Open);
+        assert_eq!(read.outcome, None, "outcome starts empty");
+    }
+
+    /// Objective: Verify the decision list is newest-first per subject and
+    /// that an unknown id reads as None (not an error).
+    /// Invariants: later made_at sorts first; unknown id → None.
+    #[test]
+    fn decisions_list_newest_first_and_unknown_id_is_none() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let mut old = sample_decision(7, "promise", "旧承诺");
+        old.made_at = 2024;
+        let mut fresh = sample_decision(7, "decide", "新决定");
+        fresh.made_at = 2026;
+        store.insert_decision(&old).expect("insert old");
+        store.insert_decision(&fresh).expect("insert fresh");
+        // A different subject's decision must not leak into entity 7's list.
+        let other = sample_decision(8, "decline", "别人的决定");
+        store.insert_decision(&other).expect("insert other");
+
+        let decisions = store.get_decisions(7).expect("list decisions");
+        assert_eq!(decisions.len(), 2, "only subject 7 decisions returned");
+        assert_eq!(decisions[0].object, "新决定", "newest first");
+        assert_eq!(decisions[1].object, "旧承诺");
+        assert!(
+            store.get_decision(9999).expect("read").is_none(),
+            "unknown id reads as None"
+        );
+    }
+
+    /// Objective: Verify `set_decision_outcome` records the outcome once and
+    /// closes the decision; the second call is a no-op (can't be both
+    /// fulfilled and violated).
+    /// Invariants: first outcome wins; status → Closed; second call keeps the
+    /// first outcome; unknown id returns None.
+    #[test]
+    fn decision_outcome_applies_exactly_once() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let id = store
+            .insert_decision(&sample_decision(7, "promise", "明天去医院"))
+            .expect("insert decision");
+
+        let closed = store
+            .set_decision_outcome(id, crate::decision::DecisionOutcome::Fulfilled)
+            .expect("apply outcome")
+            .expect("decision exists");
+        assert_eq!(
+            closed.outcome,
+            Some(crate::decision::DecisionOutcome::Fulfilled)
+        );
+        assert_eq!(closed.status, crate::decision::DecisionStatus::Closed);
+
+        let again = store
+            .set_decision_outcome(id, crate::decision::DecisionOutcome::Violated)
+            .expect("apply again")
+            .expect("decision exists");
+        assert_eq!(
+            again.outcome,
+            Some(crate::decision::DecisionOutcome::Fulfilled),
+            "first outcome wins"
+        );
+
+        assert!(
+            store
+                .set_decision_outcome(9999, crate::decision::DecisionOutcome::Violated)
+                .expect("read")
+                .is_none(),
+            "unknown id returns None"
+        );
+    }
+
+    /// Objective: Verify keyword search matches verb and object
+    /// case-insensitively and scopes to the subject.
+    /// Invariants: "医院" matches the promise; a keyword in another subject's
+    /// decision does not leak; empty keyword returns everything.
+    #[test]
+    fn decision_search_matches_keywords_within_subject() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        store
+            .insert_decision(&sample_decision(7, "promise", "陪用户明天去医院"))
+            .expect("insert decision");
+        store
+            .insert_decision(&sample_decision(7, "decide", "这周末学习 Rust"))
+            .expect("insert decision");
+        store
+            .insert_decision(&sample_decision(8, "promise", "陪用户去医院"))
+            .expect("insert other-subject decision");
+
+        let hits = store.search_decisions(7, "医院").expect("search decisions");
+        assert_eq!(hits.len(), 1, "one matching decision in subject 7");
+        assert_eq!(hits[0].object, "陪用户明天去医院");
+
+        let no_hits = store
+            .search_decisions(7, "不存在的关键词")
+            .expect("search decisions");
+        assert!(no_hits.is_empty(), "no match → empty");
+
+        let all = store.search_decisions(7, "").expect("search decisions");
+        assert_eq!(all.len(), 2, "empty keyword matches all subject decisions");
+    }
+
+    /// Objective: Verify a malformed `because` column surfaces as
+    /// InvalidData rather than a panic.
+    /// Invariants: bad JSON in because → StorageError::InvalidData.
+    #[test]
+    fn malformed_decision_because_is_invalid_data() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            conn.execute(
+                "INSERT INTO decisions (subject, verb, object, made_at, because) VALUES (7, 'x', 'y', 1, 'not-json')",
+                [],
+            )
+            .expect("insert malformed decision row");
+        }
+        let error = store
+            .get_decision(1)
+            .expect_err("malformed because must fail decoding");
+        assert!(
+            matches!(error, Error::Storage(StorageError::InvalidData(_))),
+            "malformed because is InvalidData, got {error:?}"
         );
     }
 }
