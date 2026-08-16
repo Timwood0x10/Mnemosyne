@@ -245,6 +245,11 @@ pub struct EntityState {
     pub identity_attributes: Vec<Fact>,
     /// Values emitted by application-specific aggregators.
     pub extensions: Vec<serde_json::Value>,
+    /// Optional historical view: per-dimension state intervals with
+    /// deterministic transitions. Deliberately a generic `Vec<StateEvolution>`
+    /// — NOT a per-dimension struct (that would turn `StateEngine` into a god
+    /// object). Populated by [`StateEngine::aggregate_intervals`].
+    pub state_intervals: Vec<crate::state::StateEvolution>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -321,7 +326,33 @@ impl StateEngine {
             relationships,
             identity_attributes,
             extensions,
+            state_intervals: Vec::new(),
         }
+    }
+
+    /// Build the state *history* for an entity: per-dimension validity
+    /// intervals plus deterministic transitions between them.
+    ///
+    /// This is the v0.3 companion to [`StateEngine::aggregate`]:
+    ///
+    /// - `aggregate()` answers "What is the current state?"
+    /// - `aggregate_intervals()` answers "How did the current state emerge?"
+    ///
+    /// Like `aggregate`, this is a pure, deterministic, stateless projection:
+    /// the same facts always produce the same intervals. Facts are never
+    /// mutated or removed — the intervals are a derived view.
+    #[must_use]
+    pub fn aggregate_intervals(&self, facts: &[Fact]) -> Vec<crate::state::StateEvolution> {
+        use crate::state::COGNITIVE_DIMENSIONS;
+        let mut evolutions = Vec::new();
+        for &(filter_key, value_key) in COGNITIVE_DIMENSIONS {
+            if let Some(evolution) =
+                crate::state::intervals_for_dimension(facts, filter_key, value_key)
+            {
+                evolutions.push(evolution);
+            }
+        }
+        evolutions
     }
 }
 
@@ -726,6 +757,129 @@ mod tests {
         assert_eq!(
             occ.payload["value"], "engineer",
             "newest identity fact for occupation wins"
+        );
+    }
+
+    /// Objective: Verify `StateEngine::aggregate_intervals` answers "how did
+    /// the current state emerge" — it preserves historical states as intervals
+    /// across all five cognitive dimensions, while `aggregate()` still returns
+    /// only the latest state.
+    /// Invariants: aggregate() has exactly one preference; aggregate_intervals()
+    /// has three intervals (2024 → 2025 → 2026); the current interval is open
+    /// (to == None); no transition is fabricated when states merely differ.
+    #[test]
+    fn aggregate_intervals_preserves_history_while_aggregate_keeps_latest() {
+        let facts = vec![
+            fact(
+                FactType::Preference,
+                2024,
+                serde_json::json!({"preference": "programming_language", "content": "喜欢 Python"}),
+            ),
+            fact(
+                FactType::Preference,
+                2025,
+                serde_json::json!({"preference": "programming_language", "content": "开始喜欢 Rust"}),
+            ),
+            fact(
+                FactType::Preference,
+                2026,
+                serde_json::json!({"preference": "programming_language", "content": "主要使用 Rust"}),
+            ),
+        ];
+
+        let engine = StateEngine::new();
+        let current = engine.aggregate(&facts);
+        assert_eq!(
+            current.preferences.len(),
+            1,
+            "aggregate() keeps only the latest preference"
+        );
+        assert_eq!(
+            current.preferences[0].payload["content"], "主要使用 Rust",
+            "aggregate() reports the current state"
+        );
+
+        let intervals = engine.aggregate_intervals(&facts);
+        let preference_evolution = intervals
+            .iter()
+            .find(|evolution| evolution.key == "preference")
+            .expect("preference dimension present in intervals");
+        assert_eq!(
+            preference_evolution.intervals.len(),
+            3,
+            "aggregate_intervals() preserves all three historical states"
+        );
+        assert_eq!(
+            preference_evolution.intervals[0].from, 2024,
+            "first interval starts at the earliest state"
+        );
+        assert_eq!(
+            preference_evolution.intervals[1].from, 2025,
+            "second interval starts when the state changed"
+        );
+        assert_eq!(
+            preference_evolution.intervals[2].to, None,
+            "latest interval is still open (current state)"
+        );
+        // No negated/keyword signal, no action word: transitions stay empty —
+        // the change is reported as intervals only (allowed to be uncertain).
+        assert!(
+            preference_evolution.transitions.is_empty(),
+            "must not fabricate a transition without a definite signal"
+        );
+    }
+
+    /// Objective: Verify `aggregate_intervals` never mutates facts and
+    /// reports a stance flip as a deterministic StanceFlip transition while
+    /// keeping both intervals (ADD-only).
+    /// Invariants: two intervals survive; exactly one StanceFlip transition
+    /// connects them.
+    #[test]
+    fn aggregate_intervals_detects_stance_flip_deterministically() {
+        let facts = vec![
+            fact(
+                FactType::Preference,
+                2024,
+                serde_json::json!({
+                    "preference": "应酬",
+                    "content": "我喜欢应酬",
+                    "negated": false,
+                }),
+            ),
+            fact(
+                FactType::Preference,
+                2026,
+                serde_json::json!({
+                    "preference": "应酬",
+                    "content": "我不喜欢应酬",
+                    "negated": true,
+                }),
+            ),
+        ];
+
+        let intervals = StateEngine::new().aggregate_intervals(&facts);
+        let evolution = intervals
+            .iter()
+            .find(|evolution| evolution.key == "preference")
+            .expect("preference dimension present");
+        assert_eq!(
+            evolution.intervals.len(),
+            2,
+            "ADD-only: both states survive as intervals"
+        );
+        assert_eq!(
+            evolution.transitions.len(),
+            1,
+            "a definite stance flip is detected"
+        );
+        assert_eq!(
+            evolution.transitions[0].transition_type,
+            crate::state::TransitionType::StanceFlip,
+            "the transition is a stance flip"
+        );
+        assert_eq!(
+            evolution.transitions[0].at, 2026,
+            "transition at the later state"
         );
     }
 

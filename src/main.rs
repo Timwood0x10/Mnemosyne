@@ -44,6 +44,7 @@ use mnemosyne::mcp::relationship_tool::{
     persona_timeline_definition, relationship_query_definition, relationship_update_definition,
 };
 use mnemosyne::mcp::serve_http_addr;
+use mnemosyne::mcp::state_timeline_tool::{StateTimelineTool, state_timeline_definition};
 use mnemosyne::mcp::story_bridge_tool::{StoryBridgeTool, story_bridge_definition};
 use mnemosyne::mcp::types::{Implementation, ToolCallResult, ToolDefinition, ToolHandler};
 use mnemosyne::mcp::{MCPServer, ServerBuilder, StdioTransport};
@@ -803,6 +804,20 @@ async fn build_server(
         .tool(
             fact_provenance_definition(),
             Arc::new(FactProvenanceTool::new(shared_fact_store.clone())),
+        )
+        .await;
+
+    // ── Cognitive state history (state_timeline) ─────────────
+    //
+    // `state_timeline` — returns how an entity's cognitive state emerged:
+    // per-dimension state intervals (validity windows + evidence) and
+    // deterministic transitions between them (gradual/stance-flip/behavioral
+    // confirmation). ADD-only, read-only; a change without a definite signal
+    // is reported as intervals only.
+    builder = builder
+        .tool(
+            state_timeline_definition(),
+            Arc::new(StateTimelineTool::new(shared_fact_store.clone())),
         )
         .await;
 

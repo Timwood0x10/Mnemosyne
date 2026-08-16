@@ -26,6 +26,7 @@ pub mod provenance_tool;
 pub mod relationship_tool;
 pub mod server;
 pub mod sse;
+pub mod state_timeline_tool;
 pub mod story_bridge_tool;
 pub mod trace_path_tool;
 pub mod transport;
@@ -48,6 +49,7 @@ pub use relationship_tool::{
     persona_timeline_definition, relationship_query_definition, relationship_update_definition,
 };
 pub use server::{MCPServer, ServerBuilder, ToolRegistry};
+pub use state_timeline_tool::{StateTimelineTool, state_timeline_definition};
 pub use story_bridge_tool::{StoryBridgeTool, story_bridge_definition};
 pub use trace_path_tool::register_trace_path_tool;
 pub use transport::{StdioTransport, Transport};
