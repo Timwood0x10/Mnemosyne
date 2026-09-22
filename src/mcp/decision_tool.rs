@@ -24,6 +24,11 @@ use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
 use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
 
+/// Upper bound on `decision_search` results, mirroring the tool schema's
+/// `maximum`. Enforced in code as well because a schema is advisory — a client
+/// can still send an unbounded `limit`.
+const MAX_DECISION_SEARCH_LIMIT: u64 = 100;
+
 /// Render a decision plus its resolved supporting facts into a client object.
 fn decision_json(store: &SqliteFactStore, decision: &Decision) -> Result<Value> {
     let mut because_facts = Vec::new();
@@ -120,10 +125,14 @@ impl ToolHandler for DecisionSearchTool {
         };
         let limit = match args.get("limit") {
             Some(Value::Null) | None => 10usize,
-            Some(value) => value
-                .as_u64()
-                .ok_or_else(|| Error::InvalidInput("`limit` must be an integer".into()))?
-                as usize,
+            Some(value) => {
+                let requested = value
+                    .as_u64()
+                    .ok_or_else(|| Error::InvalidInput("`limit` must be an integer".into()))?;
+                // Clamp to the schema maximum; `min` keeps the cast to `usize`
+                // in range on every target.
+                requested.min(MAX_DECISION_SEARCH_LIMIT) as usize
+            }
         };
         let decisions = self.store.search_decisions(subject, &keyword)?;
         let mut payloads = Vec::new();

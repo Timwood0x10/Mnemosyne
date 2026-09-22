@@ -79,6 +79,29 @@ pub enum FactType {
     Habit,
 }
 
+impl FactType {
+    /// Stable lowercase name for this type.
+    ///
+    /// Used both as the stored `fact_type` column value and as the semantic key
+    /// of a cognitive dimension, so the storage layer and the state-history
+    /// layer can never disagree on how a dimension is spelled.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FactType::Identity => "identity",
+            FactType::Preference => "preference",
+            FactType::Goal => "goal",
+            FactType::Event => "event",
+            FactType::Relationship => "relationship",
+            FactType::Emotion => "emotion",
+            FactType::Location => "location",
+            FactType::Occupation => "occupation",
+            FactType::Interest => "interest",
+            FactType::Habit => "habit",
+        }
+    }
+}
+
 /// Epistemic life-cycle status of a fact (v0.3 cognitive-state upgrade).
 ///
 /// Strictly three states — do NOT extend (no Expired/Archived/Pending/...).
@@ -345,9 +368,9 @@ impl StateEngine {
     pub fn aggregate_intervals(&self, facts: &[Fact]) -> Vec<crate::state::StateEvolution> {
         use crate::state::COGNITIVE_DIMENSIONS;
         let mut evolutions = Vec::new();
-        for &(filter_key, value_key) in COGNITIVE_DIMENSIONS {
+        for &(fact_type, value_keys) in COGNITIVE_DIMENSIONS {
             if let Some(evolution) =
-                crate::state::intervals_for_dimension(facts, filter_key, value_key)
+                crate::state::intervals_for_dimension(facts, fact_type, value_keys)
             {
                 evolutions.push(evolution);
             }
@@ -880,6 +903,58 @@ mod tests {
         assert_eq!(
             evolution.transitions[0].at, 2026,
             "transition at the later state"
+        );
+    }
+
+    /// Objective: Verify `aggregate_intervals` maps production-shaped facts —
+    /// payload carrying only `attribution`/`content`/`negated`, exactly what the
+    /// companion channels emit — onto their cognitive dimensions. A payload-key
+    /// filter matched none of them, so `state_timeline` reported zero dimensions
+    /// for every real conversation.
+    /// Invariants: the goal/preference/emotion dimensions are produced from
+    /// key-less payloads, and the two emotion states stay separate intervals.
+    #[test]
+    fn aggregate_intervals_maps_production_shaped_payloads() {
+        let channel_fact = |id: i64, fact_type: FactType, time: i32, content: &str| Fact {
+            id: Some(id),
+            entity_id: 7,
+            fact_type,
+            time,
+            payload: serde_json::json!({
+                "attribution": "agent_personality",
+                "content": content,
+                "negated": false,
+            }),
+            evidence_id: None,
+            created_at: i64::from(time),
+            ..Fact::default()
+        };
+        let facts = vec![
+            channel_fact(1, FactType::Emotion, 2024, "我心里很害怕"),
+            channel_fact(2, FactType::Emotion, 2026, "我心里很平静"),
+            channel_fact(3, FactType::Goal, 2025, "我要学 Rust"),
+            channel_fact(4, FactType::Preference, 2026, "我喜欢安静"),
+        ];
+
+        let evolutions = StateEngine::new().aggregate_intervals(&facts);
+        let keys: Vec<&str> = evolutions
+            .iter()
+            .map(|evolution| evolution.key.as_str())
+            .collect();
+        assert_eq!(
+            keys,
+            vec!["goal", "preference", "emotion"],
+            "every production-shaped dimension must be reported"
+        );
+
+        let emotion = evolutions
+            .iter()
+            .find(|evolution| evolution.key == "emotion")
+            .expect("emotion dimension present");
+        assert_eq!(
+            emotion.intervals.len(),
+            2,
+            "both emotion states are preserved as separate intervals"
         );
     }
 

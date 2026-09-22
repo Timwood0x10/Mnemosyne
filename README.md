@@ -1,9 +1,11 @@
-# Mnemosyne — Memory Distillation Engine
+# Mnemosyne — Cognitive Memory Engine for Persistent AI Companions
 
 > **Mnemosyne** — the Greek goddess of memory: memory never dies, is always
 > reconstructable, and persists across sessions.
 
 Compile any long-term interaction into an **evolving human cognitive model**: identity, preference, goal, emotion, relationship. Designed for companion AIs to maintain consistent persona across sessions.
+
+> Memory remembers what happened. Cognition remembers what it means.
 
 > **Facts come from compilation, not guesswork.**
 > **State comes from events, not prompts.**

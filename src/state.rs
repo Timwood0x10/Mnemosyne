@@ -22,7 +22,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::cognition::Fact;
+use crate::cognition::{Fact, FactType};
 use crate::persona::check::shared_bigrams;
 
 /// Minimum number of shared character-bigrams required for two same-type,
@@ -97,27 +97,34 @@ pub struct StateEvolution {
     pub transitions: Vec<StateTransition>,
 }
 
-/// Build state intervals for one semantic dimension.
+/// Build state intervals for one cognitive dimension.
 ///
-/// Groups the given facts by the semantic payload key and splits them into
-/// validity windows: each *distinct* value in `time` order becomes an interval
-/// that runs from that fact's time until the next distinct value. Consecutive
-/// facts with an identical value fold into one interval. Returns `None` when
-/// there are no facts for this dimension.
+/// The dimension is selected by [`FactType`] — the same filter
+/// [`StateEngine::aggregate`](crate::cognition::StateEngine::aggregate) uses —
+/// and **not** by a payload field. Every fact emitted by the production
+/// compilers carries only `content`/`negated`/`attribution`, so selecting the
+/// dimension by payload key silently dropped all real facts and made
+/// `state_timeline` return zero dimensions for every real conversation.
+///
+/// `value_keys` is a priority list of payload fields naming the *state value*
+/// (the thing that changes: Python → Rust). The first present field wins; when
+/// none is present the entire payload becomes the fold value, so two distinct
+/// key-less facts never collapse into one interval.
+///
+/// Groups the facts by the resolved state value and splits them into validity
+/// windows: each *distinct* value in `time` order becomes an interval that runs
+/// from that fact's time until the next distinct value. Consecutive facts with
+/// an identical value **and** negation fold into one interval. Returns `None`
+/// when there are no facts for this dimension.
 #[must_use]
 pub fn intervals_for_dimension(
     facts: &[Fact],
-    key: &str,
-    value_key: &str,
+    fact_type: FactType,
+    value_keys: &[&str],
 ) -> Option<StateEvolution> {
     let mut dimension_facts: Vec<&Fact> = facts
         .iter()
-        .filter(|fact| {
-            fact.payload
-                .get(key)
-                .and_then(serde_json::Value::as_str)
-                .is_some()
-        })
+        .filter(|fact| fact.fact_type == fact_type)
         .collect();
     if dimension_facts.is_empty() {
         return None;
@@ -125,7 +132,7 @@ pub fn intervals_for_dimension(
     dimension_facts.sort_by_key(|fact| (fact.time, fact.created_at, fact.id.unwrap_or(0)));
 
     let mut evolution = StateEvolution {
-        key: key.to_string(),
+        key: fact_type.as_str().to_string(),
         ..StateEvolution::default()
     };
     let mut current: Option<StateInterval> = None;
@@ -138,11 +145,7 @@ pub fn intervals_for_dimension(
         // PLUS the negation flag: "喜欢 Python" then "还是喜欢 Python" is the
         // SAME state (Python), but "喜欢应酬" then "不喜欢应酬" is a DIFFERENT
         // state even though both carry `preference: 应酬`.
-        let state_value = fact
-            .payload
-            .get(value_key)
-            .cloned()
-            .unwrap_or(serde_json::Value::Null);
+        let state_value = resolve_state_value(&fact.payload, value_keys);
         let negated = fact
             .payload
             .get("negated")
@@ -182,12 +185,17 @@ pub fn intervals_for_dimension(
     }
 
     // Deterministic transition detection between consecutive intervals.
-    for window in evolution.intervals.windows(2) {
+    //
+    // The endpoints must be the indices of the window being inspected, not of
+    // the last two intervals: `intervals` does not grow inside this loop, so
+    // `len() - 2`/`len() - 1` pinned every transition to the tail pair and
+    // mislabelled the whole history once a dimension had three or more states.
+    for (index, window) in evolution.intervals.windows(2).enumerate() {
         let (from, to) = (&window[0], &window[1]);
         if let Some(transition_type) = detect_transition(from, to) {
             evolution.transitions.push(StateTransition {
-                from_index: evolution.intervals.len() - 2,
-                to_index: evolution.intervals.len() - 1,
+                from_index: index,
+                to_index: index + 1,
                 at: to.from,
                 transition_type,
                 evidence_ids: to.evidence_ids.clone(),
@@ -196,6 +204,20 @@ pub fn intervals_for_dimension(
     }
 
     Some(evolution)
+}
+
+/// Resolve the fold value of a fact: the first present `value_keys` field, or
+/// the whole payload when none is present.
+///
+/// Falling back to the payload (rather than `Null`) keeps key-less facts
+/// distinct — with a `Null` fallback every such fact folded into a single
+/// interval and all but the last state silently disappeared.
+fn resolve_state_value(payload: &serde_json::Value, value_keys: &[&str]) -> serde_json::Value {
+    value_keys
+        .iter()
+        .find_map(|key| payload.get(*key))
+        .cloned()
+        .unwrap_or_else(|| payload.clone())
 }
 
 /// Deterministic transition detection between two consecutive intervals.
@@ -268,20 +290,29 @@ fn contains_action_word(content: &str) -> bool {
 /// The five cognitive dimensions `aggregate_intervals` reports on, aligned
 /// with `EntityState`'s current-state dimensions.
 ///
-/// Each entry is `(filter_key, value_key)`:
+/// Each entry is `(fact_type, value_keys)`:
 ///
-/// - `filter_key` — a fact belongs to this dimension when its payload carries
-///   this field (e.g. a Preference fact carries `preference`).
-/// - `value_key` — the payload field that distinguishes one state from
-///   another; a change of this field starts a new interval (e.g. Python → Rust
-///   under the same `preference` key). `content` is chosen so that "喜欢
-///   Python" then "开始喜欢 Rust" are different states.
-pub const COGNITIVE_DIMENSIONS: &[(&str, &str)] = &[
-    ("goal", "content"),
-    ("preference", "content"),
-    ("emotion", "label"),
-    ("relationship", "content"),
-    ("identity", "content"),
+/// - `fact_type` — a fact belongs to this dimension when it carries this type,
+///   mirroring [`StateEngine::aggregate`](crate::cognition::StateEngine::aggregate)
+///   so the current state and the state history never disagree about what
+///   belongs to a dimension.
+/// - `value_keys` — priority list of payload fields naming the state value; the
+///   first present field wins and the whole payload is the fallback. `content`
+///   leads every list because that is what actually changes between two states
+///   ("喜欢 Python" → "开始喜欢 Rust"); the trailing names cover facts that
+///   carry only their semantic field.
+pub const COGNITIVE_DIMENSIONS: &[(FactType, &[&str])] = &[
+    (FactType::Goal, &["content", "goal"]),
+    (FactType::Preference, &["content", "preference", "topic"]),
+    (FactType::Emotion, &["content", "emotion", "label"]),
+    (
+        FactType::Relationship,
+        &["content", "target", "with", "object"],
+    ),
+    (
+        FactType::Identity,
+        &["content", "identity", "attribute", "key"],
+    ),
 ];
 
 #[cfg(test)]
@@ -352,8 +383,9 @@ mod tests {
                 None,
             ),
         ];
-        let evolution = intervals_for_dimension(&facts, "preference", "content")
-            .expect("preference dimension has facts");
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
         assert_eq!(
             evolution.intervals.len(),
             3,
@@ -403,8 +435,9 @@ mod tests {
                 None,
             ),
         ];
-        let evolution = intervals_for_dimension(&facts, "preference", "content")
-            .expect("preference dimension has facts");
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
         assert_eq!(
             evolution.intervals.len(),
             1,
@@ -447,8 +480,9 @@ mod tests {
                 Some(true),
             ),
         ];
-        let evolution = intervals_for_dimension(&facts, "preference", "content")
-            .expect("preference dimension has facts");
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
         assert_eq!(evolution.intervals.len(), 2, "both states preserved");
         assert_eq!(evolution.transitions.len(), 1, "one transition");
         assert_eq!(
@@ -485,8 +519,9 @@ mod tests {
                 Some(false),
             ),
         ];
-        let evolution = intervals_for_dimension(&facts, "preference", "content")
-            .expect("preference dimension has facts");
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
         assert_eq!(evolution.intervals.len(), 2, "intervals preserved");
         assert!(
             evolution.transitions.is_empty(),
@@ -498,7 +533,7 @@ mod tests {
     /// Invariants: None, not an empty Some.
     #[test]
     fn empty_dimension_yields_none() {
-        let evolution = intervals_for_dimension(&[], "preference", "content");
+        let evolution = intervals_for_dimension(&[], FactType::Preference, &["content"]);
         assert!(evolution.is_none(), "no facts → no evolution");
     }
 
@@ -527,8 +562,9 @@ mod tests {
                 None,
             ),
         ];
-        let evolution = intervals_for_dimension(&facts, "preference", "content")
-            .expect("preference dimension has facts");
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
         assert_eq!(evolution.intervals.len(), 1, "goal fact is filtered out");
         assert_eq!(
             evolution.key, "preference",
@@ -561,12 +597,143 @@ mod tests {
         );
         a.payload["keyword"] = serde_json::Value::from("社交");
         b.payload["keyword"] = serde_json::Value::from("社交");
-        let evolution = intervals_for_dimension(&[a, b], "preference", "content")
-            .expect("preference dimension has facts");
+        let evolution =
+            intervals_for_dimension(&[a, b], FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
         assert_eq!(evolution.transitions.len(), 1, "one gradual change");
         assert_eq!(
             evolution.transitions[0].transition_type,
             TransitionType::GradualChange
+        );
+    }
+
+    /// Objective: Verify every transition points at its OWN window once a
+    /// dimension has three or more intervals. The previous implementation wrote
+    /// `len() - 2`/`len() - 1`, which pinned all transitions to the tail pair;
+    /// the two-interval tests never exposed it.
+    /// Invariants: three states → three intervals and two transitions with
+    /// `(from_index, to_index)` equal to `(0, 1)` and `(1, 2)`; each referenced
+    /// pair is adjacent in time (`from.to == to.from`) and moves forward.
+    #[test]
+    fn every_transition_references_its_own_window() {
+        let mut facts = vec![
+            fact(
+                1,
+                FactType::Preference,
+                2024,
+                "preference",
+                "独处",
+                "喜欢独处",
+                None,
+            ),
+            fact(
+                2,
+                FactType::Preference,
+                2025,
+                "preference",
+                "社交",
+                "开始想社交",
+                None,
+            ),
+            fact(
+                3,
+                FactType::Preference,
+                2026,
+                "preference",
+                "热闹",
+                "喜欢热闹",
+                None,
+            ),
+        ];
+        // A shared `keyword` on both sides of every window makes the change a
+        // definite GradualChange, so a transition is emitted per window.
+        for fact in &mut facts {
+            fact.payload["keyword"] = serde_json::Value::from("社交");
+        }
+
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
+                .expect("preference dimension has facts");
+        assert_eq!(
+            evolution.intervals.len(),
+            3,
+            "three states → three intervals"
+        );
+
+        let windows: Vec<(usize, usize)> = evolution
+            .transitions
+            .iter()
+            .map(|transition| (transition.from_index, transition.to_index))
+            .collect();
+        assert_eq!(
+            windows,
+            vec![(0, 1), (1, 2)],
+            "each transition must reference its own window, not the tail pair"
+        );
+
+        for transition in &evolution.transitions {
+            let from = &evolution.intervals[transition.from_index];
+            let to = &evolution.intervals[transition.to_index];
+            assert_eq!(
+                from.to,
+                Some(to.from),
+                "transition endpoints must be adjacent intervals"
+            );
+            assert!(
+                from.from < to.from,
+                "a transition must move forward in time ({} → {})",
+                from.from,
+                to.from
+            );
+        }
+    }
+
+    /// Objective: Verify production-shaped facts still map onto their cognitive
+    /// dimension. Facts emitted by the companion channels carry only
+    /// `attribution`/`content`/`negated`; the old payload-key filter required a
+    /// field such as `emotion`, so `state_timeline` returned zero dimensions for
+    /// every real conversation.
+    /// Invariants: two Emotion facts yield the `emotion` dimension with two
+    /// intervals (ADD-only: neither state is folded away).
+    #[test]
+    fn production_shaped_payloads_map_to_their_dimension() {
+        let emotion = |id: i64, time: i32, content: &str| Fact {
+            id: Some(id),
+            entity_id: 7,
+            fact_type: FactType::Emotion,
+            time,
+            payload: serde_json::json!({
+                "attribution": "agent_personality",
+                "content": content,
+                "negated": false,
+            }),
+            created_at: i64::from(time),
+            ..Fact::default()
+        };
+        let facts = vec![
+            emotion(1, 2024, "我心里很害怕"),
+            emotion(2, 2026, "我心里很平静"),
+        ];
+
+        let evolution =
+            intervals_for_dimension(&facts, FactType::Emotion, &["content", "emotion", "label"])
+                .expect("production emotion facts must map to the emotion dimension");
+        assert_eq!(
+            evolution.key, "emotion",
+            "the dimension key is the fact type name"
+        );
+        assert_eq!(
+            evolution.intervals.len(),
+            2,
+            "both emotion states survive as intervals"
+        );
+        assert_eq!(
+            evolution.intervals[0].from, 2024,
+            "the first interval starts at the earliest state"
+        );
+        assert!(
+            evolution.intervals[1].to.is_none(),
+            "the latest interval is still open"
         );
     }
 }

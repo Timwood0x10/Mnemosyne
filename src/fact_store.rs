@@ -346,21 +346,6 @@ impl SqliteFactStore {
             .map_err(|error| Error::Storage(StorageError::LockPoisoned(error.to_string())))
     }
 
-    fn fact_type_name(fact_type: FactType) -> &'static str {
-        match fact_type {
-            FactType::Identity => "identity",
-            FactType::Preference => "preference",
-            FactType::Goal => "goal",
-            FactType::Event => "event",
-            FactType::Relationship => "relationship",
-            FactType::Emotion => "emotion",
-            FactType::Location => "location",
-            FactType::Occupation => "occupation",
-            FactType::Interest => "interest",
-            FactType::Habit => "habit",
-        }
-    }
-
     fn parse_fact_type(value: &str) -> Result<FactType> {
         match value {
             "identity" => Ok(FactType::Identity),
@@ -418,7 +403,7 @@ impl SqliteFactStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(sql)?;
         let mut rows = match fact_type {
-            Some(value) => stmt.query(params![entity_id, Self::fact_type_name(value)])?,
+            Some(value) => stmt.query(params![entity_id, value.as_str()])?,
             None => stmt.query(params![entity_id])?,
         };
         let mut facts = Vec::new();
@@ -507,8 +492,15 @@ impl SqliteFactStore {
     ///
     /// # Errors
     ///
-    /// Returns a storage error when the insert fails.
+    /// Returns [`Error::InvalidInput`] when the decision violates
+    /// [`crate::decision::validate_decision`] (empty or oversized fields), and a
+    /// storage error when the insert fails.
     pub fn insert_decision(&self, decision: &crate::decision::Decision) -> Result<i64> {
+        if let Some(field) = crate::decision::validate_decision(decision) {
+            return Err(Error::InvalidInput(format!(
+                "invalid decision field `{field}`"
+            )));
+        }
         let because = serde_json::to_string(&decision.because)?;
         let conn = self.lock_conn()?;
         conn.execute(
@@ -578,13 +570,22 @@ impl SqliteFactStore {
         subject: i64,
         keyword: &str,
     ) -> Result<Vec<crate::decision::Decision>> {
-        let pattern = format!("%{}%", keyword.to_lowercase());
+        // Escape the backslash FIRST (so the `\%`/`\_` inserted below are not
+        // re-escaped), then the LIKE wildcards: without this a keyword such as
+        // `%` matched every decision and `_` acted as a single-character
+        // wildcard (mirrors `knowledge/store.rs::search_evidence`).
+        let escaped = keyword
+            .to_lowercase()
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, subject, verb, object, made_at, because, outcome, status
              FROM decisions
              WHERE subject = ?1
-               AND (lower(verb) LIKE ?2 OR lower(object) LIKE ?2)
+               AND (lower(verb) LIKE ?2 ESCAPE '\\' OR lower(object) LIKE ?2 ESCAPE '\\')
              ORDER BY made_at DESC, id DESC",
         )?;
         let mut rows = stmt.query(params![subject, pattern])?;
@@ -598,32 +599,49 @@ impl SqliteFactStore {
     /// Update a decision's outcome and close it. Applies the outcome exactly
     /// once (see [`crate::decision::apply_outcome`]).
     ///
+    /// The "exactly once" guard lives in the `UPDATE` statement itself
+    /// (`AND outcome IS NULL`), so two concurrent callers can never overwrite
+    /// each other: a read-then-write pair would let the second caller replace
+    /// the first recorded outcome. Returns `None` when the id is unknown.
+    ///
     /// # Errors
     ///
-    /// Returns a storage error when the update fails or the id is unknown.
+    /// Returns a storage error when the update or the read-back fails.
     pub fn set_decision_outcome(
         &self,
         decision_id: i64,
         outcome: crate::decision::DecisionOutcome,
     ) -> Result<Option<crate::decision::Decision>> {
-        let Some(decision) = self.get_decision(decision_id)? else {
-            return Ok(None);
-        };
-        if decision.outcome.is_some() {
-            return Ok(Some(decision));
-        }
         // Scope the connection guard: it must be dropped BEFORE the read-back
         // below, which re-locks the connection. `lock_conn()` is a non-reentrant
         // Mutex, so holding the guard across `get_decision` would deadlock.
         {
             let conn = self.lock_conn()?;
-            conn.execute(
-                "UPDATE decisions SET outcome = ?1, status = 'closed' WHERE id = ?2",
-                params![outcome.as_str(), decision_id],
-            )?;
+            Self::apply_outcome_once(&conn, decision_id, outcome)?;
         }
-        let updated = self.get_decision(decision_id)?.expect("just updated");
-        Ok(Some(updated))
+        self.get_decision(decision_id)
+    }
+
+    /// Record `outcome` only when the decision has none yet.
+    ///
+    /// Returns the number of rows changed: `1` for the first recorded outcome,
+    /// `0` when the decision is unknown or already closed. The condition is part
+    /// of the statement, making the check and the write a single atomic step.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the update fails.
+    fn apply_outcome_once(
+        conn: &Connection,
+        decision_id: i64,
+        outcome: crate::decision::DecisionOutcome,
+    ) -> Result<usize> {
+        let changed = conn.execute(
+            "UPDATE decisions SET outcome = ?1, status = 'closed'
+             WHERE id = ?2 AND outcome IS NULL",
+            params![outcome.as_str(), decision_id],
+        )?;
+        Ok(changed)
     }
 
     /// Decode a decision row into a [`crate::decision::Decision`].
@@ -870,7 +888,7 @@ impl FactStore for SqliteFactStore {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 fact.entity_id,
-                Self::fact_type_name(fact.fact_type),
+                fact.fact_type.as_str(),
                 fact.time,
                 payload,
                 fact.evidence_id,
@@ -900,7 +918,7 @@ impl FactStore for SqliteFactStore {
                 let derived_from = serde_json::to_string(&fact.derived_from)?;
                 stmt.execute(params![
                     fact.entity_id,
-                    Self::fact_type_name(fact.fact_type),
+                    fact.fact_type.as_str(),
                     fact.time,
                     payload,
                     fact.evidence_id,
@@ -1484,5 +1502,138 @@ mod tests {
             matches!(error, Error::Storage(StorageError::InvalidData(_))),
             "malformed because is InvalidData, got {error:?}"
         );
+    }
+
+    /// Objective: Verify `insert_decision` actually enforces
+    /// `validate_decision` rather than persisting malformed rows — the validator
+    /// previously existed but was never called from the write path.
+    /// Invariants: a blank object and a blank verb are rejected with
+    /// `InvalidInput` and leave no row behind; a valid decision still inserts.
+    #[test]
+    fn insert_decision_rejects_invalid_fields() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+
+        let mut blank_object = sample_decision(7, "promise", "占位");
+        blank_object.object = "   ".to_string();
+        let error = store
+            .insert_decision(&blank_object)
+            .expect_err("a blank object must be rejected");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "a blank object is InvalidInput, got {error:?}"
+        );
+
+        let mut blank_verb = sample_decision(7, "promise", "占位");
+        blank_verb.verb = String::new();
+        let error = store
+            .insert_decision(&blank_verb)
+            .expect_err("a blank verb must be rejected");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "a blank verb is InvalidInput, got {error:?}"
+        );
+
+        let id = store
+            .insert_decision(&sample_decision(7, "promise", "明天去医院"))
+            .expect("a valid decision still inserts");
+        assert!(id > 0, "a valid decision must be persisted");
+        assert_eq!(
+            store.get_decisions(7).expect("list decisions").len(),
+            1,
+            "rejected decisions must not leave a row behind"
+        );
+    }
+
+    /// Objective: Verify the "apply the outcome exactly once" guard lives in the
+    /// SQL statement, making the check and the write one atomic step. A
+    /// read-then-write pair can be interleaved by two concurrent callers, and
+    /// the later one silently overwrote the earlier outcome.
+    /// Invariants: the first guarded update changes exactly 1 row, a second
+    /// changes 0 rows, an unknown id changes 0 rows, and the stored outcome
+    /// keeps the first recorded value while the status becomes closed.
+    #[test]
+    fn decision_outcome_guard_is_atomic_at_the_statement_level() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let id = store
+            .insert_decision(&sample_decision(7, "promise", "明天去医院"))
+            .expect("insert decision");
+
+        let conn = store.lock_conn().expect("lock fact database");
+        let first = SqliteFactStore::apply_outcome_once(
+            &conn,
+            id,
+            crate::decision::DecisionOutcome::Fulfilled,
+        )
+        .expect("first guarded update");
+        assert_eq!(first, 1, "the first outcome must be recorded");
+
+        let second = SqliteFactStore::apply_outcome_once(
+            &conn,
+            id,
+            crate::decision::DecisionOutcome::Violated,
+        )
+        .expect("second guarded update");
+        assert_eq!(
+            second, 0,
+            "an already-recorded outcome must never be overwritten"
+        );
+
+        let unknown = SqliteFactStore::apply_outcome_once(
+            &conn,
+            id + 9_999,
+            crate::decision::DecisionOutcome::Violated,
+        )
+        .expect("guarded update on an unknown id");
+        assert_eq!(unknown, 0, "an unknown decision must change nothing");
+        drop(conn);
+
+        let stored = store
+            .get_decision(id)
+            .expect("read decision")
+            .expect("decision exists");
+        assert_eq!(
+            stored.outcome,
+            Some(crate::decision::DecisionOutcome::Fulfilled),
+            "the first recorded outcome must survive the overwrite attempt"
+        );
+        assert_eq!(
+            stored.status,
+            crate::decision::DecisionStatus::Closed,
+            "recording an outcome closes the decision"
+        );
+    }
+
+    /// Objective: Verify `search_decisions` escapes LIKE wildcards — a keyword
+    /// of `%` must match only the decisions that literally contain `%`, not
+    /// every row, and `_` must not act as a single-character wildcard.
+    /// Invariants: `%`, `_` and `\` each match exactly their literal decision.
+    #[test]
+    fn search_decisions_escapes_like_wildcards() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        store
+            .insert_decision(&sample_decision(7, "report", "进度 100% 完成"))
+            .expect("insert percent decision");
+        store
+            .insert_decision(&sample_decision(7, "report", "文件 a_b 已归档"))
+            .expect("insert underscore decision");
+        store
+            .insert_decision(&sample_decision(7, "report", "路径 C:\\data 已备份"))
+            .expect("insert backslash decision");
+
+        let percent = store.search_decisions(7, "%").expect("search percent");
+        assert_eq!(percent.len(), 1, "a `%` keyword must match literally");
+        assert_eq!(percent[0].object, "进度 100% 完成");
+
+        let underscore = store.search_decisions(7, "_").expect("search underscore");
+        assert_eq!(underscore.len(), 1, "an `_` keyword must match literally");
+        assert_eq!(underscore[0].object, "文件 a_b 已归档");
+
+        let backslash = store.search_decisions(7, "\\").expect("search backslash");
+        assert_eq!(
+            backslash.len(),
+            1,
+            "a backslash keyword must match literally"
+        );
+        assert_eq!(backslash[0].object, "路径 C:\\data 已备份");
     }
 }
