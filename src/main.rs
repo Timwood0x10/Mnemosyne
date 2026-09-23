@@ -645,9 +645,15 @@ async fn build_server(
 
 #[tokio::main]
 async fn main() -> AnyhowResult<()> {
-    // Initialize logging.
+    // Initialize logging. Default to `warn` when `RUST_LOG` is unset or
+    // unparsable: the library reports degradation (missing lexicon/dictionary
+    // config, embedding failures, decayed facts) through `tracing`, and those
+    // warnings must be visible without asking the user to configure logging
+    // first. Any valid `RUST_LOG` still overrides it.
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+        )
         .with_writer(std::io::stderr) // keep stdout clean for JSON-RPC
         .init();
 

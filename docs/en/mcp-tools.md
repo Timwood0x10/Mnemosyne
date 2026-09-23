@@ -598,6 +598,15 @@ Each interval's `evidence_ids` points at the original text that established the
 state: the compile path registers `payload.evidence.text` as an `evidence` row
 (one row per utterance, shared by the facts it produced).
 
+### Closing a decision
+
+`memory_compile` accepts an optional `decision_outcomes` array
+(`[{"decision_id":3,"outcome":"fulfilled"}]`) so the host can declare what
+happened to an earlier commitment. Nothing is inferred from the conversation, the
+first outcome recorded for a decision wins (a later declaration is echoed back but
+never overwrites it), and an unknown id is reported as `missing` instead of
+failing the call.
+
 ### Example Request
 
 ```json

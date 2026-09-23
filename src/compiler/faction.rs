@@ -170,20 +170,6 @@ impl FactionTracker {
         }
         graph
     }
-
-    /// Print faction transition report to stderr.
-    pub fn print_report(&self) {
-        if self.transitions.is_empty() {
-            eprintln!("  No faction transitions");
-            return;
-        }
-        for t in &self.transitions {
-            eprintln!(
-                "  Ch.{}  {}  {} → {}  ({}) [conf={}]",
-                t.chapter, t.entity, t.from_faction, t.to_faction, t.reason, t.confidence
-            );
-        }
-    }
 }
 
 #[cfg(test)]

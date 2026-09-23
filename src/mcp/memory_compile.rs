@@ -41,7 +41,7 @@ impl MemoryCompileTool {
 pub fn memory_compile_definition() -> ToolDefinition {
     ToolDefinition {
         name: "memory_compile".into(),
-        description: "Compile conversation into structured knowledge + decisions + session state. Optionally distill memories.".into(),
+        description: "Compile conversation into structured knowledge + decisions + session state. Optionally distill memories and declare what happened to earlier commitments.".into(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -62,7 +62,19 @@ pub fn memory_compile_definition() -> ToolDefinition {
                 "conversation_id": {"type": "string", "description": "Required when distill=true"},
                 "tenant_id": {"type": "string", "default": "default"},
                 "user_id": {"type": "string"},
-                "agent_id": {"type": "string", "description": "Optional agent identity; enables compiling the agent's own promises into decisions"}
+                "agent_id": {"type": "string", "description": "Optional agent identity; enables compiling the agent's own promises into decisions"},
+                "decision_outcomes": {
+                    "type": "array",
+                    "description": "Optional: declare what happened to earlier commitments, e.g. [{\"decision_id\":3,\"outcome\":\"fulfilled\"}]. Nothing is inferred from the conversation, and the FIRST outcome recorded for a decision wins: a later declaration is echoed back but never overwrites it. Unknown ids are reported as `missing` instead of failing the call.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "decision_id": {"type": "integer", "minimum": 1},
+                            "outcome": {"type": "string", "enum": ["fulfilled", "violated"]}
+                        },
+                        "required": ["decision_id", "outcome"]
+                    }
+                }
             },
             "required": ["messages"]
         }),
@@ -77,6 +89,13 @@ impl ToolHandler for MemoryCompileTool {
             .and_then(Value::as_array)
             .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
         let messages = parse_messages(messages_raw)?;
+        // Decision closure: the host declares what happened to earlier
+        // commitments. This is the ONLY outcome write path — the decision MCP
+        // surface is read-only, and nothing is inferred from the conversation,
+        // so a promise is never closed by a guess. Declarations are validated
+        // before the first write, so a malformed one cannot leave a
+        // half-applied call behind.
+        let outcome_reports = self.record_decision_outcomes(args)?;
         let tenant_id = args
             .get("tenant_id")
             .and_then(Value::as_str)
@@ -140,6 +159,7 @@ impl ToolHandler for MemoryCompileTool {
                 "facts_compiled": compiled.facts.len(),
                 "facts_stored": stored_facts,
                 "decisions_recorded": decisions_recorded,
+                "decision_outcomes": outcome_reports,
                 // Lexicon provenance: which lexicon version produced these facts
                 // (ELITE_LEXICON_PLAN §15 — hash in compile diagnostics).
                 "lexicon": {
@@ -154,6 +174,72 @@ impl ToolHandler for MemoryCompileTool {
 }
 
 impl MemoryCompileTool {
+    /// Record the outcomes the caller declared for earlier decisions.
+    ///
+    /// Every declaration is validated before the first write, so a malformed
+    /// entry aborts the call without touching any decision. The report echoes
+    /// the **resulting** state of each decision: an id that does not exist comes
+    /// back as `missing`, and a declaration that lost to an already-recorded
+    /// outcome comes back carrying the original one — the caller always sees
+    /// what the store actually holds instead of a silent success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] when a declaration is malformed, and a
+    /// storage error when the update fails.
+    fn record_decision_outcomes(&self, args: &Value) -> Result<Vec<Value>, Error> {
+        let Some(declared) = args.get("decision_outcomes") else {
+            return Ok(Vec::new());
+        };
+        if declared.is_null() {
+            return Ok(Vec::new());
+        }
+        let declared = declared
+            .as_array()
+            .ok_or_else(|| Error::InvalidInput("`decision_outcomes` must be an array".into()))?;
+
+        let mut validated = Vec::with_capacity(declared.len());
+        for entry in declared {
+            let decision_id = entry
+                .get("decision_id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| {
+                    Error::InvalidInput(
+                        "each `decision_outcomes` entry needs an integer `decision_id`".into(),
+                    )
+                })?;
+            let raw = entry
+                .get("outcome")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    Error::InvalidInput(
+                        "each `decision_outcomes` entry needs a string `outcome`".into(),
+                    )
+                })?;
+            let outcome = crate::decision::DecisionOutcome::parse(raw).ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "unknown outcome `{raw}`, expected `fulfilled` or `violated`"
+                ))
+            })?;
+            validated.push((decision_id, outcome));
+        }
+
+        let mut reports = Vec::with_capacity(validated.len());
+        for (decision_id, outcome) in validated {
+            reports.push(
+                match self.fact_store.set_decision_outcome(decision_id, outcome)? {
+                    Some(decision) => serde_json::json!({
+                        "decision_id": decision.id,
+                        "outcome": decision.outcome.map(crate::decision::DecisionOutcome::as_str),
+                        "status": decision.status.as_str(),
+                    }),
+                    None => serde_json::json!({ "decision_id": decision_id, "missing": true }),
+                },
+            );
+        }
+        Ok(reports)
+    }
+
     /// Extract this conversation's commitments together with the fact that
     /// anchors each one, without writing anything.
     ///
@@ -537,6 +623,137 @@ mod tests {
             payload["cognition"]["facts_stored"].as_u64(),
             Some(subject_facts.len() as u64),
             "the reported stored count must include the anchor fact"
+        );
+    }
+
+    /// Objective: Verify the decision loop can actually be CLOSED: the caller
+    /// declares what happened to an earlier commitment, the store records it
+    /// exactly once, and the report echoes the state the store really holds.
+    /// Before this path existed a decision stayed `open` forever, because no
+    /// production code ever wrote `outcome`.
+    /// Invariants: `fulfilled` closes the decision; a later `violated` is echoed
+    /// back as `fulfilled` and does NOT overwrite it; an unknown id is reported
+    /// as `missing` instead of failing the call; a malformed declaration is
+    /// rejected BEFORE anything is written.
+    #[tokio::test]
+    async fn declared_outcomes_close_a_decision_exactly_once() {
+        let fact_store = Arc::new(
+            SqliteFactStore::open_in_memory()
+                .expect("An isolated fact store must initialize for the handler test"),
+        );
+        let tool = MemoryCompileTool::new(None, fact_store.clone());
+        let promise = serde_json::json!({"role": "user", "content": "我答应你明天陪你去医院"});
+
+        let compiled = tool
+            .call(&serde_json::json!({
+                "tenant_id": "tenant-a",
+                "user_id": "alice",
+                "messages": [promise]
+            }))
+            .await
+            .expect("the commitment must compile");
+        let subject = result_payload(&compiled)["cognition"]["user_entity_id"]
+            .as_i64()
+            .expect("the compile reports the user entity id");
+        let decision_id = fact_store
+            .get_decisions(subject)
+            .expect("decisions are readable")
+            .first()
+            .and_then(|decision| decision.id)
+            .expect("the promise is stored with an id");
+
+        // 1. A declared outcome closes the decision.
+        let closed = tool
+            .call(&serde_json::json!({
+                "tenant_id": "tenant-a",
+                "user_id": "alice",
+                "messages": [{"role": "user", "content": "今天天气不错"}],
+                "decision_outcomes": [{"decision_id": decision_id, "outcome": "fulfilled"}]
+            }))
+            .await
+            .expect("a declared outcome must be recorded");
+        let reports = result_payload(&closed)["cognition"]["decision_outcomes"].clone();
+        assert_eq!(
+            reports[0]["outcome"],
+            serde_json::json!("fulfilled"),
+            "the report must echo the recorded outcome, got {reports}"
+        );
+        assert_eq!(
+            reports[0]["status"],
+            serde_json::json!("closed"),
+            "recording an outcome closes the decision, got {reports}"
+        );
+        assert_eq!(
+            fact_store
+                .get_decision(decision_id)
+                .expect("read the decision")
+                .expect("the decision exists")
+                .outcome,
+            Some(crate::decision::DecisionOutcome::Fulfilled),
+            "the outcome must be persisted"
+        );
+
+        // 2. The first outcome wins — the caller sees the truth, not its own
+        //    declaration echoed back.
+        let conflicting = tool
+            .call(&serde_json::json!({
+                "tenant_id": "tenant-a",
+                "user_id": "alice",
+                "messages": [{"role": "user", "content": "今天天气不错"}],
+                "decision_outcomes": [{"decision_id": decision_id, "outcome": "violated"}]
+            }))
+            .await
+            .expect("a conflicting declaration is not an error");
+        let reports = result_payload(&conflicting)["cognition"]["decision_outcomes"].clone();
+        assert_eq!(
+            reports[0]["outcome"],
+            serde_json::json!("fulfilled"),
+            "an already-recorded outcome must never be overwritten, got {reports}"
+        );
+
+        // 3. An unknown id is reported, not fatal.
+        let unknown = tool
+            .call(&serde_json::json!({
+                "tenant_id": "tenant-a",
+                "user_id": "alice",
+                "messages": [{"role": "user", "content": "今天天气不错"}],
+                "decision_outcomes": [{"decision_id": decision_id + 999, "outcome": "violated"}]
+            }))
+            .await
+            .expect("an unknown decision id must not fail the call");
+        assert_eq!(
+            result_payload(&unknown)["cognition"]["decision_outcomes"][0]["missing"],
+            serde_json::json!(true),
+            "an unknown id must be reported as missing"
+        );
+
+        // 4. Malformed input aborts before the first write.
+        let error = tool
+            .call(&serde_json::json!({
+                "tenant_id": "tenant-b",
+                "user_id": "bob",
+                "messages": [{"role": "user", "content": "我答应你明天陪你去医院"}],
+                "decision_outcomes": [{"decision_id": decision_id, "outcome": "maybe"}]
+            }))
+            .await
+            .expect_err("an unknown outcome value must be rejected");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "an unknown outcome is InvalidInput, got {error:?}"
+        );
+        let bob = fact_store
+            .resolve_user("tenant-b", "bob")
+            .expect("resolve the second user");
+        assert!(
+            fact_store.get_facts(bob).expect("read facts").is_empty(),
+            "a rejected call must not store any fact"
+        );
+        assert!(
+            fact_store
+                .get_decisions(bob)
+                .expect("read decisions")
+                .is_empty(),
+            "a rejected call must not store any decision"
         );
     }
 }

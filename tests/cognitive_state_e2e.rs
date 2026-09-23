@@ -9,6 +9,8 @@
 //!
 //! ```text
 //! memory_compile ──► facts + a Decision anchored to an Event fact
+//!       │            (and, when the host declares it, the outcome of an
+//!       │             EARLIER commitment — the decision loop closes here)
 //!       │
 //!       ├─► state_timeline   (per-dimension state intervals from those facts)
 //!       ├─► decision_search  (find the recorded decision)
@@ -517,5 +519,135 @@ async fn three_state_evolution_chain_carries_its_evidence() {
         provenance["evidence"],
         json!("我喜欢一个人待在家里"),
         "the original utterance must be readable back, got {provenance}"
+    );
+}
+
+/// Objective: Verify the decision loop CLOSES over the real MCP path: the host
+/// declares what happened to a compiled commitment and the read tools report the
+/// recorded outcome. Before this path existed a decision stayed `open` forever,
+/// because no production code ever wrote `outcome`.
+/// Invariants: a fresh decision is open with no outcome; declaring `fulfilled`
+/// makes `decision_trace` report status `closed` / outcome `fulfilled`; a later
+/// `violated` declaration is echoed as `fulfilled` and leaves the record intact.
+#[tokio::test]
+async fn declared_outcome_closes_the_decision_loop_over_mcp() {
+    let store = Arc::new(SqliteFactStore::open_in_memory().expect("open fact store"));
+    let server = ServerBuilder::new(Implementation {
+        name: "mnemosyne-e2e".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+    .tool(
+        memory_compile_definition(),
+        Arc::new(MemoryCompileTool::new(None, store.clone())),
+    )
+    .await
+    .tool(
+        decision_search_definition(),
+        Arc::new(DecisionSearchTool::new(store.clone())),
+    )
+    .await
+    .tool(
+        decision_trace_definition(),
+        Arc::new(DecisionTraceTool::new(store.clone())),
+    )
+    .await
+    .build();
+
+    let compiled = call_tool(
+        &server,
+        1,
+        "memory_compile",
+        json!({
+            "tenant_id": "tenant-a",
+            "user_id": "dave",
+            "messages": [{"role": "user", "content": "我答应你明天陪你去医院"}]
+        }),
+    )
+    .await;
+    let subject = compiled["cognition"]["user_entity_id"]
+        .as_i64()
+        .expect("memory_compile must report the resolved user entity id");
+
+    let found = call_tool(
+        &server,
+        2,
+        "decision_search",
+        json!({ "subject": subject, "keyword": "医院" }),
+    )
+    .await;
+    let decision_id = found["decisions"][0]["decision_id"]
+        .as_i64()
+        .expect("the promise must be searchable");
+    assert_eq!(
+        found["decisions"][0]["status"],
+        json!("open"),
+        "a freshly compiled decision is open, got {found}"
+    );
+    assert!(
+        found["decisions"][0]["outcome"].is_null(),
+        "a freshly compiled decision has no outcome, got {found}"
+    );
+
+    // The host declares the promise was kept.
+    let closed = call_tool(
+        &server,
+        3,
+        "memory_compile",
+        json!({
+            "tenant_id": "tenant-a",
+            "user_id": "dave",
+            "messages": [{"role": "user", "content": "今天天气不错"}],
+            "decision_outcomes": [{"decision_id": decision_id, "outcome": "fulfilled"}]
+        }),
+    )
+    .await;
+    assert_eq!(
+        closed["cognition"]["decision_outcomes"][0]["outcome"],
+        json!("fulfilled"),
+        "the compile must report the recorded outcome, got {closed}"
+    );
+
+    let traced = call_tool(
+        &server,
+        4,
+        "decision_trace",
+        json!({ "decision_id": decision_id }),
+    )
+    .await;
+    assert_eq!(
+        traced["status"],
+        json!("closed"),
+        "recording an outcome closes the decision, got {traced}"
+    );
+    assert_eq!(
+        traced["outcome"],
+        json!("fulfilled"),
+        "the recorded outcome must be readable, got {traced}"
+    );
+
+    // A later contradiction cannot rewrite history.
+    call_tool(
+        &server,
+        5,
+        "memory_compile",
+        json!({
+            "tenant_id": "tenant-a",
+            "user_id": "dave",
+            "messages": [{"role": "user", "content": "今天天气不错"}],
+            "decision_outcomes": [{"decision_id": decision_id, "outcome": "violated"}]
+        }),
+    )
+    .await;
+    let traced = call_tool(
+        &server,
+        6,
+        "decision_trace",
+        json!({ "decision_id": decision_id }),
+    )
+    .await;
+    assert_eq!(
+        traced["outcome"],
+        json!("fulfilled"),
+        "the first recorded outcome must survive a conflicting declaration, got {traced}"
     );
 }

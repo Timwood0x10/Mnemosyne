@@ -351,26 +351,6 @@ pub fn run_decay_pass(
     Ok(stats)
 }
 
-/// Mark a fact as archived and write back its decay score. Never deletes the row.
-///
-/// # Errors
-///
-/// Returns a storage error when the update fails.
-pub fn archive_fact(store: &SqliteFactStore, fact_id: i64, score: f64) -> Result<()> {
-    store.set_decay(fact_id, score, true)
-}
-
-/// List the archived (down-weighted, still present) facts for an entity.
-///
-/// This proves decay never deletes: archived facts remain fully readable.
-///
-/// # Errors
-///
-/// Returns a storage error when the read fails.
-pub fn list_archived(store: &SqliteFactStore, entity_id: i64) -> Result<Vec<Fact>> {
-    store.list_archived(entity_id)
-}
-
 /// Run the background decay task (plan D2): every `interval` run one decay
 /// pass over all entities, until the caller sets `stop` to `true`. The decay
 /// policy itself is deterministic and stateless, so each tick is independent.
@@ -635,9 +615,11 @@ mod tests {
             .expect("insert fact");
         assert!(id > 0, "insert returns a positive id");
 
-        archive_fact(&store, id, 0.5).expect("archive fact");
+        store
+            .set_decay(id, 0.5, true)
+            .expect("write back the decay state");
 
-        let archived = list_archived(&store, 7).expect("list archived");
+        let archived = store.list_archived(7).expect("list archived");
         assert_eq!(archived.len(), 1, "archived fact remains readable");
         assert_eq!(
             archived[0].id,

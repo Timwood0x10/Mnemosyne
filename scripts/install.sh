@@ -11,7 +11,7 @@
 #
 # Usage:
 #   ./install.sh                 # install the latest release
-#   ./install.sh v0.1.2          # install a specific release tag
+#   ./install.sh v0.1.3          # install a specific release tag
 #   MNEMOSYNE_HOME=/opt/mnemosyne ./install.sh   # custom install directory
 #
 # Install directory: $MNEMOSYNE_HOME if set, else ~/.mnemosyne.

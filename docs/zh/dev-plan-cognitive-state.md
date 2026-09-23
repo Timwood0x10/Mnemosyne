@@ -370,8 +370,21 @@ struct Decision {
 
 - **Step 1 + Step 2**：已合入（Fact 升维 + 状态区间），README 定位为
   "Cognitive Memory Engine for Persistent AI Companions"。
-- **Step 3**：已合入（决策闭环，实验性）。写入路径按 §4 Step 3 第 3 条改为**编译期生成**，
+- **Step 3**：已合入（决策闭环，实验性）。**写入**路径按 §4 Step 3 第 3 条改为**编译期生成**；
+  **结果回填**同样走编译期——`memory_compile` 的可选 `decision_outcomes` 由**宿主**声明
+  "早先的承诺后来怎么样了"，引擎不做任何推断（审计层里猜错比漏记更糟）。
   MCP 表面积仍只有 `decision_trace` / `decision_search` 两个只读工具。
+- **三步的验收都在真实数据上跑通**（不再依赖手工构造的 payload，这正是此前缺陷藏身之处）：
+  - Step 1 — `tests/cognitive_state_e2e.rs::cognition_layer_full_loop_over_mcp`（真实 `tools/call`），
+    外加 `fact_provenance` 能读回原文证据；
+  - Step 2 — 同文件 `three_state_evolution_chain_carries_its_evidence`：
+    "宅家 → 想社交 → 第一次参加活动"语料保留**三个时间状态**、每个状态**各自带 evidence**，
+    并报出 `gradual_change` → `behavioral_confirmation`；
+  - Step 3 — 同文件 `declared_outcome_closes_the_decision_loop_over_mcp`：
+    承诺 → 检索 → 宿主声明结果 → 决策关闭，且首次结果不可被覆盖。
+- **实现期加固（2026-09-23）**：三轮评审共 15 项缺陷已全部修复，明细见
+  `review-2026-09-22.md` 与 `review-2026-09-23.md`；其中 5 项直接动摇本计划的验收
+  （变迁类型生产不可达、用户否定被丢弃、折叠键不稳定、证据链未落库、Decision 无法关闭）。
 - 三者随 **0.1.3** 发布。
 
 ---
@@ -404,3 +417,17 @@ struct Decision {
 | 3 | `state_intervals` 保持泛型，防 god object | §4 Step 2 + §6 冻结为 `Vec<StateEvolution>`，禁止 per-dimension 结构体 |
 | 4 | **删掉 memory_decay 联动** | §4 Step 3：Step 3 不修改 decay 语义，是否纳入留待数据决定 |
 | 5 | 补充核心 invariant：State 可重算、原始 Fact 永不消失 | §2.1（这是无需 Event Sourcing 的原因） |
+
+### v3 → v3.1（2026-09-23，实现期加固）
+
+计划冻结的**架构、不变量与 scope 红线均未变**；本轮只修正"计划已声明、但生产链路没有兑现"的部分，
+并把这些不变量补成**基于真实编译产物**的验收（此前用测试内手工构造的 payload，掩盖了下列问题）：
+
+| # | 评审发现 | 处理 |
+|---|---|---|
+| 1 | `gradual_change` 要求 `keyword`，而比较文本取自 `content`——没有任何生产 payload 能同时满足，招牌变迁永不触发 | 比较文本按 `content`→`object`→`keyword`→`action` 回退；"同话题"改为 `keyword`/`topic`/`preference`/`action` |
+| 2 | 用户侧否定语句在编译期被整条丢弃 → 用户实体的 `stance_flip` 结构性不可达，且"不喜欢 X"根本无法被记录 | 否定观测保留（**仅 `Goal`** 仍按 §13.3 丢弃），肯定侧也显式写 `negated: false`，使翻转两侧都可读 |
+| 3 | `evidence` 表在生产路径从未被写入 → Step 1 的"证据原文"与 Step 2 的"各自 evidence"双双落空 | 写入路径登记 `payload.evidence.text` 并回写 `evidence_id`；同一话语产生的多条事实共享一行 |
+| 4 | `outcome` 没有任何生产写入路径 → 决策永远 `Open`，"认知闭环"缺一环 | 新增可选 `decision_outcomes` 入参（宿主显式声明、首解生效、未知 id 回报 `missing`，不做推断） |
+| 5 | 折叠键回退整份 payload → `occurrences` 这类计数器把同一状态切成多个区间 | 折叠键只用稳定字段 |
+| 6 | 衰减把缺失的 `access_count` 当作"从未访问" → 首次 pass 几乎把全库标记为已衰减 | 未知访问史按中性处理；decay 明确为"策展信号"，不改 §4 Step 3 第 4 条的冻结（不接召回） |

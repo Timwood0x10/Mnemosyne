@@ -156,6 +156,22 @@
     },
     "user_id": {
       "type": "string"
+    },
+    "agent_id": {
+      "type": "string",
+      "description": "可选：Agent 身份，启用后会把 Agent 自己的承诺编译成 Decision"
+    },
+    "decision_outcomes": {
+      "type": "array",
+      "description": "可选：声明早先的承诺后来怎么样了，如 [{\"decision_id\":3,\"outcome\":\"fulfilled\"}]。不从对话里推断任何东西；同一个决策的**首次**结果生效，之后的声明只回显不覆盖；未知 id 以 missing 回报而不是让本次调用失败。",
+      "items": {
+        "type": "object",
+        "properties": {
+          "decision_id": {"type": "integer", "minimum": 1},
+          "outcome": {"type": "string", "enum": ["fulfilled", "violated"]}
+        },
+        "required": ["decision_id", "outcome"]
+      }
     }
   },
   "required": ["messages"]

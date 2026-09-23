@@ -61,7 +61,7 @@ pub const RESOLVE_THRESHOLD: f32 = 0.85;
 /// let resolver = EntityResolver::new(aliases);
 /// let result = resolver.resolve("玄德");
 /// assert!(result.is_matched());
-/// resolver.stats().print_report();
+/// assert!(resolver.stats().alias_hit_rate() > 0.0);
 /// ```
 pub struct EntityResolver {
     pipeline: ResolverPipeline,

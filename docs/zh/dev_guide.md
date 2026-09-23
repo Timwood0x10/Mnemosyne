@@ -220,7 +220,7 @@ Entity Resolution 的索引。赵云出现位置：ch3 offset 100, ch41 offset 9
 CREATE TABLE compiler_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     doc_id INTEGER NOT NULL,
-    version TEXT NOT NULL,            -- lore-compiler v0.1.0
+    version TEXT NOT NULL,            -- writer version, e.g. '0.1.3'
     started_at INTEGER,
     finished_at INTEGER,
     status TEXT,                      -- running / completed / failed

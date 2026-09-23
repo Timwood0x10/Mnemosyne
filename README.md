@@ -305,7 +305,7 @@ curl -fsSL https://raw.githubusercontent.com/Timwood0x10/Mnemosyne/main/scripts/
 git clone https://github.com/Timwood0x10/Mnemosyne.git
 cd Mnemosyne
 ./scripts/install.sh          # latest release
-./scripts/install.sh v0.1.2   # a specific version
+./scripts/install.sh v0.1.3   # a specific version
 ```
 
 What it produces — everything lives in one directory, so the binary always
@@ -396,7 +396,7 @@ cargo run --bin mnemosyne \
 
 ```bash
 make check      # cargo clippy + cargo check (0 errors)
-make test       # 780+ unit + integration tests (nextest, ~1s warm)
+make test       # 800+ unit + integration tests (nextest, ~1s warm)
 ```
 
 The suite is **self-contained**: each test builds its own synthetic corpus and
@@ -455,7 +455,7 @@ the novel's canonical entity names/aliases for the compiler's dictionary
 
 ```bash
 make check      # cargo clippy + cargo check
-make test       # All 780+ tests
+make test       # All 800+ tests
 make fmt        # Format code
 ```
 

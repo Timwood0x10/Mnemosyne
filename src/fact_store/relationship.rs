@@ -6,21 +6,6 @@ use super::*;
 use crate::relationship::{EmotionTrend, RelationshipStage, RelationshipState};
 
 impl SqliteFactStore {
-    /// Persist (insert or replace) a relationship state row.
-    ///
-    /// The `(tenant_id, agent_entity_id, user_entity_id)` triple is the unique
-    /// identity of a relationship; an existing row is updated in place on
-    /// conflict. This is an upsert, not a delete — the latest snapshot always
-    /// wins, matching the ADD-only accumulation policy at the state layer.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the row cannot be written.
-    pub(crate) fn save_relationship(&self, rs: &RelationshipState) -> Result<i64> {
-        let conn = self.lock_conn()?;
-        save_relationship_unlocked(&conn, rs)
-    }
-
     /// Load a relationship state row by its identity triple.
     ///
     /// Returns `Ok(None)` when no relationship has been recorded yet.

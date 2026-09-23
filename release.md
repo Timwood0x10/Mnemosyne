@@ -90,6 +90,9 @@ falls back to built-in defaults and keeps working.
 - **Decision write path** — `memory_compile` compiles explicit commitments into
   `Decision` records anchored to an Event fact for the utterance;
   `decision_trace` and `decision_search` read them back.
+- **Decision closure** — the same call accepts a `decision_outcomes` array so the
+  host declares what happened to an earlier commitment (nothing is inferred; the
+  first outcome recorded wins). Previously every decision stayed `open` forever.
 - **Evidence anchors are now persisted.** Compiled facts used to keep the
   original utterance only inside their payload while `evidence_id` stayed NULL,
   which left the `evidence` table empty in production: `fact_provenance`'s
@@ -147,6 +150,20 @@ falls back to built-in defaults and keeps working.
   `compiler/name_validation`, plus the binary tool handlers).
 - **All `#[allow(...)]` suppressions removed** and library warnings moved to
   `tracing`; the transition tests live in `tests/state_transitions.rs`.
+- **Dead thin wrappers dropped** (`RelationshipStore::upsert_relationship`,
+  `SqliteFactStore::save_relationship`, `decay::archive_fact`,
+  `decay::list_archived`): every one of them only forwarded to a method the
+  production paths already call.
+- **Logging defaults to `warn`** when `RUST_LOG` is unset or unparsable, so the
+  library's degradation warnings (missing config, embedding failures) are visible
+  without configuring logging first. `RUST_LOG` still overrides it, and stdout
+  stays clean for JSON-RPC.
+- **Print-only helpers dropped** (`ResolverStats::print_report`,
+  `FactionReport::print_report`) and one test that asserted nothing replaced by a
+  real assertion.
+- **The release job refuses a version mismatch.** The tag is derived from this
+  file's first line, so a `Cargo.toml` that disagreed would have published a tag
+  the binary does not claim; the workflow now fails before creating the release.
 
 ## Docs
 

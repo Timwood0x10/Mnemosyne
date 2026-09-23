@@ -117,15 +117,24 @@ mod tests {
         );
     }
 
-    /// Objective: Verify that aliases with partial overlap work.
-    /// Invariants: "单福" has some similarity to "徐庶".
+    /// Objective: Verify the name index refuses to GUESS. "单福" is 徐庶's alias
+    /// in the novel, but it shares no bigram with the canonical name, so the
+    /// similarity gate must return `None` here — aliases are the entity
+    /// registry's job, and the vector layer supplements exact matching instead of
+    /// replacing it. An identical name still matches at full similarity.
+    /// Invariants: zero shared bigrams → `None`; identical name → similarity 1.0.
     #[test]
-    fn alias_caught() {
-        let idx = NameIndex::build(&["徐庶".into()]);
-        let result = idx.best_match("单福");
-        // Single character aliases might not match — but the system
-        // still catches them via the entity registry alias table.
-        // The vector layer supplements, not replaces, exact matching.
-        eprintln!("single-char alias match: {:?}", result);
+    fn unlisted_alias_is_not_guessed() {
+        let idx = NameIndex::build(&["徐庶".into(), "徐元直".into()]);
+        assert_eq!(
+            idx.best_match("单福"),
+            None,
+            "an alias sharing no bigram must not be force-matched"
+        );
+        assert_eq!(
+            idx.best_match("徐元直"),
+            Some(("徐元直".to_string(), 1.0)),
+            "an identical name must match at full similarity"
+        );
     }
 }

@@ -95,7 +95,7 @@ impl EntityEngine {
                 // Defensive degrade: never crash a compile because the
                 // automaton could not be built. An empty matcher finds
                 // nothing, which is strictly better than a panic.
-                eprintln!("entity engine: Aho-Corasick build failed ({e}); using empty matcher");
+                tracing::warn!(error = %e, "entity engine: Aho-Corasick build failed; using an empty matcher");
                 AhoCorasickBuilder::new()
                     .build(Vec::<&str>::new())
                     .expect("empty pattern list is always buildable")

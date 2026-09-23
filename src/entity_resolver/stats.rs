@@ -107,14 +107,6 @@ impl ResolverStats {
         }
         hits as f64 / total as f64 * 100.0
     }
-
-    /// Print a summary of all hit rates to stderr.
-    pub fn print_report(&self) {
-        eprintln!("Alias hit rate:   {:.1}%", self.alias_hit_rate());
-        eprintln!("Embedding hit:    {:.1}%", self.embedding_hit_rate());
-        eprintln!("Unknown:          {:.1}%", self.unknown_rate());
-        eprintln!("Cache hit rate:   {:.1}%", self.cache_hit_rate());
-    }
 }
 
 #[cfg(test)]

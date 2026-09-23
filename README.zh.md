@@ -275,7 +275,7 @@ curl -fsSL https://raw.githubusercontent.com/Timwood0x10/Mnemosyne/main/scripts/
 git clone https://github.com/Timwood0x10/Mnemosyne.git
 cd Mnemosyne
 ./scripts/install.sh          # 安装最新版本
-./scripts/install.sh v0.1.2   # 安装指定版本
+./scripts/install.sh v0.1.3   # 安装指定版本
 ```
 
 安装后的目录结构——所有文件放在同一目录，二进制启动时自动在自身旁边找到资源：
@@ -363,7 +363,7 @@ cargo run --bin mnemosyne \
 
 ```bash
 make check      # cargo clippy + cargo check（0 error）
-make test       # 780+ 单元 + 集成测试（nextest，热缓存约 1s）
+make test       # 800+ 单元 + 集成测试（nextest，热缓存约 1s）
 ```
 
 测试套件**自包含**：每个用例自建合成语料与内存 SQLite，全新 checkout 即可通过，
@@ -434,7 +434,7 @@ cargo test --test cognitive_state_e2e -- --nocapture
 
 ```bash
 make check      # cargo clippy + cargo check
-make test       # 全部 780+ 测试
+make test       # 全部 800+ 测试
 make fmt        # 格式化代码
 ```
 

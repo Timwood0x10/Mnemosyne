@@ -7,7 +7,9 @@
 //! - `because` references the facts that *supported* the decision (supporting
 //!   evidence, not causality: "D was supported by F17", never "F17 caused D").
 //! - `outcome` has a lifecycle of its own and starts `None` (the decision is
-//!   recorded before the outcome is known).
+//!   recorded before the outcome is known). It is never *inferred*: the host
+//!   declares it through `memory_compile`'s `decision_outcomes` argument, and
+//!   the first outcome recorded for a decision wins.
 //!
 //! Scope guards (frozen):
 //!

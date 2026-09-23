@@ -226,15 +226,6 @@ impl RelationshipStore {
         Self { store }
     }
 
-    /// Persist (insert or replace) a relationship snapshot.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the row cannot be written.
-    pub fn upsert_relationship(&self, rs: &RelationshipState) -> Result<i64> {
-        self.store.save_relationship(rs)
-    }
-
     /// Read the current relationship snapshot for a pair.
     ///
     /// Returns `Ok(None)` when no relationship has been recorded yet.

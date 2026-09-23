@@ -101,7 +101,7 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   channel); file-allowlist for memory transfer tools; FTS5 query injection
   hardening (see earlier entry).
 
-## [0.1.3] - 2026-09-22
+## [0.1.3] - 2026-09-23
 
 ### Added
 
@@ -128,6 +128,12 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `decision_search` → `decision_trace` → `fact_provenance`. Every other
   integration test called a handler directly, which is how hand-crafted payloads
   kept the state-layer defects invisible.
+- **Decisions can be closed.** `memory_compile` accepts an optional
+  `decision_outcomes` array so the host declares what happened to an earlier
+  commitment; before this the decision surface was read-only *and* nothing wrote
+  `outcome`, so every decision stayed `open` forever. Nothing is inferred from the
+  conversation, the first outcome recorded wins, and unknown ids come back as
+  `missing` instead of failing the call.
 - **The plan's Step 2 acceptance runs on real data.**
   `tests/cognitive_state_e2e.rs::three_state_evolution_chain_carries_its_evidence`
   drives the "宅家 → 想社交 → 第一次参加活动" corpus through the real compiler and
@@ -219,6 +225,11 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `plan/cognitive-state-v03.md` and `plan/external-knowledge-plan.md` were dangling
   links; and the tool's dimension list was a hand-maintained copy that would have
   rejected any dimension added to the engine.
+- **A test that asserted nothing.** `compiler::resolver::tests::alias_caught`
+  printed its result with `eprintln!` instead of asserting, and its stated
+  invariant ("单福 has some similarity to 徐庶") was simply false — the two share no
+  bigram. It now asserts both directions: an unlisted alias is not force-matched,
+  and an identical name matches at full similarity.
 
 ### Changed
 
@@ -232,9 +243,17 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **Suppression and stderr cleanups.** All `#[allow(...)]` attributes were removed
   (a `field_reassign_with_default` on the config tests, a stale
   `too_many_arguments`, and a `dead_code` JSON field that serde ignores anyway),
-  and library warnings now go through `tracing` instead of `eprintln!`. The
-  transition tests moved to `tests/state_transitions.rs`, which brings
-  `src/state.rs` back under the 1000-line rule.
+  and library warnings now go through `tracing` instead of `eprintln!` — including
+  the entity engine's Aho-Corasick degrade path. `print_report` methods that only
+  wrote to stderr (`ResolverStats`, `FactionReport`) were dropped, and the binary
+  now defaults to a `warn` log filter when `RUST_LOG` is unset so those warnings
+  are visible without configuring logging first. The transition tests moved to
+  `tests/state_transitions.rs`, which brings `src/state.rs` back under the
+  1000-line rule.
+- **The release job refuses a version mismatch.** The tag is derived from
+  `release.md`'s first line, so a `Cargo.toml` that disagreed would have published
+  a tag the binary does not claim; the workflow now fails before creating the
+  release.
 
 ### Docs
 
