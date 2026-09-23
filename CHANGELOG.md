@@ -101,7 +101,59 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   channel); file-allowlist for memory transfer tools; FTS5 query injection
   hardening (see earlier entry).
 
-## [Unreleased]
+## [0.1.3] - 2026-09-22
+
+### Added
+
+- **Cognitive state history (v0.3 Step 2).** `StateEngine::aggregate_intervals`
+  projects an entity's facts into per-dimension `StateEvolution`s — time-ordered
+  `StateInterval`s with their evidence anchors plus deterministic
+  `StateTransition`s (`gradual_change` / `stance_flip` /
+  `behavioral_confirmation`). ADD-only: facts are never removed, state is always
+  recomputable, and a change without a definite signal is reported as intervals
+  only instead of a fabricated transition. Exposed as the `state_timeline` tool.
+- **Fact provenance (v0.3 Step 1).** Facts carry `confidence`, a three-state
+  epistemic `status` (active/superseded/contradicted) and a `derived_from`
+  derivation chain; the `fact_provenance` tool audits why a fact is believed.
+- **Decision layer write path (v0.3.1).** `memory_compile` now compiles explicit
+  commitments ("我答应…" / "I promise…") into first-class `Decision` records.
+  The commitment utterance is stored as an anchored Event fact first and the
+  decision's `because` points at it, so `decision_trace` can walk from a
+  decision back to its evidence. Extraction is rule-driven and LLM-free, and is
+  deliberately conservative: a bare plan ("我会…") is not a promise.
+- `decision_trace` / `decision_search` MCP tools for reading the decision layer.
+
+### Fixed
+
+- **`state_timeline` returned zero dimensions for every real conversation.**
+  Dimensions were selected by a payload field (`preference`, `emotion`, …) that
+  no production compiler emits — facts carry only `content`/`negated`/
+  `attribution`. Dimensions are now selected by `FactType`, the same filter
+  `StateEngine::aggregate` uses, with a payload fallback so distinct key-less
+  facts never fold into one interval.
+- **Transition endpoints were pinned to the tail pair.** The transition loop
+  wrote `len() - 2`/`len() - 1` while `intervals` did not grow, so every
+  transition of a dimension with three or more states pointed at the last two.
+  Each transition now references its own window index.
+- **`set_decision_outcome` could overwrite a recorded outcome.** The
+  read-then-write pair was replaced by a single guarded statement
+  (`UPDATE … WHERE id = ?2 AND outcome IS NULL`), so a decision can never be
+  both fulfilled and violated.
+- **`decision_search` did not escape LIKE wildcards and did not clamp `limit`.**
+  A query of `%` matched every decision, and an out-of-range `limit` was
+  honoured instead of being capped at the schema maximum.
+- **`insert_decision` never validated its input.** `validate_decision` existed
+  but was only called from tests; it is now enforced on the write path.
+
+### Changed
+
+- **Large modules split to satisfy the one-file-per-1000-lines rule.**
+  `fact_store`, `cognition`, `store`, `retrieval`, `conversation_compiler`,
+  `character`, `distiller`, `lexicon`, `knowledge/store` and
+  `compiler/name_validation` were decomposed into focused submodules, together
+  with the binary's `memory_*` / `character_*` tool handlers. `fact_store` and
+  `knowledge/store` also gained their own test modules. `FactType::as_str`
+  replaced three duplicated `fact_type_name` mappings.
 
 ### Changed
 

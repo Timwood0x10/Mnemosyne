@@ -62,7 +62,8 @@ pub fn memory_compile_definition() -> ToolDefinition {
                 "distill": {"type": "boolean", "default": false, "description": "Also run distillation pipeline"},
                 "conversation_id": {"type": "string", "description": "Required when distill=true"},
                 "tenant_id": {"type": "string", "default": "default"},
-                "user_id": {"type": "string"}
+                "user_id": {"type": "string"},
+                "agent_id": {"type": "string", "description": "Optional agent identity; enables compiling the agent's own promises into decisions"}
             },
             "required": ["messages"]
         }),
@@ -88,7 +89,45 @@ impl ToolHandler for MemoryCompileTool {
         let compiled =
             self.compiler
                 .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);
-        let stored_facts = self.fact_store.insert_batch(&compiled.facts)?;
+        let mut stored_facts = self.fact_store.insert_batch(&compiled.facts)?;
+
+        // v0.3.1 Decision write path: explicit commitments become first-class
+        // `Decision` rows so `decision_trace` can walk from a decision back to
+        // the facts that support it. The frozen plan keeps the decision MCP
+        // surface read-only, so this compile step IS the write path.
+        //
+        // A commitment is itself experience worth keeping: the utterance is
+        // stored as an Event fact first and the decision points at it, so every
+        // decision stays anchored to a stored fact (promise markers are not in
+        // the observation marker tables, so nothing else anchors it).
+        let mut decisions_recorded = 0usize;
+        for (role, subject) in self.commitment_speakers(args, tenant_id, user_entity_id)? {
+            let commitments = crate::commitment::commitments_from_messages(
+                &messages,
+                role,
+                subject,
+                logical_time,
+            );
+            if commitments.is_empty() {
+                continue;
+            }
+            let existing_facts = self.fact_store.get_facts(subject)?;
+            for mut decision in commitments {
+                let anchor_id = self
+                    .fact_store
+                    .insert_fact(&crate::commitment::anchor_fact(&decision, logical_time))?;
+                stored_facts += 1;
+                decision.because = std::iter::once(anchor_id)
+                    .chain(crate::commitment::supporting_fact_ids(
+                        &existing_facts,
+                        subject,
+                        &decision.object,
+                    ))
+                    .collect();
+                self.fact_store.insert_decision(&decision)?;
+                decisions_recorded += 1;
+            }
+        }
 
         let builder = PromptBuilder;
         let recent_count = messages.len().min(6);
@@ -121,6 +160,7 @@ impl ToolHandler for MemoryCompileTool {
                 "observations_compiled": compiled.observations.len(),
                 "facts_compiled": compiled.facts.len(),
                 "facts_stored": stored_facts,
+                "decisions_recorded": decisions_recorded,
                 // Lexicon provenance: which lexicon version produced these facts
                 // (ELITE_LEXICON_PLAN §15 — hash in compile diagnostics).
                 "lexicon": {
@@ -135,6 +175,29 @@ impl ToolHandler for MemoryCompileTool {
 }
 
 impl MemoryCompileTool {
+    /// Resolve which `(role, entity)` speaker channels to scan for commitments.
+    ///
+    /// The user channel always exists. The agent channel is only used when the
+    /// caller supplied an `agent_id`, so a compile without one never
+    /// materialises an agent entity as a side effect.
+    fn commitment_speakers(
+        &self,
+        args: &Value,
+        tenant_id: &str,
+        user_entity_id: i64,
+    ) -> Result<Vec<(&'static str, i64)>, Error> {
+        let mut speakers = vec![("user", user_entity_id)];
+        if let Some(agent_id) = args.get("agent_id").and_then(Value::as_str) {
+            if !agent_id.is_empty() {
+                speakers.push((
+                    "assistant",
+                    self.fact_store.resolve_agent(tenant_id, agent_id)?,
+                ));
+            }
+        }
+        Ok(speakers)
+    }
+
     async fn distill_if_requested(
         &self,
         args: &Value,
@@ -383,6 +446,85 @@ mod tests {
                 .expect("Entity lookup after invalid input must succeed")
                 .is_none(),
             "Invalid input must not create the default user as a side effect"
+        );
+    }
+
+    /// Objective: Verify the v0.3.1 decision write path end to end — a compiled
+    /// conversation containing an explicit promise must persist a `Decision`
+    /// that points back at the facts compiled from the same utterance, so
+    /// `decision_trace` can walk from a decision to its evidence.
+    /// Invariants: exactly one decision is recorded for the user entity, it is
+    /// open with no outcome, and its supporting-fact list is non-empty.
+    #[tokio::test]
+    async fn compile_records_commitments_as_decisions() {
+        let fact_store = Arc::new(
+            SqliteFactStore::open_in_memory()
+                .expect("An isolated fact store must initialize for the handler test"),
+        );
+        let tool = MemoryCompileTool::new(None, fact_store.clone());
+        let result = tool
+            .call(&serde_json::json!({
+                "tenant_id": "tenant-a",
+                "user_id": "alice",
+                "messages": [
+                    {"role": "user", "content": "我答应你明天陪你去医院"}
+                ]
+            }))
+            .await
+            .expect("A commitment conversation must compile");
+        let payload = result_payload(&result);
+
+        assert_eq!(
+            payload["cognition"]["decisions_recorded"],
+            serde_json::json!(1),
+            "the promise must be recorded as one decision"
+        );
+
+        let user_entity_id = payload["cognition"]["user_entity_id"]
+            .as_i64()
+            .expect("the cognition payload exposes the user entity id");
+        let decisions = fact_store
+            .get_decisions(user_entity_id)
+            .expect("decisions are readable after the compile");
+        assert_eq!(decisions.len(), 1, "exactly one decision is persisted");
+        assert_eq!(decisions[0].verb, "promise", "答应 compiles to a promise");
+        assert_eq!(decisions[0].object, "我答应你明天陪你去医院");
+        assert_eq!(
+            decisions[0].status,
+            crate::decision::DecisionStatus::Open,
+            "a freshly compiled decision is open"
+        );
+        assert!(
+            decisions[0].outcome.is_none(),
+            "a freshly compiled decision has no outcome"
+        );
+
+        let subject_facts = fact_store
+            .get_facts(user_entity_id)
+            .expect("compiled facts are readable");
+        assert_eq!(
+            decisions[0].because.len(),
+            1,
+            "the decision must point at exactly the fact anchored to its utterance"
+        );
+        let anchor_id = decisions[0].because[0];
+        let anchor = subject_facts
+            .iter()
+            .find(|fact| fact.id == Some(anchor_id))
+            .expect("the anchor fact must be stored alongside the decision");
+        assert_eq!(
+            anchor.fact_type,
+            crate::cognition::FactType::Event,
+            "a commitment is anchored as an Event fact"
+        );
+        assert_eq!(
+            anchor.payload["content"], "我答应你明天陪你去医院",
+            "the anchor fact carries the commitment utterance verbatim"
+        );
+        assert_eq!(
+            payload["cognition"]["facts_stored"].as_u64(),
+            Some(subject_facts.len() as u64),
+            "the reported stored count must include the anchor fact"
         );
     }
 }

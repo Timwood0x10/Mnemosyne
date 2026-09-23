@@ -5,11 +5,13 @@
 //!
 //! ## Architecture
 //!
-//! The server exposes 10 MCP tools (`memory_distill`, `memory_compile`,
-//! `memory_search`, `memory_store`, `memory_feedback`, `memory_stats`,
-//! `character_search`, `character_network`, `character_ingest`,
-//! `character_graph`) backed by an 8-stage distillation pipeline, a
-//! SQLite-vec vector store, and a character knowledge graph store.
+//! The server speaks MCP over stdio (or HTTP+SSE) and exposes the tool set
+//! documented in `README.md`: conversation compilation into cognitive facts,
+//! the cognitive-state history layer (`state_timeline`, `fact_provenance`),
+//! the decision layer (`decision_trace`, `decision_search`), knowledge-graph
+//! queries, and the companion-persona guard. Retrieval is backed by an
+//! 8-stage distillation pipeline, a SQLite-vec vector store, and a character
+//! knowledge graph store.
 //!
 //! ## Modules
 //!
@@ -39,6 +41,7 @@ pub mod character;
 pub mod classifier;
 pub mod cognition;
 pub mod cognition_compiler;
+pub mod commitment;
 pub mod compiler;
 pub mod config;
 pub mod conversation_compiler;
