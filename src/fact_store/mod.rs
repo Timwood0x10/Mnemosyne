@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS facts (
     payload      TEXT NOT NULL,
     evidence_id  INTEGER,
     created_at   INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+    confidence   REAL NOT NULL DEFAULT 1.0,
     weight       REAL DEFAULT 1.0,
     archived     INTEGER DEFAULT 0,
     status       TEXT NOT NULL DEFAULT 'active',
@@ -143,8 +144,17 @@ impl SqliteFactStore {
         // deletes the row, so the persona evolution timeline stays intact.
         Self::ensure_column(conn, "facts", "weight", "REAL DEFAULT 1.0")?;
         Self::ensure_column(conn, "facts", "archived", "INTEGER DEFAULT 0")?;
-        // v0.3 cognitive-state columns: epistemic status (dual-read migration:
-        // legacy `archived`/`weight` stay; `status`/`derived_from` are additive).
+        // Epistemic confidence owns its OWN column. Historically `weight`
+        // doubled as confidence because decay was its only writer, so decaying
+        // a fact silently rewrote "how much do we believe this?" — exactly what
+        // the plan forbids (§2.3: confidence ≠ status ≠ decay). When the column
+        // is created for the first time it is backfilled from `weight` so a
+        // legacy database keeps the confidence it had accumulated.
+        if Self::ensure_column(conn, "facts", "confidence", "REAL NOT NULL DEFAULT 1.0")? {
+            conn.execute("UPDATE facts SET confidence = weight", [])?;
+        }
+        // Cognitive-state columns: epistemic status (legacy `archived`/
+        // `weight` stay; `status`/`derived_from` are additive).
         Self::ensure_column(conn, "facts", "status", "TEXT NOT NULL DEFAULT 'active'")?;
         Self::ensure_column(conn, "facts", "derived_from", "TEXT NOT NULL DEFAULT '[]'")?;
         conn.execute_batch(
@@ -156,18 +166,31 @@ impl SqliteFactStore {
         Ok(())
     }
 
-    fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    /// Add `column` to `table` when it is missing.
+    ///
+    /// Returns `true` when this call created the column, so callers can run a
+    /// one-time backfill for rows that predate it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the schema cannot be inspected or altered.
+    fn ensure_column(
+        conn: &Connection,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> Result<bool> {
         let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
             if row.get::<_, String>(1)? == column {
-                return Ok(());
+                return Ok(false);
             }
         }
         conn.execute_batch(&format!(
             "ALTER TABLE {table} ADD COLUMN {column} {definition}"
         ))?;
-        Ok(())
+        Ok(true)
     }
 
     fn lock_conn(&self) -> Result<MutexGuard<'_, Connection>> {
@@ -216,9 +239,10 @@ impl SqliteFactStore {
             payload,
             evidence_id: row.get("evidence_id")?,
             created_at: row.get("created_at")?,
-            // Dual-read: `weight` (legacy decay score) IS the epistemic
-            // confidence — decay down-weights a fact, lowering its confidence.
-            confidence: row.get("weight")?,
+            // Epistemic confidence is its own column and is NEVER written by
+            // the decay path, so `factor in decay` and `how much do we believe
+            // this?` stay independent (plan §2.3).
+            confidence: row.get("confidence")?,
             derived_from,
             status: FactStatus::parse(&row.get::<_, String>("status")?),
         })
@@ -243,9 +267,13 @@ impl SqliteFactStore {
         Ok(facts)
     }
 
-    /// Write back a decay score and archive flag for a fact. This is the only
-    /// decay write path and it never deletes the row — the fact stays readable
-    /// so the persona evolution timeline remains reconstructable.
+    /// Write back a decay score and archive flag for a fact.
+    ///
+    /// This is the **only** decay write path and it never deletes the row — the
+    /// fact stays readable so the persona evolution timeline remains
+    /// reconstructable. It deliberately leaves `confidence` and `status`
+    /// untouched: decay, epistemic confidence and lifecycle status are
+    /// orthogonal (plan §2.3).
     ///
     /// # Errors
     ///
@@ -267,7 +295,7 @@ impl SqliteFactStore {
     pub fn list_archived(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
             "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    weight, status, derived_from
+                    confidence, status, derived_from
              FROM facts WHERE entity_id = ?1 AND archived = 1 ORDER BY time, created_at, id",
             entity_id,
             None,
@@ -348,7 +376,10 @@ impl SqliteFactStore {
         Ok(ids)
     }
 
-    /// Read the current decay flags (`weight`, `archived`) for a fact.
+    /// Read the current decay state (`weight`, `archived`) for a fact.
+    ///
+    /// Independent of [`Fact::confidence`]: decaying a fact must not change how
+    /// much it is believed.
     ///
     /// # Errors
     ///
@@ -371,7 +402,7 @@ impl FactStore for SqliteFactStore {
         let conn = self.lock_conn()?;
         conn.execute(
             "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
-                                weight, status, derived_from)
+                                confidence, status, derived_from)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 fact.entity_id,
@@ -397,7 +428,7 @@ impl FactStore for SqliteFactStore {
         {
             let mut stmt = transaction.prepare(
                 "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
-                                    weight, status, derived_from)
+                                    confidence, status, derived_from)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for fact in facts {
@@ -423,7 +454,7 @@ impl FactStore for SqliteFactStore {
     fn get_facts(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
             "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    weight, status, derived_from
+                    confidence, status, derived_from
              FROM facts WHERE entity_id = ?1 ORDER BY time, created_at, id",
             entity_id,
             None,
@@ -433,7 +464,7 @@ impl FactStore for SqliteFactStore {
     fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Result<Vec<Fact>> {
         self.read_facts(
             "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    weight, status, derived_from
+                    confidence, status, derived_from
              FROM facts WHERE entity_id = ?1 AND fact_type = ?2 ORDER BY time, created_at, id",
             entity_id,
             Some(fact_type),
@@ -443,7 +474,7 @@ impl FactStore for SqliteFactStore {
     fn get_timeline(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
             "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    weight, status, derived_from
+                    confidence, status, derived_from
              FROM facts WHERE entity_id = ?1 ORDER BY time DESC, created_at DESC, id DESC",
             entity_id,
             None,
@@ -454,7 +485,7 @@ impl FactStore for SqliteFactStore {
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    weight, status, derived_from
+                    confidence, status, derived_from
              FROM facts WHERE id = ?1",
         )?;
         let mut rows = stmt.query(params![fact_id])?;
@@ -636,12 +667,12 @@ mod tests {
         );
     }
 
-    /// Objective: Verify the v0.3 provenance columns (confidence/status/
-    /// derived_from) round-trip through insert → select, and that the legacy
-    /// dual-read columns (weight/archived) stay intact as the source of
-    /// confidence.
-    /// Invariants: confidence is read back from weight; status and
-    /// derived_from survive exactly; legacy rows default to Active.
+    /// Objective: Verify the provenance columns (confidence/status/
+    /// derived_from) round-trip through insert → select on their own storage
+    /// rather than borrowing the legacy decay column.
+    /// Invariants: confidence is stored and read back exactly; status and
+    /// derived_from survive exactly; legacy rows default to Active with the
+    /// fact's default confidence.
     #[test]
     fn provenance_columns_roundtrip_and_legacy_rows_default() {
         let store = SqliteFactStore::open_in_memory().expect("open fact store");
@@ -689,7 +720,7 @@ mod tests {
         );
         assert_eq!(
             legacy[0].confidence, 1.0,
-            "legacy row defaults confidence to weight 1.0"
+            "a row inserted without provenance columns defaults to full confidence"
         );
         assert!(
             legacy[0].derived_from.is_empty(),
@@ -697,7 +728,8 @@ mod tests {
         );
     }
 
-    /// Objective: Verify a pre-v0.3 database (facts table without the
+    /// Objective: Verify a database predating the provenance columns (a facts
+    /// table without the
     /// status/derived_from columns) is migrated in place by ensure_column and
     /// its existing rows survive with Active status.
     /// Invariants: ensure_column adds exactly the missing columns; rows remain.
@@ -706,7 +738,7 @@ mod tests {
         let store = SqliteFactStore::open_in_memory().expect("open fact store");
         {
             let conn = store.lock_conn().expect("lock fact database");
-            // Simulate a legacy schema: drop the v0.3 columns.
+            // Simulate a legacy schema: drop the provenance columns.
             conn.execute("ALTER TABLE facts DROP COLUMN status", [])
                 .expect("drop status column to simulate legacy schema");
             conn.execute("ALTER TABLE facts DROP COLUMN derived_from", [])
@@ -721,7 +753,7 @@ mod tests {
         {
             let conn = store.lock_conn().expect("lock fact database");
             SqliteFactStore::initialize_schema(&conn)
-                .expect("schema migration re-adds v0.3 columns");
+                .expect("schema migration re-adds the provenance columns");
         }
         let facts = store.get_facts(9).expect("read migrated row");
         assert_eq!(facts.len(), 1, "row survives migration");
@@ -733,6 +765,97 @@ mod tests {
         assert!(
             facts[0].derived_from.is_empty(),
             "migrated row defaults to empty derivation chain"
+        );
+    }
+
+    /// Objective: Verify decay no longer rewrites epistemic confidence — the
+    /// two used to share the `weight` column, so archiving a stale fact also
+    /// silently lowered "how much do we believe this?" (plan §2.3 forbids it).
+    /// Invariants: `set_decay` moves `weight`/`archived` only; the fact's
+    /// `confidence` and `status` are untouched.
+    #[test]
+    fn decay_does_not_change_confidence_or_status() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let id = store
+            .insert_fact(&Fact {
+                id: None,
+                entity_id: 7,
+                fact_type: FactType::Event,
+                time: 2026,
+                payload: serde_json::json!({"content": "a low-confidence claim"}),
+                evidence_id: None,
+                created_at: 2026,
+                confidence: 0.42,
+                derived_from: Vec::new(),
+                status: FactStatus::Active,
+            })
+            .expect("insert fact");
+        assert_eq!(
+            store.get_decay(id).expect("read decay state"),
+            (1.0, false),
+            "a freshly inserted fact carries no decay"
+        );
+
+        store.set_decay(id, 0.25, true).expect("archive the fact");
+
+        assert_eq!(
+            store.get_decay(id).expect("read decay state"),
+            (0.25, true),
+            "the decay state itself must be recorded"
+        );
+        let fact = store
+            .get_fact_by_id(id)
+            .expect("read fact back")
+            .expect("the archived fact is never deleted");
+        assert_eq!(
+            fact.confidence, 0.42,
+            "decay must not rewrite epistemic confidence"
+        );
+        assert_eq!(
+            fact.status,
+            FactStatus::Active,
+            "decay must not rewrite the epistemic status"
+        );
+    }
+
+    /// Objective: Verify a database created before the confidence column existed
+    /// migrates in place with its accumulated confidence preserved. The legacy
+    /// schema stored confidence in `weight`, so the backfill is what stops a
+    /// migration from silently resetting every fact to full confidence.
+    /// Invariants: after re-running schema init, `confidence` equals the legacy
+    /// `weight` value and the row survives.
+    #[test]
+    fn legacy_facts_backfill_confidence_from_weight() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            // Simulate the pre-split schema: no `confidence` column at all.
+            conn.execute("ALTER TABLE facts DROP COLUMN confidence", [])
+                .expect("drop confidence to simulate the legacy schema");
+            conn.execute(
+                "INSERT INTO facts (entity_id, fact_type, time, payload, created_at, weight)
+                 VALUES (9, 'preference', 1, '{\"content\":\"legacy\"}', 1, 0.4)",
+                [],
+            )
+            .expect("insert legacy row carrying confidence in `weight`");
+        }
+        {
+            let conn = store.lock_conn().expect("lock fact database");
+            SqliteFactStore::initialize_schema(&conn)
+                .expect("schema init re-adds and backfills the confidence column");
+        }
+
+        let facts = store.get_facts(9).expect("read migrated row");
+        assert_eq!(facts.len(), 1, "the legacy row survives the migration");
+        assert_eq!(
+            facts[0].confidence, 0.4,
+            "the legacy `weight` value becomes the fact's confidence"
+        );
+        let row_id = facts[0].id.expect("the legacy row exposes its id");
+        assert_eq!(
+            store.get_decay(row_id).expect("read decay state").0,
+            0.4,
+            "the legacy decay value stays readable after the split"
         );
     }
 }

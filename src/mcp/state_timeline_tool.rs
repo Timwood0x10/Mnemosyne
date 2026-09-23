@@ -1,5 +1,5 @@
 //! `state_timeline` MCP tool — the "how did the current state emerge?" layer
-//! (v0.3 Step 2).
+//! (cognitive-state plan, Step 2).
 //!
 //! While `persona_timeline` reconstructs *who a person has become* from persona
 //! milestones, `state_timeline` answers the temporal question per cognitive
@@ -10,7 +10,7 @@
 //! (state validity windows with their evidence anchors) plus deterministic
 //! [`StateTransition`]s between them.
 //!
-//! Determinism guarantees (frozen for v0.3):
+//! Determinism guarantees (frozen):
 //!
 //! - **ADD-only**: facts are never mutated or removed — intervals are a
 //!   derived view, always recomputable from facts.

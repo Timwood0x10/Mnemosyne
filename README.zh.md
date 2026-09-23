@@ -362,44 +362,45 @@ cargo run --bin mnemosyne \
 ### 测试
 
 ```bash
-make check      # cargo clippy + cargo check（0 error，0 warning）
-make test       # 700+ 单元 + 集成测试（nextest，约 18s）
-
-# 三国演义全本编译测试
-cargo test --test sanguo_compile e2e_sanguo -- --nocapture
+make check      # cargo clippy + cargo check（0 error）
+make test       # 780+ 单元 + 集成测试（nextest，热缓存约 1s）
 ```
 
-### 测试语料
+测试套件**自包含**：每个用例自建合成语料与内存 SQLite，全新 checkout 即可通过，
+不需要任何 fixture，也不依赖网络。认知层的端到端测试走**真实 MCP JSON-RPC 路径**
+（`tools/call` over 内存传输），而不是直接调用 handler：
 
-所有测试语料位于 `corpus/`（文本、PDF 与对话 JSON），每部小说的实体画像包在
-`config/entity_profiles/`。
+```bash
+cargo test --test cognitive_state_e2e -- --nocapture
+```
 
-| 语料 | 语言 | 类型 | 用途 |
-|--------|----------|------|---------|
-| `三国演义.txt` | 中 | 小说文本 | `sanguo_compile`, `generalize_corpus_regression` |
-| `水浒传.txt` | 中 | 小说文本 | `generalize_corpus_regression` |
-| `红楼梦.txt` | 中 | 小说文本 | `honglou_compile`, `generalize_corpus_regression` |
-| `西游记.txt` | 中 | 小说文本 | `xiyou` / `generalize_corpus_regression` |
-| `封神演义.txt` | 中 | 小说文本 | `fengshen_*`, `generalize_corpus_regression` |
-| `大秦帝国.txt` | 中 | 小说文本 | `daqin` |
-| `倾城之恋.txt` | 中 | 中篇文本 | `qingcheng` / persona |
-| `WarandPeace.txt`（战争与和平） | 英 | 小说文本（84k 句） | `war_peace`, `war_mcp`（取样：开篇 10 万字符） |
-| `PrideAndPrejudice.txt` | 英 | 小说文本 | `generalize_corpus_regression` |
-| `巴黎圣母院.pdf` | 中 | PDF | e2e PDF（缺失则跳过） |
-| `2.pdf` | — | PDF | e2e PDF（缺失则跳过） |
-| `bailiusu_escape.json`（白流苏逃出白家） | 中 | 对话 | `caoren_*`, companion MCP 闭环 |
-| `warpeace_pierre.json`（战争与和平 · 皮埃尔） | 英 | 对话 | companion MCP 闭环 |
-| `raskolnikov_porfiry.json` | 中 | 对话 | `generalize_corpus_regression`（对话路径） |
-| `sonia_raskolnikov.json` | 中 | 对话 | `generalize_corpus_regression`（对话路径） |
-| `conversation_export_2026-08-02.json` | 中 | 对话导出 | memory/migration 测试 |
-| `ques.json` | 中 | 对话 | 辅助 |
+### 本地语料（可选）
+
+`corpus/` 存放体积较大的第三方文本，用于**手工 / 临时**验证
+（`ingest --corpus-dir corpus`、`migrate --corpus-dir corpus`）。该目录已被 gitignore，
+且**默认测试套件不依赖它**——依赖语料的回归测试已移除，CI 不会因缺 fixture 失败。
+
+| 语料 | 语言 | 类型 |
+|--------|----------|------|
+| `三国演义.txt` | 中 | 小说文本 |
+| `水浒传.txt` | 中 | 小说文本 |
+| `红楼梦.txt` | 中 | 小说文本 |
+| `西游记.txt` | 中 | 小说文本 |
+| `封神演义.txt` | 中 | 小说文本 |
+| `大秦帝国.txt` | 中 | 小说文本 |
+| `倾城之恋.txt` | 中 | 中篇文本 |
+| `WarandPeace.txt`（战争与和平） | 英 | 小说文本 |
+| `PrideAndPrejudice.txt`（傲慢与偏见） | 英 | 小说文本 |
+| `巴黎圣母院.pdf` / `1.pdf` / `2.pdf` | 中 / — | PDF |
+| `bailiusu_escape.json`（白流苏逃出白家） | 中 | 对话 |
+| `warpeace_pierre.json`（战争与和平 · 皮埃尔） | 英 | 对话 |
+| `raskolnikov_porfiry.json`、`sonia_raskolnikov.json` | 中 | 对话 |
+| `conversation_export_2026-08-02.json` | 中 | 对话导出 |
+| `ques.json` | 中 | 辅助 |
 
 实体画像包（`config/entity_profiles/`）：`sanguo.json`、`shuihu.json`、
 `honglou.json`、`xiyou.json`、`fengshen.json`、`warandpeace.json`——每部小说
 为编译器词典（`JsonEntityProvider`）提供规范实体名/别名。
-
-> 慢速全语料运行（如 7 部小说的 `generalize_corpus_regression`）默认 `#[ignore]`，
-> 用 `--ignored` 显式运行。
 
 ---
 
@@ -433,7 +434,7 @@ cargo test --test sanguo_compile e2e_sanguo -- --nocapture
 
 ```bash
 make check      # cargo clippy + cargo check
-make test       # 全部 700+ 测试
+make test       # 全部 780+ 测试
 make fmt        # 格式化代码
 ```
 

@@ -1,4 +1,4 @@
-//! Decision persistence: the v0.3.1 store for what the agent decided, why it
+//! Decision persistence: the store for what the agent decided, why it
 //! was made (supporting facts, not causality), and the observed outcome.
 
 use super::*;
@@ -197,7 +197,7 @@ impl SqliteFactStore {
 mod tests {
     use super::*;
 
-    // ── Decision CRUD (v0.3.1) ────────────────────────────────────────────
+    // ── Decision CRUD ─────────────────────────────────────────────────────
 
     fn sample_decision(subject: i64, verb: &str, object: &str) -> crate::decision::Decision {
         crate::decision::Decision {

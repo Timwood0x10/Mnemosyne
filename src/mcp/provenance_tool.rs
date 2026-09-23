@@ -1,6 +1,6 @@
 //! `fact_provenance` MCP tool — the "why do we believe this?" evidence chain.
 //!
-//! Given a fact id, the tool answers three questions (v0.3 provenance):
+//! Given a fact id, the tool answers three questions (provenance):
 //!
 //! - **Why do we believe it?** — the original-text evidence anchor.
 //! - **How confident are we?** — `confidence` (legacy `weight`), plus the

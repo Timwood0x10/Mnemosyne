@@ -1,7 +1,7 @@
-//! Deterministic commitment extraction — the v0.3.1 Decision write path.
+//! Deterministic commitment extraction — the Decision write path.
 //!
 //! A [`Decision`] records what a speaker committed to, why, and what happened
-//! afterwards. The frozen v0.3.1 plan keeps the MCP surface at two read-only
+//! afterwards. The decision layer deliberately exposes only two read-only MCP
 //! tools (`decision_trace`, `decision_search`), so decisions are produced by
 //! **compilation** — exactly like every other fact in this engine — rather than
 //! by a tool call.

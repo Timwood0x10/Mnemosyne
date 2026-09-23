@@ -105,23 +105,29 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- **Cognitive state history (v0.3 Step 2).** `StateEngine::aggregate_intervals`
+- **Cognitive state history.** `StateEngine::aggregate_intervals`
   projects an entity's facts into per-dimension `StateEvolution`s — time-ordered
   `StateInterval`s with their evidence anchors plus deterministic
   `StateTransition`s (`gradual_change` / `stance_flip` /
   `behavioral_confirmation`). ADD-only: facts are never removed, state is always
   recomputable, and a change without a definite signal is reported as intervals
   only instead of a fabricated transition. Exposed as the `state_timeline` tool.
-- **Fact provenance (v0.3 Step 1).** Facts carry `confidence`, a three-state
+- **Fact provenance.** Facts carry `confidence`, a three-state
   epistemic `status` (active/superseded/contradicted) and a `derived_from`
   derivation chain; the `fact_provenance` tool audits why a fact is believed.
-- **Decision layer write path (v0.3.1).** `memory_compile` now compiles explicit
+- **Decision layer write path.** `memory_compile` now compiles explicit
   commitments ("我答应…" / "I promise…") into first-class `Decision` records.
   The commitment utterance is stored as an anchored Event fact first and the
   decision's `because` points at it, so `decision_trace` can walk from a
   decision back to its evidence. Extraction is rule-driven and LLM-free, and is
   deliberately conservative: a bare plan ("我会…") is not a promise.
 - `decision_trace` / `decision_search` MCP tools for reading the decision layer.
+- **Cognition-layer end-to-end test over the real MCP path.**
+  `tests/cognitive_state_e2e.rs` drives `MCPServer::serve` through an in-memory
+  `Transport` (`tools/call`), covering `memory_compile` → `state_timeline` /
+  `decision_search` → `decision_trace` → `fact_provenance`. Every other
+  integration test called a handler directly, which is how hand-crafted payloads
+  kept the state-layer defects invisible.
 
 ### Fixed
 
@@ -144,6 +150,13 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   honoured instead of being capped at the schema maximum.
 - **`insert_decision` never validated its input.** `validate_decision` existed
   but was only called from tests; it is now enforced on the write path.
+- **Decay silently rewrote epistemic confidence.** `confidence` and the decay
+  score shared the `weight` column, so archiving a stale fact also lowered "how
+  much do we believe this?" — the plan requires `confidence ≠ status ≠ decay`.
+  `confidence` now owns its column and the decay path only writes
+  `weight`/`archived`/`status`-independent state. Databases created before the
+  split are migrated in place: when the column is first added it is backfilled
+  from `weight`, so accumulated confidence survives.
 
 ### Changed
 
@@ -154,6 +167,16 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with the binary's `memory_*` / `character_*` tool handlers. `fact_store` and
   `knowledge/store` also gained their own test modules. `FactType::as_str`
   replaced three duplicated `fact_type_name` mappings.
+
+### Docs
+
+- `docs/{en,zh}/mcp-tools.md`: the overview table now covers `state_timeline`,
+  `fact_provenance`, `decision_trace` and `decision_search`, each with an input
+  schema and an example; the stale "10 MCP tools" claim is replaced by a pointer
+  to the authoritative list in `README*.md`.
+- `README.md` / `README.zh.md`: the Testing and Test Corpora sections now
+  describe the self-contained suite (no fixture dependency) instead of
+  referencing test targets and corpora that no longer exist.
 
 ### Changed
 

@@ -1,6 +1,16 @@
 # MCP Tools Reference
 
-The server exposes **10 MCP tools** via the Model Context Protocol. Each tool is a registered handler with an input schema validated at the JSON-RPC layer. The first 6 tools (`memory_*`) handle conversation distillation; the last 4 (`character_*`) manage the classical-novel character knowledge graph.
+> ⚠️ This file is the detailed reference for the **core pipeline tools** (the historical
+> `memory_*` / `character_*` set). The authoritative, complete tool list is the
+> "MCP Tool Overview" section of [`README.md`](../README.md). Cognition-state
+> (`state_timeline` / `fact_provenance`), decision (`decision_trace` / `decision_search`),
+> knowledge-graph query (`inspect_entity` / `timeline` / `relation_graph` / `search_graph` /
+> `trace_path` / `evidence`), external-knowledge (`generalize_compile` / `knowledge_attach` /
+> `knowledge_ingest` / `memory_export` / `memory_import`) and persona-guard
+> (`persona_check` / `persona_inject` / `relationship_update` / `relationship_query` /
+> `persona_timeline` / `story_bridge`) tools are not expanded below.
+
+Each tool is a registered handler with an input schema validated at the JSON-RPC layer.
 
 ## Tool Overview
 
@@ -16,6 +26,10 @@ The server exposes **10 MCP tools** via the Model Context Protocol. Each tool is
 | `character_network` | BFS-traverse the character relationship graph | `name` |
 | `character_ingest` | Distill character graph from novel corpus | (none) |
 | `character_graph` | Export 3D character graph JSON for visualization | (none) |
+| `state_timeline` | How an entity's cognitive state emerged: per-dimension intervals + deterministic transitions | `entity_id` |
+| `fact_provenance` | Audit a fact: confidence / epistemic status / evidence / derivation chain | `fact_id` |
+| `decision_trace` | Trace a decision back to its supporting facts (not causality) | `decision_id` |
+| `decision_search` | Keyword-search a subject's decisions | `subject` |
 
 ---
 
@@ -563,3 +577,142 @@ Common error categories:
 | Storage | `"storage error: sqlite error: database is locked"` |
 | Embedding | `"embedding service error: transport error: connection refused"` |
 | Distillation | `"distillation error at phase 'extract': no messages"` |
+
+---
+
+## 11. `state_timeline`
+
+Projects an entity's cognitive-state evolution into **per-dimension state intervals**
+plus **deterministic transitions**. Read-only and ADD-only: facts are never removed and
+the state can always be recomputed from them.
+
+### Input Schema
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `entity_id` | integer | yes | The entity whose state history to reconstruct |
+| `dimension` | string | no | Restrict to one dimension: `goal` / `preference` / `emotion` / `relationship` / `identity` |
+
+### Example Request
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"state_timeline","arguments":{"entity_id":1,"dimension":"preference"}}}
+```
+
+### Example Response
+
+```json
+{"entity_id":1,"dimensions":[{
+  "dimension":"preference",
+  "intervals":[
+    {"from":2024,"to":2025,"value":{"content":"likes Python"},"fact_ids":[1],"evidence_ids":[]},
+    {"from":2025,"to":null,"value":{"content":"started Rust"},"fact_ids":[2],"evidence_ids":[]}
+  ],
+  "transitions":[
+    {"from_index":0,"to_index":1,"at":2025,"transition_type":"gradual_change","evidence_ids":[]}
+  ]}]}
+```
+
+### Behaviour
+
+- Dimensions are selected by `FactType`, matching the current-state projection
+  (`cognitive_context`) — not by a payload field.
+- `from`/`to` are **state validity times**, not observation times; `to: null` means the
+  state still holds.
+- `transitions` **may be empty**: when no definite signal exists only the intervals are
+  reported — a transition is never fabricated.
+- The fold value prefers the payload's `content` and falls back to the whole payload, so
+  distinct facts are never collapsed into one interval.
+
+---
+
+## 12. `fact_provenance`
+
+Audits *why a fact is believed*.
+
+### Input Schema
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `fact_id` | integer | yes | The fact to audit (>= 1) |
+
+### Example Response
+
+```json
+{"fact_id":12,"fact_type":"Preference","time":2026,
+ "payload":{"content":"prefers Rust"},
+ "confidence":0.85,"status":"active",
+ "evidence":"2026-08-15: \"I started liking Rust last year\"",
+ "derived_from":[{"fact_id":11,"fact_type":"Preference","time":2024,"content":"likes Python","status":"active"}]}
+```
+
+### Behaviour
+
+- `status` is one of `active` / `superseded` / `contradicted`, orthogonal to
+  `confidence` and to decay.
+- `derived_from` is a **derivation chain** (`F2 derived_from F1` means "F2 was inferred
+  from F1"), **not causality**.
+- Chain expansion is depth/breadth capped; a dangling id is reported as
+  `{"fact_id":N,"missing":true}` instead of failing the whole call.
+- `evidence: null` means the fact has no original-text anchor.
+- Read-only: never writes.
+
+---
+
+## 13. `decision_trace`
+
+Traces a decision back to the facts that supported it (supporting evidence,
+**not causality**).
+
+### Input Schema
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `decision_id` | integer | yes | The decision id (>= 1) |
+
+### Example Response
+
+```json
+{"decision_id":1,"subject":1,"verb":"promise",
+ "object":"I'll take you to the hospital tomorrow","made_at":1780000000,
+ "because":[{"fact_id":9,"fact_type":"Event","content":"I'll take you to the hospital tomorrow","status":"active"}],
+ "outcome":null,"status":"open"}
+```
+
+### Behaviour
+
+- Decisions are produced by **compilation**, not by a tool call: `memory_compile`
+  compiles explicit commitments (`答应/承诺/保证/发誓`, `promise/i'll`, ...) into
+  `Decision` rows, storing the utterance as an anchored Event fact first so `because`
+  points at a concrete evidence unit.
+- A bare "I will ..." is a **plan** (compiled into a Goal fact), not a promise.
+- `outcome` starts empty and `status` is `open`; once an outcome is recorded the status
+  becomes `closed` and **the first recorded outcome can never be overwritten**.
+
+---
+
+## 14. `decision_search`
+
+Keyword-searches one subject's decisions.
+
+### Input Schema
+
+| Argument | Type | Required | Description |
+|---|---|---|---|
+| `subject` | integer | yes | Entity id whose decisions to search |
+| `keyword` | string | no | Case-insensitive match over `verb`/`object`; empty matches all |
+| `limit` | integer | no | Maximum results, default 10, capped at 100 |
+
+### Example Response
+
+```json
+{"decisions":[{"decision_id":1,"verb":"promise",
+ "object":"I'll take you to the hospital tomorrow","made_at":1780000000,
+ "outcome":null,"status":"open","because":[{"fact_id":9,"..."}]}]}
+```
+
+### Behaviour
+
+- Results are newest-first (`made_at DESC`).
+- `%`, `_` and `\` in `keyword` are matched **literally**, never as LIKE wildcards.

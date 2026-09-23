@@ -151,7 +151,7 @@ impl StateEngine {
     /// Build the state *history* for an entity: per-dimension validity
     /// intervals plus deterministic transitions between them.
     ///
-    /// This is the v0.3 companion to [`StateEngine::aggregate`]:
+    /// This is the companion to [`StateEngine::aggregate`]:
     ///
     /// - `aggregate()` answers "What is the current state?"
     /// - `aggregate_intervals()` answers "How did the current state emerge?"

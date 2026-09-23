@@ -1,4 +1,4 @@
-//! Decision as a first-class cognitive entity (v0.3.1, experimental).
+//! Decision as a first-class cognitive entity (experimental).
 //!
 //! A [`Decision`] records *what the agent decided, why, and what happened
 //! afterwards* — the "Why did the agent act this way?" layer on top of
@@ -9,7 +9,7 @@
 //! - `outcome` has a lifecycle of its own and starts `None` (the decision is
 //!   recorded before the outcome is known).
 //!
-//! Scope guards (frozen for v0.3.1):
+//! Scope guards (frozen):
 //!
 //! - A single `decisions` table plus two query APIs — no DecisionGraph,
 //!   DecisionPolicy, or DecisionReason abstractions.

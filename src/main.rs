@@ -339,7 +339,7 @@ async fn build_server(
         )
         .await;
 
-    // ── Decisions (decision_trace / decision_search, v0.3.1) ─
+    // ── Decisions (decision_trace / decision_search) ─────────
     //
     // `decision_trace` — traces a decision back to the facts that supported
     //   it (supporting evidence, not causality).

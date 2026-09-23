@@ -1,4 +1,4 @@
-//! Decision MCP tools (v0.3.1, experimental) — the "why did the agent act
+//! Decision MCP tools (experimental) — the "why did the agent act
 //! this way?" layer.
 //!
 //! Two tools, no more (per `plan/cognitive-state-v03.md`):

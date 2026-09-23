@@ -102,7 +102,7 @@ impl FactType {
     }
 }
 
-/// Epistemic life-cycle status of a fact (v0.3 cognitive-state upgrade).
+/// Epistemic life-cycle status of a fact (cognitive-state upgrade).
 ///
 /// Strictly three states — do NOT extend (no Expired/Archived/Pending/...).
 /// `status` is orthogonal to `confidence` (epistemic confidence) and to decay:
@@ -154,7 +154,7 @@ fn default_confidence() -> f64 {
 /// A single atomic fact. Immutable once written.
 /// State is derived from facts via aggregation.
 ///
-/// ## v0.3 provenance upgrade
+/// ## Provenance upgrade
 ///
 /// A fact is the **evidence unit** of cognitive state, not the final product:
 ///
@@ -165,7 +165,7 @@ fn default_confidence() -> f64 {
 /// - `derived_from` — the fact ids this fact was derived from. This is a
 ///   **derivation / provenance chain**, NOT causality: `F2 derived_from F1`
 ///   means "F2 was inferred from F1", never "F1 caused F2". Causal claims
-///   (`causes`/`caused_by`) are deliberately out of scope for v0.3.
+///   (`causes`/`caused_by`) are deliberately out of scope.
 /// - `status` — epistemic life-cycle (Active/Superseded/Contradicted).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Fact {
@@ -681,7 +681,7 @@ mod tests {
         }
     }
 
-    /// Objective: Verify deserializing a legacy Fact JSON (without the v0.3
+    /// Objective: Verify deserializing a legacy Fact JSON (without the provenance
     /// fields) fills defaults instead of failing — old persisted snapshots must
     /// load cleanly.
     /// Invariants: missing confidence → 1.0; missing derived_from → empty;
@@ -736,7 +736,7 @@ mod tests {
         );
     }
 
-    /// Objective: Verify `Fact::default()` provides safe v0.3 field defaults so
+    /// Objective: Verify `Fact::default()` provides safe provenance defaults so
     /// every existing construction site can use `..Fact::default()`.
     /// Invariants: default is Active, confidence 1.0, empty derivation chain.
     #[test]

@@ -1,14 +1,14 @@
 [package]
 name = "Mnemosyne"
-version = "0.3.0"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 authors = ["TimWood"]
 description = "Memory Distillation MCP Server - extracts and distills memories from conversations"
 license = "Apache-2.0"
-repository = "https://github.com/TimWood/memory_distill"
-homepage = "https://github.com/TimWood/memory_distill"
-documentation = "https://github.com/TimWood/memory_distill#readme"
+repository = "https://github.com/TimWood/Mnemosyne"
+homepage = "https://github.com/TimWood/Mnemosyne"
+documentation = "https://github.com/TimWood/Mnemosyne#readme"
 keywords = ["mcp", "memory", "llm", "agent", "sqlite-vec"]
 categories = ["asynchronous", "database-implementations"]
 
@@ -88,6 +88,9 @@ tokio = { version = "1.45", features = ["full", "test-util"] }
 tempfile = "3.20"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+# Integration tests implement `mcp::Transport` (declared with `#[async_trait]`)
+# to drive the real JSON-RPC path in memory.
+async-trait = "0.1"
 
 [features]
 default = ["remote-embed"]

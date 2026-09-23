@@ -91,7 +91,7 @@ impl ToolHandler for MemoryCompileTool {
                 .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);
         let mut stored_facts = self.fact_store.insert_batch(&compiled.facts)?;
 
-        // v0.3.1 Decision write path: explicit commitments become first-class
+        // Decision write path: explicit commitments become first-class
         // `Decision` rows so `decision_trace` can walk from a decision back to
         // the facts that support it. The frozen plan keeps the decision MCP
         // surface read-only, so this compile step IS the write path.
@@ -449,7 +449,7 @@ mod tests {
         );
     }
 
-    /// Objective: Verify the v0.3.1 decision write path end to end — a compiled
+    /// Objective: Verify the decision write path end to end — a compiled
     /// conversation containing an explicit promise must persist a `Decision`
     /// that points back at the facts compiled from the same utterance, so
     /// `decision_trace` can walk from a decision to its evidence.

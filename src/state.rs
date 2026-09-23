@@ -1,11 +1,11 @@
 //! Cognitive State History — the "how did the current state emerge?" layer.
 //!
-//! v0.3 turns `StateEngine` from a latest-wins aggregator into a state
+//! State history turns `StateEngine` from a latest-wins aggregator into a state
 //! evolution engine. Alongside `aggregate()` ("what is the current state?"),
 //! [`aggregate_intervals`] answers "what was true before, and how did it
 //! change?".
 //!
-//! Design rules (frozen for v0.3, see `plan/cognitive-state-v03.md`):
+//! Design rules (frozen; see `docs/zh/dev-plan-cognitive-state.md`):
 //!
 //! - A [`StateInterval`] is a *state validity* window over a semantic key
 //!   (the `to` field is `None` while the interval is still current). `Fact.time`

@@ -1,4 +1,4 @@
-# Mnemosyne v0.3.0
+# Mnemosyne v0.1.3
 
 **Mnemosyne** (Greek: Μνημοσύνη) — the Memory Distillation Engine.
 
@@ -78,7 +78,7 @@ falls back to built-in defaults and keeps working.
 - **Deterministic pipeline** — Aho-Corasick verb matching, rule-driven event
   extraction, 8-stage distillation. No LLM guessing anywhere.
 
-## Changelog (v0.3.0)
+## Changelog (v0.1.3)
 
 ### Added
 

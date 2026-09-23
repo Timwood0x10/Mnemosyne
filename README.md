@@ -395,45 +395,50 @@ cargo run --bin mnemosyne \
 ### Testing
 
 ```bash
-make check      # cargo clippy + cargo check (0 error, 0 warning)
-make test       # 700+ unit + integration tests (nextest, ~18s)
-
-# Full Romance of the Three Kingdoms compilation test
-cargo test --test sanguo_compile e2e_sanguo -- --nocapture
+make check      # cargo clippy + cargo check (0 errors)
+make test       # 780+ unit + integration tests (nextest, ~1s warm)
 ```
 
-### Test Corpora
+The suite is **self-contained**: each test builds its own synthetic corpus and
+in-memory SQLite store, so it passes on a clean checkout with no fixtures and no
+network. The cognition-layer end-to-end test drives the **real MCP JSON-RPC
+path** (`tools/call` over an in-memory transport) rather than calling handlers
+directly:
 
-All test corpora live in `corpus/` (text, PDF and dialog-JSON), with per-novel
-entity profile packs in `config/entity_profiles/`.
+```bash
+cargo test --test cognitive_state_e2e -- --nocapture
+```
 
-| Corpus | Language | Kind | Used by |
-|--------|----------|------|---------|
-| `三国演义.txt` (Romance of the Three Kingdoms) | zh | novel text | `sanguo_compile`, `generalize_corpus_regression` |
-| `水浒传.txt` (Water Margin) | zh | novel text | `generalize_corpus_regression` |
-| `红楼梦.txt` (Dream of the Red Chamber) | zh | novel text | `honglou_compile`, `generalize_corpus_regression` |
-| `西游记.txt` (Journey to the West) | zh | novel text | `xiyou` / `generalize_corpus_regression` |
-| `封神演义.txt` (Investiture of the Gods) | zh | novel text | `fengshen_*`, `generalize_corpus_regression` |
-| `大秦帝国.txt` (The Qin Empire) | zh | novel text | `daqin` |
-| `倾城之恋.txt` (Love in a Fallen City) | zh | novella text | `qingcheng` / persona |
-| `WarandPeace.txt` (War and Peace) | en | novel text (84k sentences) | `war_peace`, `war_mcp` (sampled: opening 100k chars) |
-| `PrideAndPrejudice.txt` | en | novel text | `generalize_corpus_regression` |
-| `巴黎圣母院.pdf` (Notre-Dame de Paris) | zh | PDF | e2e PDF (skipped if absent) |
-| `2.pdf` | — | PDF | e2e PDF (skipped if absent) |
-| `bailiusu_escape.json` (Bai Liusu flees the Bai household) | zh | dialog | `caoren_*`, companion MCP loop |
-| `warpeace_pierre.json` (War and Peace · Pierre) | en | dialog | companion MCP loop |
-| `raskolnikov_porfiry.json` | zh | dialog | `generalize_corpus_regression` (dialog path) |
-| `sonia_raskolnikov.json` | zh | dialog | `generalize_corpus_regression` (dialog path) |
-| `conversation_export_2026-08-02.json` | zh | dialog export | memory/migration tests |
-| `ques.json` | zh | dialog | auxiliary |
+### Local corpora (optional)
+
+`corpus/` holds large third-party texts used for **manual / ad-hoc**
+verification (`ingest --corpus-dir corpus`, `migrate --corpus-dir corpus`). It is
+gitignored, and **the default test suite does not depend on it** — the
+corpus-driven regression tests were removed so CI never fails on a missing
+fixture.
+
+| File | Language | Kind |
+|------|----------|------|
+| `三国演义.txt` (Romance of the Three Kingdoms) | zh | novel text |
+| `水浒传.txt` (Water Margin) | zh | novel text |
+| `红楼梦.txt` (Dream of the Red Chamber) | zh | novel text |
+| `西游记.txt` (Journey to the West) | zh | novel text |
+| `封神演义.txt` (Investiture of the Gods) | zh | novel text |
+| `大秦帝国.txt` (The Qin Empire) | zh | novel text |
+| `倾城之恋.txt` (Love in a Fallen City) | zh | novella text |
+| `WarandPeace.txt` (War and Peace) | en | novel text |
+| `PrideAndPrejudice.txt` (Pride and Prejudice) | en | novel text |
+| `巴黎圣母院.pdf` / `1.pdf` / `2.pdf` | zh / — | PDF |
+| `bailiusu_escape.json` (Bai Liusu flees the Bai household) | zh | dialog |
+| `warpeace_pierre.json` (War and Peace · Pierre) | en | dialog |
+| `raskolnikov_porfiry.json`, `sonia_raskolnikov.json` | zh | dialog |
+| `conversation_export_2026-08-02.json` | zh | dialog export |
+| `ques.json` | zh | auxiliary |
 
 Entity profile packs (`config/entity_profiles/`): `sanguo.json`, `shuihu.json`,
 `honglou.json`, `xiyou.json`, `fengshen.json`, `warandpeace.json` — each maps
 the novel's canonical entity names/aliases for the compiler's dictionary
 (`JsonEntityProvider`).
-
-> Slow full-corpus runs (e.g. the 7-novel `generalize_corpus_regression`) are
-> `#[ignore]`d by default; run them explicitly with `--ignored`.
 
 
 ### Configuration
@@ -450,7 +455,7 @@ the novel's canonical entity names/aliases for the compiler's dictionary
 
 ```bash
 make check      # cargo clippy + cargo check
-make test       # All 320+ tests
+make test       # All 780+ tests
 make fmt        # Format code
 ```
 

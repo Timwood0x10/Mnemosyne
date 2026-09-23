@@ -1,6 +1,15 @@
 # MCP 工具参考
 
-服务器通过模型上下文协议（MCP）暴露 **10 个 MCP 工具**。每个工具都是一个注册的处理器，在 JSON-RPC 层验证输入模式。前 6 个工具（`memory_*`）处理对话蒸馏；后 4 个（`character_*`）管理古典小说人物知识图谱。
+> ⚠️ 本文件是**核心流水线工具**的详细参考（历史核心集：`memory_*` / `character_*`）。
+> 服务器实际注册的**完整**工具清单以 [`README.zh.md`](../README.zh.md) 的「MCP 工具一览」为准。
+> 认知状态（`state_timeline` / `fact_provenance`）、决策（`decision_trace` / `decision_search`）、
+> 知识图谱查询（`inspect_entity` / `timeline` / `relation_graph` / `search_graph` /
+> `trace_path` / `evidence`）、外部知识（`generalize_compile` / `knowledge_attach` /
+> `knowledge_ingest` / `memory_export` / `memory_import`）与人设守卫
+> （`persona_check` / `persona_inject` / `relationship_update` / `relationship_query` /
+> `persona_timeline` / `story_bridge`）等工具在本文件中不逐一展开。
+
+每个工具都是一个注册的处理器，在 JSON-RPC 层验证输入模式。
 
 ## 工具概览
 
@@ -16,6 +25,10 @@
 | `character_network` | BFS 遍历人物关系图谱 | `name` |
 | `character_ingest` | 从小说语料蒸馏人物图谱 | （无） |
 | `character_graph` | 导出 3D 人物图谱 JSON 用于可视化 | （无） |
+| `state_timeline` | 还原实体认知状态的演化：分维度区间 + 确定性变迁 | `entity_id` |
+| `fact_provenance` | 审计一条事实：置信度 / 认知状态 / 证据 / 推导链 | `fact_id` |
+| `decision_trace` | 回溯决策的支持事实（非因果） | `decision_id` |
+| `decision_search` | 按关键词检索某主体的决策 | `subject` |
 
 ---
 
@@ -547,3 +560,132 @@
 | 存储 | `"storage error: sqlite error: database is locked"` |
 | 嵌入 | `"embedding service error: transport error: connection refused"` |
 | 蒸馏 | `"distillation error at phase 'extract': no messages"` |
+
+---
+
+## 11. `state_timeline`
+
+把实体的认知状态演化投影为**分维度状态区间**与**确定性变迁**。只读、ADD-only：
+事实永不被删除，状态永远可由事实重算。
+
+### 输入模式
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `entity_id` | integer | 是 | 要还原状态史的实体 id |
+| `dimension` | string | 否 | 限定单个维度：`goal` / `preference` / `emotion` / `relationship` / `identity` |
+
+### 示例请求
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call",
+ "params":{"name":"state_timeline","arguments":{"entity_id":1,"dimension":"preference"}}}
+```
+
+### 示例响应
+
+```json
+{"entity_id":1,"dimensions":[{
+  "dimension":"preference",
+  "intervals":[
+    {"from":2024,"to":2025,"value":{"content":"喜欢 Python"},"fact_ids":[1],"evidence_ids":[]},
+    {"from":2025,"to":null,"value":{"content":"开始喜欢 Rust"},"fact_ids":[2],"evidence_ids":[]}
+  ],
+  "transitions":[
+    {"from_index":0,"to_index":1,"at":2025,"transition_type":"gradual_change","evidence_ids":[]}
+  ]}]}
+```
+
+### 行为
+
+- 维度按 `FactType` 选取，与当前状态口径（`cognitive_context`）一致；不是按 payload 字段选取。
+- 区间值是**状态生效时间**（`from`/`to`），不是观察时间；`to: null` 表示状态仍然成立。
+- `transitions` **允许为空**：没有确定信号时只给区间，绝不臆造变迁。
+- 折叠值优先取 payload 的 `content`，缺失时回退完整 payload，避免不同事实被折叠成同一区间。
+
+---
+
+## 12. `fact_provenance`
+
+审计一条事实**为什么成立**。
+
+### 输入模式
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `fact_id` | integer | 是 | 要审计的事实 id（≥1） |
+
+### 示例响应
+
+```json
+{"fact_id":12,"fact_type":"Preference","time":2026,
+ "payload":{"content":"喜欢 Rust"},
+ "confidence":0.85,"status":"active",
+ "evidence":"2026-08-15: “我从去年开始喜欢 Rust”",
+ "derived_from":[{"fact_id":11,"fact_type":"Preference","time":2024,"content":"喜欢 Python","status":"active"}]}
+```
+
+### 行为
+
+- `status` 为三态：`active` / `superseded` / `contradicted`，与 `confidence`、衰减三者正交。
+- `derived_from` 是**推导链**（`F2 derived_from F1` 表示 F2 由 F1 推得），**不是因果**。
+- 链式展开有深度/广度上限；损坏的链以 `{"fact_id":N,"missing":true}` 报告，而不是整体失败。
+- `evidence` 为 `null` 表示该事实没有原文证据锚点。
+- 只读工具，永不写入。
+
+---
+
+## 13. `decision_trace`
+
+把一个决策回溯到支持它的事实（supporting evidence，**不是因果**）。
+
+### 输入模式
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `decision_id` | integer | 是 | 决策 id（≥1） |
+
+### 示例响应
+
+```json
+{"decision_id":1,"subject":1,"verb":"promise",
+ "object":"我答应你明天陪你去医院","made_at":1780000000,
+ "because":[{"fact_id":9,"fact_type":"Event","content":"我答应你明天陪你去医院","status":"active"}],
+ "outcome":null,"status":"open"}
+```
+
+### 行为
+
+- 决策由**编译**产生，不新增工具：`memory_compile` 把明确承诺
+  （`答应/承诺/保证/发誓` 或 `promise/i'll` 等）编译为 `Decision`，并先落一条承载该话语的
+  Event 事实作为锚点，`because` 指向它。
+- 单独的「我会…」是**计划**（编译为 Goal 事实），不算承诺。
+- `outcome` 创建时为空、`status` 为 `open`；记录结果后 `status` 变为 `closed`，
+  且**首次记录的结果不可被覆盖**。
+
+---
+
+## 14. `decision_search`
+
+按关键词检索某个主体（subject）的决策。
+
+### 输入模式
+
+| 参数 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `subject` | integer | 是 | 决策主体的实体 id |
+| `keyword` | string | 否 | 在 `verb`/`object` 上做大小写不敏感匹配；空串表示不过滤 |
+| `limit` | integer | 否 | 返回条数上限，默认 10，最大 100（超出会被钳制） |
+
+### 示例响应
+
+```json
+{"decisions":[{"decision_id":1,"verb":"promise",
+ "object":"我答应你明天陪你去医院","made_at":1780000000,
+ "outcome":null,"status":"open","because":[{"fact_id":9,"..."}]}]}
+```
+
+### 行为
+
+- 结果按 `made_at` 倒序（最新优先）。
+- `keyword` 中的 `%` / `_` / `\` 按**字面量**匹配，不作为 LIKE 通配符。
