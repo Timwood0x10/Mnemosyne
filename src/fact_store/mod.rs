@@ -13,6 +13,7 @@ use crate::error::{Error, Result, StorageError};
 
 mod decisions;
 mod entities;
+mod evidence;
 mod relationship;
 
 const CORE_SCHEMA: &str = "
@@ -92,6 +93,17 @@ CREATE INDEX IF NOT EXISTS idx_decisions_subject ON decisions(subject);
 CREATE INDEX IF NOT EXISTS idx_decisions_made_at ON decisions(subject, made_at);
 ";
 
+/// Columns every fact read selects, in the order [`SqliteFactStore::row_to_fact`]
+/// expects. Shared so a new column can never be added to one query only.
+const FACT_COLUMNS: &str = "id, entity_id, fact_type, time, payload, evidence_id, created_at,
+                    confidence, status, derived_from";
+
+/// The single fact insert every write path uses.
+const INSERT_FACT_SQL: &str =
+    "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
+                            confidence, status, derived_from)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
+
 /// SQLite-backed fact store.
 pub struct SqliteFactStore {
     conn: Mutex<Connection>,
@@ -151,7 +163,11 @@ impl SqliteFactStore {
         // is created for the first time it is backfilled from `weight` so a
         // legacy database keeps the confidence it had accumulated.
         if Self::ensure_column(conn, "facts", "confidence", "REAL NOT NULL DEFAULT 1.0")? {
-            conn.execute("UPDATE facts SET confidence = weight", [])?;
+            // COALESCE, not a bare copy: `weight` is a nullable legacy column,
+            // and a single NULL row would make this UPDATE violate the new
+            // NOT NULL constraint — failing `open()` outright instead of
+            // degrading, so the whole store would refuse to start.
+            conn.execute("UPDATE facts SET confidence = COALESCE(weight, 1.0)", [])?;
         }
         // Cognitive-state columns: epistemic status (legacy `archived`/
         // `weight` stay; `status`/`derived_from` are additive).
@@ -248,6 +264,80 @@ impl SqliteFactStore {
         })
     }
 
+    /// Bind every column of `fact` into a prepared [`INSERT_FACT_SQL`] and
+    /// execute it, storing `evidence_id` as the fact's anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the payload cannot be serialized or the
+    /// insert fails.
+    fn bind_fact(
+        stmt: &mut rusqlite::Statement<'_>,
+        fact: &Fact,
+        evidence_id: Option<i64>,
+    ) -> Result<()> {
+        let payload = serde_json::to_string(&fact.payload)?;
+        let derived_from = serde_json::to_string(&fact.derived_from)?;
+        stmt.execute(params![
+            fact.entity_id,
+            fact.fact_type.as_str(),
+            fact.time,
+            payload,
+            evidence_id,
+            fact.created_at,
+            fact.confidence,
+            fact.status.as_str(),
+            derived_from,
+        ])?;
+        Ok(())
+    }
+
+    /// Insert `facts` on an already-locked connection, registering the
+    /// original-text evidence anchor each fact carries.
+    ///
+    /// `anchors` caches the rows created by this write, so the several facts
+    /// compiled from one utterance share a single evidence row instead of one
+    /// row each.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when an insert fails.
+    fn insert_facts_on(
+        conn: &Connection,
+        facts: &[Fact],
+        anchors: &mut std::collections::HashMap<String, i64>,
+    ) -> Result<()> {
+        let mut stmt = conn.prepare(INSERT_FACT_SQL)?;
+        for fact in facts {
+            let evidence_id = match fact.evidence_id {
+                Some(id) => Some(id),
+                None => Self::anchor_evidence_on(conn, &fact.payload, anchors)?,
+            };
+            Self::bind_fact(&mut stmt, fact, evidence_id)?;
+        }
+        Ok(())
+    }
+
+    /// Read every fact of an entity on an already-locked connection.
+    ///
+    /// The transactional compile path calls this so the facts it just wrote are
+    /// visible to the commitment scan inside the same transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read or the decode fails.
+    fn get_facts_on(conn: &Connection, entity_id: i64) -> Result<Vec<Fact>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {FACT_COLUMNS} FROM facts WHERE entity_id = ?1 ORDER BY time, created_at, id"
+        ))?;
+        let mut rows = stmt.query(params![entity_id])?;
+        let mut facts = Vec::new();
+        while let Some(row) = rows.next()? {
+            facts.push(Self::row_to_fact(row)?);
+        }
+        Ok(facts)
+    }
+
     fn read_facts(
         &self,
         sql: &str,
@@ -294,53 +384,13 @@ impl SqliteFactStore {
     /// Returns a storage error when the read fails.
     pub fn list_archived(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    confidence, status, derived_from
-             FROM facts WHERE entity_id = ?1 AND archived = 1 ORDER BY time, created_at, id",
+            &format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE entity_id = ?1 AND archived = 1
+                 ORDER BY time, created_at, id"
+            ),
             entity_id,
             None,
         )
-    }
-
-    /// Fetch the original-text evidence row behind a fact's `evidence_id`.
-    ///
-    /// Returns `None` when the fact has no evidence anchor or the row vanished.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the read fails.
-    pub fn get_evidence_content(&self, evidence_id: i64) -> Result<Option<String>> {
-        let conn = self.lock_conn()?;
-        let content = conn
-            .query_row(
-                "SELECT content FROM evidence WHERE id = ?1",
-                params![evidence_id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?;
-        Ok(content.flatten())
-    }
-
-    /// Insert an original-text evidence row and return its id.
-    ///
-    /// Facts reference evidence via `evidence_id`; this is the write path used
-    /// when a fact needs an auditable original-text anchor.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the insert fails.
-    pub fn insert_evidence(
-        &self,
-        doc_id: Option<i64>,
-        chapter_id: Option<i64>,
-        content: &str,
-    ) -> Result<i64> {
-        let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO evidence (doc_id, chapter_id, content) VALUES (?1, ?2, ?3)",
-            params![doc_id, chapter_id, content],
-        )?;
-        Ok(conn.last_insert_rowid())
     }
 
     /// List every entity id in the store, used when a decay pass scans the
@@ -397,25 +447,14 @@ impl SqliteFactStore {
 
 impl FactStore for SqliteFactStore {
     fn insert_fact(&self, fact: &Fact) -> Result<i64> {
-        let payload = serde_json::to_string(&fact.payload)?;
-        let derived_from = serde_json::to_string(&fact.derived_from)?;
         let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
-                                confidence, status, derived_from)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                fact.entity_id,
-                fact.fact_type.as_str(),
-                fact.time,
-                payload,
-                fact.evidence_id,
-                fact.created_at,
-                fact.confidence,
-                fact.status.as_str(),
-                derived_from,
-            ],
-        )?;
+        let mut anchors = std::collections::HashMap::new();
+        let mut stmt = conn.prepare(INSERT_FACT_SQL)?;
+        let evidence_id = match fact.evidence_id {
+            Some(id) => Some(id),
+            None => Self::anchor_evidence_on(&conn, &fact.payload, &mut anchors)?,
+        };
+        Self::bind_fact(&mut stmt, fact, evidence_id)?;
         Ok(conn.last_insert_rowid())
     }
 
@@ -426,26 +465,8 @@ impl FactStore for SqliteFactStore {
         let mut conn = self.lock_conn()?;
         let transaction = conn.transaction()?;
         {
-            let mut stmt = transaction.prepare(
-                "INSERT INTO facts (entity_id, fact_type, time, payload, evidence_id, created_at,
-                                    confidence, status, derived_from)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            )?;
-            for fact in facts {
-                let payload = serde_json::to_string(&fact.payload)?;
-                let derived_from = serde_json::to_string(&fact.derived_from)?;
-                stmt.execute(params![
-                    fact.entity_id,
-                    fact.fact_type.as_str(),
-                    fact.time,
-                    payload,
-                    fact.evidence_id,
-                    fact.created_at,
-                    fact.confidence,
-                    fact.status.as_str(),
-                    derived_from,
-                ])?;
-            }
+            let mut anchors = std::collections::HashMap::new();
+            Self::insert_facts_on(&transaction, facts, &mut anchors)?;
         }
         transaction.commit()?;
         Ok(facts.len())
@@ -453,9 +474,9 @@ impl FactStore for SqliteFactStore {
 
     fn get_facts(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    confidence, status, derived_from
-             FROM facts WHERE entity_id = ?1 ORDER BY time, created_at, id",
+            &format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE entity_id = ?1 ORDER BY time, created_at, id"
+            ),
             entity_id,
             None,
         )
@@ -463,9 +484,10 @@ impl FactStore for SqliteFactStore {
 
     fn get_facts_by_type(&self, entity_id: i64, fact_type: FactType) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    confidence, status, derived_from
-             FROM facts WHERE entity_id = ?1 AND fact_type = ?2 ORDER BY time, created_at, id",
+            &format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE entity_id = ?1 AND fact_type = ?2
+                 ORDER BY time, created_at, id"
+            ),
             entity_id,
             Some(fact_type),
         )
@@ -473,9 +495,10 @@ impl FactStore for SqliteFactStore {
 
     fn get_timeline(&self, entity_id: i64) -> Result<Vec<Fact>> {
         self.read_facts(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    confidence, status, derived_from
-             FROM facts WHERE entity_id = ?1 ORDER BY time DESC, created_at DESC, id DESC",
+            &format!(
+                "SELECT {FACT_COLUMNS} FROM facts WHERE entity_id = ?1
+                 ORDER BY time DESC, created_at DESC, id DESC"
+            ),
             entity_id,
             None,
         )
@@ -483,11 +506,7 @@ impl FactStore for SqliteFactStore {
 
     fn get_fact_by_id(&self, fact_id: i64) -> Result<Option<Fact>> {
         let conn = self.lock_conn()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, entity_id, fact_type, time, payload, evidence_id, created_at,
-                    confidence, status, derived_from
-             FROM facts WHERE id = ?1",
-        )?;
+        let mut stmt = conn.prepare(&format!("SELECT {FACT_COLUMNS} FROM facts WHERE id = ?1"))?;
         let mut rows = stmt.query(params![fact_id])?;
         match rows.next()? {
             Some(row) => Ok(Some(Self::row_to_fact(row)?)),

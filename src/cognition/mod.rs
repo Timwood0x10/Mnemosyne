@@ -160,8 +160,9 @@ fn default_confidence() -> f64 {
 ///
 /// - `evidence_id` — the original-text evidence that justifies the fact
 ///   (Why do we believe this?).
-/// - `confidence` — epistemic confidence, mapped from the legacy `weight`
-///   column (decay down-weights it over time).
+/// - `confidence` — epistemic confidence. It owns a column of its own and is
+///   orthogonal to decay: `weight`/`archived` carry the decay judgement and are
+///   never written back into `confidence` (plan §2.3).
 /// - `derived_from` — the fact ids this fact was derived from. This is a
 ///   **derivation / provenance chain**, NOT causality: `F2 derived_from F1`
 ///   means "F2 was inferred from F1", never "F1 caused F2". Causal claims
@@ -451,9 +452,10 @@ mod tests {
     /// the current state emerge" — it preserves historical states as intervals
     /// across all five cognitive dimensions, while `aggregate()` still returns
     /// only the latest state.
-    /// Invariants: aggregate() has exactly one preference; aggregate_intervals()
-    /// has three intervals (2024 → 2025 → 2026); the current interval is open
-    /// (to == None); no transition is fabricated when states merely differ.
+    /// Invariants: aggregate() has exactly one preference (one latest entry per
+    /// topic); aggregate_intervals() has three intervals (2024 → 2025 → 2026);
+    /// the current interval is open (to == None); the two windows inside the
+    /// shared topic are reported as `gradual_change`.
     #[test]
     fn aggregate_intervals_preserves_history_while_aggregate_keeps_latest() {
         let facts = vec![
@@ -508,11 +510,24 @@ mod tests {
             preference_evolution.intervals[2].to, None,
             "latest interval is still open (current state)"
         );
-        // No negated/keyword signal, no action word: transitions stay empty —
-        // the change is reported as intervals only (allowed to be uncertain).
-        assert!(
-            preference_evolution.transitions.is_empty(),
-            "must not fabricate a transition without a definite signal"
+        // All three states share the `preference` topic while their value
+        // changes (Python → Rust emerging → Rust dominant): that is the plan's
+        // canonical gradual change, so each consecutive window must be typed.
+        // The earlier rule demanded a `keyword` field no production compiler
+        // emits and therefore reported intervals only.
+        let types: Vec<&str> = preference_evolution
+            .transitions
+            .iter()
+            .map(|transition| match transition.transition_type {
+                crate::state::TransitionType::GradualChange => "gradual_change",
+                crate::state::TransitionType::StanceFlip => "stance_flip",
+                crate::state::TransitionType::BehavioralConfirmation => "behavioral_confirmation",
+            })
+            .collect();
+        assert_eq!(
+            types,
+            vec!["gradual_change", "gradual_change"],
+            "a value change inside one shared topic is a gradual change per window"
         );
     }
 

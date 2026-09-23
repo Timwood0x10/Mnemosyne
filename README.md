@@ -79,8 +79,8 @@ AI *remember its user* — deterministically, without an LLM in the loop.
 | `memory_compile` | Compile dialogue into structured Facts + cognitive state, optional distillation | `messages[]` |
 | `cognitive_context` | Query entity cognitive snapshot: identity, preference, goal, events, relationships | `name` |
 | `memory_context_check` | Proactive context-aware distillation: above threshold auto-compiles the conversation into facts + long-term memories + user profile; below threshold it is a read-only diagnostic | `messages[]` |
-| `state_timeline` | Reconstruct how an entity's state emerged: per-dimension state intervals (validity window + evidence) plus deterministic transitions (`gradual_change`/`stance_flip`/`behavioral_confirmation`) | `entity_id` |
-| `fact_provenance` | Audit why a fact is believed: confidence, epistemic status (active/superseded/contradicted), original-text evidence, and the `derived_from` derivation chain | `fact_id` |
+| `state_timeline` | Reconstruct how an entity's state emerged: per-dimension state intervals (validity window + evidence) plus deterministic transitions (`gradual_change`/`stance_flip`/`behavioral_confirmation`) | `entity_id`, `dimension?`, `tenant_id?` |
+| `fact_provenance` | Audit why a fact is believed: confidence, epistemic status (active/superseded/contradicted), original-text evidence, and the `derived_from` derivation chain | `fact_id`, `tenant_id?` |
 
 ### Decision Tools
 
@@ -91,8 +91,8 @@ to an Event fact for the utterance — and read back through these two tools.
 
 | Tool | Function | Required Params |
 |------|----------|-----------------|
-| `decision_trace` | Trace a decision back to the facts that supported it (supporting evidence, not causality) | `decision_id` |
-| `decision_search` | Keyword search a subject's decisions over verb/object, newest first | `subject` |
+| `decision_trace` | Trace a decision back to the facts that supported it (supporting evidence, not causality) | `decision_id`, `tenant_id?` |
+| `decision_search` | Keyword search a subject's decisions over verb/object, newest first | `subject`, `keyword?`, `limit?`, `tenant_id?` |
 
 ### Memory Distillation Tools
 

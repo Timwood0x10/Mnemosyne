@@ -263,13 +263,14 @@ static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
         Ok(builder) => match builder.build() {
             Ok(reg) => reg,
             Err(e) => {
-                eprintln!("warning: core lexicon validation failed ({e}); using an empty registry");
+                tracing::warn!(error = %e, "core lexicon validation failed; using an empty registry");
                 empty_registry()
             }
         },
         Err(e) => {
-            eprintln!(
-                "warning: config/dictionary.json failed to load ({e}); using an empty registry"
+            tracing::warn!(
+                error = %e,
+                "config/dictionary.json failed to load; using an empty registry"
             );
             empty_registry()
         }

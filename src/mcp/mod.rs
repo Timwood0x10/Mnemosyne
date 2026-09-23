@@ -29,6 +29,7 @@ pub mod server;
 pub mod sse;
 pub mod state_timeline_tool;
 pub mod story_bridge_tool;
+mod tenant_scope;
 pub mod trace_path_tool;
 pub mod transport;
 pub mod types;

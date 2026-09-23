@@ -32,10 +32,20 @@ use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
 use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
 
-/// The five cognitive dimensions `state_timeline` can filter on, mirrored from
-/// `crate::state::COGNITIVE_DIMENSIONS` for the tool's `dimension` argument.
-pub const STATE_TIMELINE_DIMENSIONS: &[&str] =
-    &["goal", "preference", "emotion", "relationship", "identity"];
+use super::tenant_scope;
+
+/// The cognitive dimensions `state_timeline` can filter on.
+///
+/// Derived from [`crate::state::COGNITIVE_DIMENSIONS`] rather than mirrored by
+/// hand: a hand-maintained copy silently drifts, and a dimension added to the
+/// engine would then be rejected by this tool as "unknown".
+#[must_use]
+pub fn state_timeline_dimensions() -> Vec<&'static str> {
+    crate::state::COGNITIVE_DIMENSIONS
+        .iter()
+        .map(|dimension| dimension.fact_type.as_str())
+        .collect()
+}
 
 /// Handler for the `state_timeline` tool.
 pub struct StateTimelineTool {
@@ -86,14 +96,20 @@ impl ToolHandler for StateTimelineTool {
                 let name = value
                     .as_str()
                     .ok_or_else(|| Error::InvalidInput("`dimension` must be a string".into()))?;
-                if !STATE_TIMELINE_DIMENSIONS.contains(&name) {
+                let known = state_timeline_dimensions();
+                if !known.contains(&name) {
                     return Err(Error::InvalidInput(format!(
-                        "unknown dimension `{name}`, expected one of {STATE_TIMELINE_DIMENSIONS:?}"
+                        "unknown dimension `{name}`, expected one of {known:?}"
                     )));
                 }
                 Some(name.to_string())
             }
         };
+
+        // An id alone does not say who owns it: enforce the tenant when the
+        // caller supplied one, before any fact is read.
+        let tenant_id = tenant_scope::tenant_argument(args)?;
+        tenant_scope::ensure_entity_tenant(&self.store, entity_id, tenant_id)?;
 
         let facts = self.store.get_facts(entity_id)?;
         let engine = StateEngine::new();
@@ -147,8 +163,12 @@ pub fn state_timeline_definition() -> ToolDefinition {
                 },
                 "dimension": {
                     "type": "string",
-                    "enum": STATE_TIMELINE_DIMENSIONS,
+                    "enum": state_timeline_dimensions(),
                     "description": "Optional: restrict to one cognitive dimension (goal/preference/emotion/relationship/identity)"
+                },
+                "tenant_id": {
+                    "type": "string",
+                    "description": "Optional: the tenant the entity must belong to. Implied by entity_id; supply it to have a cross-tenant id rejected instead of served."
                 }
             },
             "required": ["entity_id"]
@@ -347,6 +367,46 @@ mod tests {
         );
     }
 
+    /// Objective: Verify the tool is tenant-scoped when — and only when — the
+    /// caller states a tenant. An entity id carries no ownership, so without
+    /// this any client could read another tenant's state history by guessing an
+    /// id.
+    /// Invariants: wrong tenant → NotFound; owning tenant → served; omitted
+    /// tenant → legacy unscoped read.
+    #[tokio::test]
+    async fn state_timeline_is_tenant_scoped_when_asked() {
+        let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
+        let entity_id = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve user");
+        store
+            .insert_fact(&fact(
+                1,
+                entity_id,
+                FactType::Goal,
+                2026,
+                json!({"content": "我要学 Rust"}),
+            ))
+            .expect("insert goal fact");
+        let tool = StateTimelineTool::new(store);
+
+        let error = tool
+            .call(&json!({"entity_id": entity_id, "tenant_id": "tenant-b"}))
+            .await
+            .expect_err("another tenant's entity must not be served");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "a cross-tenant entity is NotFound, got {error:?}"
+        );
+
+        tool.call(&json!({"entity_id": entity_id, "tenant_id": "tenant-a"}))
+            .await
+            .expect("the owning tenant is served");
+        tool.call(&json!({"entity_id": entity_id}))
+            .await
+            .expect("an omitted tenant keeps the unscoped behaviour");
+    }
+
     /// Objective: Verify input validation — missing entity_id, unknown
     /// dimension, and an empty entity all behave cleanly.
     /// Invariants: missing entity_id → InvalidInput; unknown dimension →
@@ -415,6 +475,6 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert_eq!(enum_values, STATE_TIMELINE_DIMENSIONS);
+        assert_eq!(enum_values, state_timeline_dimensions());
     }
 }

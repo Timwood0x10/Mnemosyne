@@ -90,16 +90,54 @@ falls back to built-in defaults and keeps working.
 - **Decision write path** — `memory_compile` compiles explicit commitments into
   `Decision` records anchored to an Event fact for the utterance;
   `decision_trace` and `decision_search` read them back.
+- **Evidence anchors are now persisted.** Compiled facts used to keep the
+  original utterance only inside their payload while `evidence_id` stayed NULL,
+  which left the `evidence` table empty in production: `fact_provenance`'s
+  "why do we believe this?" answered `null` for every real fact and
+  `state_timeline` intervals never carried an `evidence_ids` entry. The write
+  path now registers the anchor (one row per utterance, shared by the facts it
+  produced).
+- **Optional `tenant_id`** on `state_timeline`, `fact_provenance`,
+  `decision_trace` and `decision_search`; a cross-tenant id is reported as
+  not-found instead of being served.
 
 ### Fixed
 
+- **Cognitive-state transitions were unreachable on production data.** A
+  `gradual_change` required a `keyword` payload field while the comparison text
+  came from `content`, and no compiler emits both — so the plan's own example
+  ("喜欢独处 → 开始想社交 → 喜欢热闹") could never be reported. The comparison
+  text now falls back through `content` → `object` → `keyword` → `action`.
+- **A user's negated statements were discarded at compile time**, so the engine
+  could not represent a negative stance and `stance_flip` was structurally
+  impossible for a user entity. Negated observations now keep their fact with
+  `negated: true` (only `Goal` is still suppressed); the affirmative side
+  declares `negated: false` so both sides of a flip are readable.
 - **`state_timeline` returned zero dimensions for every real conversation**, and
   every transition was pinned to the last two intervals once a dimension had
   three or more states.
+- **One state could be reported as an interval per observation** when a payload
+  carried an ever-growing counter (`occurrences`) in its fold key.
+- **`memory_decay` down-weighted almost the whole store on its first pass** — an
+  absent `access_count` was scored as "never accessed". Unknown access history is
+  now neutral; only an explicit `0` decays.
+- **A legacy database with a NULL `weight` could not be opened at all**; the
+  `confidence` migration now uses `COALESCE(weight, 1.0)`.
+- **Commitment extraction could record the opposite of what was said**
+  ("compromise" matched the `promise` marker; "I will not help you" became a
+  commitment). Markers now need a word boundary and are cancelled by a negation
+  cue.
+- **A rejected decision left half a compilation behind**; facts, anchors and
+  decisions are now validated first and committed in ONE transaction.
 - **`set_decision_outcome` could overwrite a recorded outcome**; the guard now
   lives in the SQL statement itself.
 - **`decision_search` did not escape LIKE wildcards and did not clamp `limit`.**
 - **`insert_decision` never validated its input.**
+- **`state_timeline` published a fabricated evidence link** (`fact_ids: [0]` for
+  a fact that has no id).
+- **Stale documentation** — the `confidence` field still described itself as
+  derived from the decay `weight`, two `plan/…` links were dangling, and the
+  tool's dimension list was a hand-maintained copy of the engine's table.
 
 ### Changed
 
@@ -107,6 +145,8 @@ falls back to built-in defaults and keeps working.
   (`fact_store`, `cognition`, `store`, `retrieval`, `conversation_compiler`,
   `character`, `distiller`, `lexicon`, `knowledge/store`,
   `compiler/name_validation`, plus the binary tool handlers).
+- **All `#[allow(...)]` suppressions removed** and library warnings moved to
+  `tracing`; the transition tests live in `tests/state_transitions.rs`.
 
 ## Docs
 

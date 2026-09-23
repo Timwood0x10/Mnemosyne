@@ -241,7 +241,6 @@ impl IngestionPipeline {
 
     /// Process a single chapter: resolve aliases, extract events, track co-occurrence,
     /// and extract directed relations from dialog chain.
-    #[allow(clippy::too_many_arguments)]
     fn process_chapter(
         &self,
         ch: &corpus::Chapter,

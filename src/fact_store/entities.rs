@@ -174,6 +174,27 @@ impl SqliteFactStore {
         .optional()
         .map_err(Error::from)
     }
+
+    /// The tenant that owns `entity_id`.
+    ///
+    /// Returns `None` when the entity does not exist. Read tools that take a raw
+    /// id use this to refuse a cross-tenant id instead of silently serving
+    /// another tenant's facts or decisions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the lookup fails.
+    pub fn entity_tenant(&self, entity_id: i64) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        let tenant = conn
+            .query_row(
+                "SELECT tenant_id FROM entities WHERE id = ?1",
+                params![entity_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        Ok(tenant)
+    }
 }
 
 #[cfg(test)]

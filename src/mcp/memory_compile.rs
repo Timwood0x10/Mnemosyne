@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::cognition::FactStore;
 use crate::cognition_compiler::CognitionCompiler;
 use crate::distiller::{Distiller, PipelineDistiller};
 use crate::error::Error;
@@ -89,7 +88,6 @@ impl ToolHandler for MemoryCompileTool {
         let compiled =
             self.compiler
                 .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);
-        let mut stored_facts = self.fact_store.insert_batch(&compiled.facts)?;
 
         // Decision write path: explicit commitments become first-class
         // `Decision` rows so `decision_trace` can walk from a decision back to
@@ -97,37 +95,18 @@ impl ToolHandler for MemoryCompileTool {
         // surface read-only, so this compile step IS the write path.
         //
         // A commitment is itself experience worth keeping: the utterance is
-        // stored as an Event fact first and the decision points at it, so every
+        // stored as an Event fact and the decision points at it, so every
         // decision stays anchored to a stored fact (promise markers are not in
         // the observation marker tables, so nothing else anchors it).
-        let mut decisions_recorded = 0usize;
-        for (role, subject) in self.commitment_speakers(args, tenant_id, user_entity_id)? {
-            let commitments = crate::commitment::commitments_from_messages(
-                &messages,
-                role,
-                subject,
-                logical_time,
-            );
-            if commitments.is_empty() {
-                continue;
-            }
-            let existing_facts = self.fact_store.get_facts(subject)?;
-            for mut decision in commitments {
-                let anchor_id = self
-                    .fact_store
-                    .insert_fact(&crate::commitment::anchor_fact(&decision, logical_time))?;
-                stored_facts += 1;
-                decision.because = std::iter::once(anchor_id)
-                    .chain(crate::commitment::supporting_fact_ids(
-                        &existing_facts,
-                        subject,
-                        &decision.object,
-                    ))
-                    .collect();
-                self.fact_store.insert_decision(&decision)?;
-                decisions_recorded += 1;
-            }
-        }
+        //
+        // Everything is prepared first and committed in ONE transaction: a
+        // decision rejected by validation, or a failed agent lookup, must not
+        // leave this conversation's facts behind for a retry to duplicate.
+        let commitments =
+            self.compiled_commitments(args, tenant_id, &messages, user_entity_id, logical_time)?;
+        let (stored_facts, decisions_recorded) = self
+            .fact_store
+            .insert_compilation(&compiled.facts, &commitments)?;
 
         let builder = PromptBuilder;
         let recent_count = messages.len().min(6);
@@ -175,6 +154,38 @@ impl ToolHandler for MemoryCompileTool {
 }
 
 impl MemoryCompileTool {
+    /// Extract this conversation's commitments together with the fact that
+    /// anchors each one, without writing anything.
+    ///
+    /// Resolving the agent entity happens here (it may create the entity row),
+    /// but every fact and decision is only *prepared*: the store writes them in
+    /// one transaction afterwards, so nothing half-compiled can be left behind.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the agent identity cannot be resolved.
+    fn compiled_commitments(
+        &self,
+        args: &Value,
+        tenant_id: &str,
+        messages: &[Message],
+        user_entity_id: i64,
+        logical_time: i32,
+    ) -> Result<Vec<(crate::cognition::Fact, crate::decision::Decision)>, Error> {
+        let mut commitments = Vec::new();
+        for (role, subject) in self.commitment_speakers(args, tenant_id, user_entity_id)? {
+            for decision in
+                crate::commitment::commitments_from_messages(messages, role, subject, logical_time)
+            {
+                commitments.push((
+                    crate::commitment::anchor_fact(&decision, logical_time),
+                    decision,
+                ));
+            }
+        }
+        Ok(commitments)
+    }
+
     /// Resolve which `(role, entity)` speaker channels to scan for commitments.
     ///
     /// The user channel always exists. The agent channel is only used when the
@@ -336,6 +347,7 @@ fn parse_messages(values: &[Value]) -> Result<Vec<Message>, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cognition::FactStore;
 
     fn result_payload(result: &ToolCallResult) -> Value {
         let text = result

@@ -1,10 +1,15 @@
 //! Deterministic memory decay / forgetting management.
 //!
-//! Decay reduces a stored fact's retrieval influence over time, by importance,
-//! or by access frequency. It is a pure, deterministic policy — no LLM is
-//! consulted. The critical invariant is that decay **never deletes** a fact:
-//! it only writes back a `weight` and an `archived` flag, so the persona
-//! evolution timeline remains fully reconstructable (mem0 v3 ADD-only).
+//! Decay scores a fact from its age, importance and access frequency. It is a
+//! pure, deterministic policy — no LLM is consulted.
+//!
+//! The score is a **curation signal**, not a read-path filter: the pass writes
+//! back a `weight` and a down-weighted (`archived`) flag, and those two values
+//! are exposed through `decay_status` / `list_archived` for an operator (or a
+//! future policy layer) to act on. Nothing in the read paths consults them, and
+//! the critical invariant holds either way: decay **never deletes** a fact and
+//! never hides one, so the persona evolution timeline remains fully
+//! reconstructable (mem0 v3 ADD-only).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -147,7 +152,10 @@ pub struct DecayAssessment {
     pub fact_id: i64,
     /// Retrieval influence in `[0, 1]`; 1.0 is fully fresh, closer to 0 is decayed.
     pub decay_score: f64,
-    /// True when the fact should be down-weighted / archived (never deleted).
+    /// True when the pass judged the fact decayed and writes its score back.
+    ///
+    /// "Archived" means *down-weighted and recorded*, never hidden and never
+    /// deleted: the fact stays fully readable through every read path.
     pub should_archive: bool,
     /// Human-readable reason for the decision.
     pub reason: String,
@@ -201,16 +209,19 @@ fn compute_decay_inner(
 
     let age_days = (now.saturating_sub(fact.created_at)) as f64 / SECONDS_PER_DAY;
     let importance = extract_importance(fact);
+    // An absent `access_count` means the access history is UNKNOWN, which is not
+    // the same as "accessed zero times". Scoring it as zero gave every fact
+    // without access data the full access penalty, so a single hybrid pass
+    // down-weighted almost the entire store.
     let access_count = extract_access_count(fact);
+    let access = access_count.map_or(1.0, |count| access_score(count, config));
 
     let decay_score = match config.strategy {
         DecayStrategy::TimeBased => time_score(age_days, config),
         DecayStrategy::ImportanceBased => importance_score(importance, config),
-        DecayStrategy::AccessFrequencyBased => access_score(access_count, config),
+        DecayStrategy::AccessFrequencyBased => access,
         DecayStrategy::Hybrid => {
-            time_score(age_days, config)
-                * importance_score(importance, config)
-                * access_score(access_count, config)
+            time_score(age_days, config) * importance_score(importance, config) * access
         }
     }
     .clamp(0.0, 1.0);
@@ -270,12 +281,14 @@ fn extract_importance(fact: &Fact) -> f64 {
         .unwrap_or(0.5)
 }
 
-/// Read the optional `access_count` field from the fact payload (default 0).
-fn extract_access_count(fact: &Fact) -> u64 {
+/// Read the optional `access_count` field from the fact payload.
+///
+/// `None` means "no access history recorded" — distinct from an explicit `0`
+/// ("recorded as never accessed"), which is a real signal and does decay.
+fn extract_access_count(fact: &Fact) -> Option<u64> {
     fact.payload
         .get("access_count")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0)
+        .and_then(serde_json::Value::as_u64)
 }
 
 /// Aggregate statistics produced by a decay pass.
@@ -511,6 +524,42 @@ mod tests {
             now + 2000 * 86_400,
         );
         assert!(stale.should_archive, "stale+low+unaccessed is archived");
+    }
+
+    /// Objective: Verify a fact that carries NO access history is not treated as
+    /// never-accessed. Scoring the missing field as `0` handed every such fact
+    /// the full access penalty, so a single hybrid pass down-weighted almost the
+    /// whole store.
+    /// Invariants: a fresh default-importance fact without `access_count` scores
+    /// 1.0 and is not flagged, while an explicit `access_count: 0` still decays.
+    #[test]
+    fn missing_access_history_is_not_a_penalty() {
+        let config = DecayConfig::default();
+        let now = 1_000_000;
+
+        let unknown = compute_decay(
+            &fact(Some(17), FactType::Event, now, json!({})),
+            &config,
+            now,
+        );
+        assert_eq!(
+            unknown.decay_score, 1.0,
+            "an unknown access count must not down-weight a fresh fact"
+        );
+        assert!(
+            !unknown.should_archive,
+            "a fresh fact without access data stays fresh"
+        );
+
+        let unaccessed = compute_decay(
+            &fact(Some(17), FactType::Event, now, json!({"access_count": 0})),
+            &config,
+            now,
+        );
+        assert!(
+            unaccessed.should_archive,
+            "an explicitly unaccessed fact is still down-weighted"
+        );
     }
 
     /// Objective: Verify high-value persona facts never decay even when very

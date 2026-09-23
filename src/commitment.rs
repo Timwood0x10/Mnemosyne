@@ -10,6 +10,10 @@
 //! when it carries an explicit commitment marker. `because` is filled with the
 //! compiled facts whose text backs the commitment: supporting evidence, never
 //! causality.
+//!
+//! Marker matching is token-aware (an ASCII marker must stand on its own, so
+//! "compromise" is not a promise) and negation-aware (a negated utterance is
+//! not a commitment, so "I will not help you" is never recorded as one).
 
 use crate::cognition::Fact;
 use crate::decision::{Decision, DecisionStatus};
@@ -37,6 +41,26 @@ const MAX_SUPPORTING_FACTS: usize = 8;
 /// Maximum stored length of a decision's `object` (mirrors `validate_decision`).
 const MAX_OBJECT_CHARS: usize = 512;
 
+/// Negation cues that cancel a commitment.
+///
+/// A decision layer is an audit surface: recording the *opposite* of what was
+/// said ("I will not help you" as a commitment) is worse than missing one, so a
+/// cue anywhere before the marker inside its clause, or immediately after it,
+/// suppresses the decision.
+const NEGATION_CUES: &[&str] = &[
+    "不", "没", "别", "未", "无", "非", "拒绝", "not", "never", "no", "won't", "cannot", "can't",
+];
+
+/// Characters that end a clause. A negation before one of these belongs to a
+/// different statement and must not cancel this commitment.
+const CLAUSE_BREAKS: &[char] = &[
+    '，', '。', '！', '？', '；', '、', '：', ',', '.', '!', '?', ';', ':',
+];
+
+/// How many characters after the marker still count as "immediately negated"
+/// ("保证不去", "I will not …").
+const NEGATION_WINDOW_CHARS: usize = 3;
+
 /// Extract decisions from the messages written by one speaker.
 ///
 /// `role` selects the speaker channel ("user" or "assistant") and `subject` is
@@ -60,12 +84,21 @@ pub fn commitments_from_messages(
 }
 
 /// Build one decision from one message, or `None` when it holds no commitment.
+///
+/// The **earliest** marker in the text decides the verb, and a negated
+/// commitment is rejected outright (see [`negated_commitment`]).
 fn commitment_from_message(message: &Message, subject: i64, made_at: i32) -> Option<Decision> {
     let lowered = message.content.to_lowercase();
-    let verb = COMMITMENT_MARKERS
+    let (verb, at, marker_len) = COMMITMENT_MARKERS
         .iter()
-        .find(|(marker, _)| lowered.contains(&marker.to_lowercase()))
-        .map(|(_, verb)| *verb)?;
+        .filter_map(|(marker, verb)| {
+            let needle = marker.to_lowercase();
+            find_marker(&lowered, &needle).map(|at| (*verb, at, needle.len()))
+        })
+        .min_by_key(|(_, at, _)| *at)?;
+    if negated_commitment(&lowered, at, marker_len) {
+        return None;
+    }
     let object = truncate_chars(message.content.trim(), MAX_OBJECT_CHARS);
     if object.is_empty() {
         return None;
@@ -80,6 +113,62 @@ fn commitment_from_message(message: &Message, subject: i64, made_at: i32) -> Opt
         outcome: None,
         status: DecisionStatus::Open,
     })
+}
+
+/// Find `marker` in `haystack`, requiring an ASCII marker to *start* on a word
+/// boundary so that `promise` never matches inside `compromise`.
+///
+/// Only the start is guarded: inflections such as "promises"/"promised" are
+/// still commitments, while "compromise" is not. CJK markers have no word
+/// boundaries and are matched literally.
+fn find_marker(haystack: &str, marker: &str) -> Option<usize> {
+    if !marker.is_ascii() {
+        return haystack.find(marker);
+    }
+    haystack
+        .match_indices(marker)
+        .find(|(at, _)| is_boundary_char(haystack[..*at].chars().next_back()))
+        .map(|(at, _)| at)
+}
+
+/// A character that may sit next to an ASCII marker (anything but a letter or
+/// digit, or the edge of the text).
+fn is_boundary_char(candidate: Option<char>) -> bool {
+    match candidate {
+        Some(value) => !value.is_alphanumeric(),
+        None => true,
+    }
+}
+
+/// True when the commitment at `at` is actually negated.
+///
+/// Two signals cancel it:
+///
+/// - a negation cue in the same clause **before** the marker ("我不保证…"),
+/// - a negation cue within [`NEGATION_WINDOW_CHARS`] characters **after** it
+///   ("保证不去", "I will not …").
+///
+/// Deliberately conservative: a cue far behind the marker still counts as a
+/// commitment ("我答应你明天不迟到"), because rejecting every message that
+/// merely mentions a negation would swallow most real promises.
+fn negated_commitment(lowered: &str, at: usize, marker_len: usize) -> bool {
+    let prefix = &lowered[..at];
+    let clause_start = prefix
+        .rfind(|c: char| CLAUSE_BREAKS.contains(&c))
+        .map_or(0, |index| index + 1);
+    if contains_negation_cue(&prefix[clause_start..]) {
+        return true;
+    }
+    let window: String = lowered[at + marker_len..]
+        .chars()
+        .take(NEGATION_WINDOW_CHARS)
+        .collect();
+    contains_negation_cue(&window)
+}
+
+/// True when `text` carries any [`NEGATION_CUES`] entry.
+fn contains_negation_cue(text: &str) -> bool {
+    NEGATION_CUES.iter().any(|cue| text.contains(cue))
 }
 
 /// Build the fact that anchors a decision.
@@ -334,6 +423,83 @@ mod tests {
             ids.len(),
             MAX_SUPPORTING_FACTS,
             "supporting evidence must be capped"
+        );
+    }
+
+    /// Objective: Verify an ASCII marker must start on a word boundary. Plain
+    /// substring matching turned "we reached a compromise" into a promise
+    /// ("compromise" contains "promise"), fabricating a decision nobody made.
+    /// Invariants: a marker embedded in a longer word yields no decision, while
+    /// an inflected genuine commitment still does.
+    #[test]
+    fn ascii_markers_must_start_on_a_word_boundary() {
+        let embedded = vec![message("user", "we reached a compromise")];
+        assert!(
+            commitments_from_messages(&embedded, "user", 7, 2026).is_empty(),
+            "a marker inside another word must not create a decision"
+        );
+
+        let inflected = vec![message("user", "he promises to be here")];
+        let decisions = commitments_from_messages(&inflected, "user", 7, 2026);
+        assert_eq!(
+            decisions.len(),
+            1,
+            "an inflected promise is still a commitment"
+        );
+        assert_eq!(decisions[0].verb, "promise");
+    }
+
+    /// Objective: Verify a negated utterance is never recorded as a commitment.
+    /// Recording its opposite is the worst failure mode for an audit layer.
+    /// Invariants: an adjacent or preceding negation cue suppresses the
+    /// decision for both Chinese and English markers.
+    #[test]
+    fn negated_utterances_are_not_commitments() {
+        for content in [
+            "我保证不去",
+            "我不保证能到",
+            "I will not help you",
+            "I promise nothing",
+            "我答应你，不，我拒绝",
+        ] {
+            let decisions = commitments_from_messages(&[message("user", content)], "user", 7, 2026);
+            assert!(
+                decisions.is_empty(),
+                "`{content}` must not be recorded as a commitment, got {decisions:?}"
+            );
+        }
+    }
+
+    /// Objective: Verify the negation guard stays conservative: a cue that
+    /// belongs to a later part of the promise must not swallow it.
+    /// Invariants: "我答应你明天不迟到" is still one promise.
+    #[test]
+    fn distant_negation_still_counts_as_a_commitment() {
+        let decisions =
+            commitments_from_messages(&[message("user", "我答应你明天不迟到")], "user", 7, 2026);
+        assert_eq!(
+            decisions.len(),
+            1,
+            "a cue behind the marker describes the promise, it does not negate it"
+        );
+        assert_eq!(decisions[0].verb, "promise");
+    }
+
+    /// Objective: Verify the verb comes from the earliest marker in the text, so
+    /// a later marker cannot relabel an earlier promise.
+    /// Invariants: "我答应你，我保证会做到" is a promise, not a commit.
+    #[test]
+    fn the_earliest_marker_decides_the_verb() {
+        let decisions = commitments_from_messages(
+            &[message("user", "我答应你，我保证会做到")],
+            "user",
+            7,
+            2026,
+        );
+        assert_eq!(decisions.len(), 1);
+        assert_eq!(
+            decisions[0].verb, "promise",
+            "the first commitment in the text decides the verb"
         );
     }
 }

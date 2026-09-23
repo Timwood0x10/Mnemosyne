@@ -139,8 +139,8 @@ pub struct LexiconSource {
 
 #[derive(Debug, Deserialize)]
 struct DictionaryFile {
-    #[allow(dead_code)]
-    _meta: Option<serde_json::Value>,
+    // The `_meta` documentation key needs no field: serde ignores unknown keys,
+    // and declaring it dead weight only invited a `#[allow(dead_code)]`.
     #[serde(default)]
     lexemes: Vec<Lexeme>,
     #[serde(default)]
@@ -369,8 +369,9 @@ static DICT: LazyLock<RwLock<Dictionary>> = LazyLock::new(|| {
     let dict = match Dictionary::load_default() {
         Ok(d) => d,
         Err(e) => {
-            eprintln!(
-                "warning: config/dictionary.json failed to load ({e}); using an empty dictionary"
+            tracing::warn!(
+                error = %e,
+                "config/dictionary.json failed to load; using an empty dictionary"
             );
             Dictionary::default()
         }

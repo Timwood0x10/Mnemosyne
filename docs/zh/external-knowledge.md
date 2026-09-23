@@ -418,7 +418,8 @@ PDF 文本抽取为**尽力而为**（best-effort）实现，聚焦于简单的�
 
 ## 7. 实现参考
 
-完整的实施计划与验收记录见 [external-knowledge-plan.md](../../plan/external-knowledge-plan.md)。核心模块：
+本文档即该能力的实施与验收记录（早期版本曾指向 `plan/external-knowledge-plan.md`，该文件
+已不在仓库中）。对外接口见 [MCP 工具清单](./mcp-tools.md)。核心模块：
 
 | 模块 | 职责 |
 |---|---|

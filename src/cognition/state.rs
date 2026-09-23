@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{Fact, FactType};
+use crate::state::dimension_topic_keys;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // State Aggregator trait (Fact → State)
@@ -99,11 +100,18 @@ impl StateEngine {
         let mut chronological = facts.to_vec();
         chronological.sort_by_key(|fact| (fact.time, fact.created_at, fact.id.unwrap_or(0)));
 
-        let goals = latest_by_payload_key(&chronological, FactType::Goal, &["goal", "content"]);
+        // Key priorities come from `crate::state::COGNITIVE_DIMENSIONS`, the
+        // same table the state history reads: one latest entry per topic here,
+        // one interval per value there.
+        let goals = latest_by_payload_key(
+            &chronological,
+            FactType::Goal,
+            dimension_topic_keys(FactType::Goal),
+        );
         let preferences = latest_by_payload_key(
             &chronological,
             FactType::Preference,
-            &["topic", "preference", "content"],
+            dimension_topic_keys(FactType::Preference),
         );
         let emotion_trend = chronological
             .iter()
@@ -123,12 +131,12 @@ impl StateEngine {
         let relationships = latest_by_payload_key(
             &chronological,
             FactType::Relationship,
-            &["target", "with", "object", "content"],
+            dimension_topic_keys(FactType::Relationship),
         );
         let identity_attributes = latest_by_payload_key(
             &chronological,
             FactType::Identity,
-            &["attribute", "identity", "key", "content"],
+            dimension_topic_keys(FactType::Identity),
         );
         let extensions = self
             .aggregators
@@ -163,10 +171,12 @@ impl StateEngine {
     pub fn aggregate_intervals(&self, facts: &[Fact]) -> Vec<crate::state::StateEvolution> {
         use crate::state::COGNITIVE_DIMENSIONS;
         let mut evolutions = Vec::new();
-        for &(fact_type, value_keys) in COGNITIVE_DIMENSIONS {
-            if let Some(evolution) =
-                crate::state::intervals_for_dimension(facts, fact_type, value_keys)
-            {
+        for dimension in COGNITIVE_DIMENSIONS {
+            if let Some(evolution) = crate::state::intervals_for_dimension(
+                facts,
+                dimension.fact_type,
+                dimension.value_keys,
+            ) {
                 evolutions.push(evolution);
             }
         }
@@ -182,12 +192,17 @@ impl Default for StateEngine {
 
 /// Keep only the newest fact for each semantic payload key.
 ///
-/// Facts that carry one of the given keys are bucketed by that key (newest
-/// wins). Facts WITHOUT any key are distinct facts (e.g. observation-compiler
-/// output has `{action, subject, object}` and no semantic key): they must not
-/// all fold into a single "default" bucket — that silently dropped all but
-/// the last. They are bucketed by their full payload instead, so different
-/// facts each survive while exact duplicates still dedupe to the newest.
+/// Facts that carry one of the given *string* keys are bucketed by that key
+/// (newest wins). Facts WITHOUT any key are distinct facts (e.g.
+/// observation-compiler output has `{action, subject, object}` and no semantic
+/// key): they must not all fold into a single "default" bucket — that silently
+/// dropped all but the last. They are bucketed by their full payload instead,
+/// so different facts each survive while exact duplicates still dedupe to the
+/// newest.
+///
+/// This is the exact rule [`resolve_state_value`](crate::state) applies when it
+/// folds facts into state intervals, so the current state and the state history
+/// agree on what "the same state" means.
 fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> Vec<Fact> {
     let mut latest = std::collections::BTreeMap::new();
     for fact in facts.iter().filter(|fact| fact.fact_type == fact_type) {

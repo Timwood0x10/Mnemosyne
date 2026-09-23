@@ -37,14 +37,14 @@ pub(super) fn merge_marker_files(paths: &[std::path::PathBuf]) -> Vec<(String, S
     let mut loaded_any = false;
     for path in paths {
         let Some(raw) = std::fs::read_to_string(path).ok() else {
-            eprintln!("warning: {} failed to load; skipping", path.display());
+            tracing::warn!(path = %path.display(), "marker config failed to load; skipping");
             continue;
         };
         // Parse as Value and walk keys manually so the `_meta` documentation
         // object does not fail the whole file (it is not a marker list).
         let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(&raw)
         else {
-            eprintln!("warning: {} failed to parse; skipping", path.display());
+            tracing::warn!(path = %path.display(), "marker config failed to parse; skipping");
             continue;
         };
         for (action, markers) in map {
@@ -67,7 +67,7 @@ pub(super) fn merge_marker_files(paths: &[std::path::PathBuf]) -> Vec<(String, S
     if loaded_any && !pairs.is_empty() {
         pairs
     } else {
-        eprintln!("warning: no observation marker config loaded; using built-in defaults");
+        tracing::warn!("no observation marker config loaded; using built-in defaults");
         default_markers_owned()
     }
 }

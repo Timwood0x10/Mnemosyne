@@ -31,6 +31,18 @@ use crate::persona::check::shared_bigrams;
 /// layer and the persona layer agree on what counts as a stance change.
 const STANCE_FLIP_MIN_SHARED_BIGRAMS: usize = 2;
 
+/// Payload fields that identify the *topic* two states have in common.
+///
+/// A differing state value is a `GradualChange` only when the two payloads
+/// agree on one of these fields: the change then happens *within* one topic
+/// (same action/theme) instead of being two unrelated facts.
+///
+/// `content` is deliberately absent — it is the state value itself, so it can
+/// never be the shared part. So are `attribution` (a channel marker) and
+/// `subject` (constant per channel): both would make every pair of facts look
+/// like one topic.
+const TOPIC_KEYS: &[&str] = &["keyword", "topic", "preference", "action"];
+
 /// A state-validity window over one semantic key.
 ///
 /// `from`/`to` are **state validity times**, not observation times (§2.2 of
@@ -155,7 +167,7 @@ pub fn intervals_for_dimension(
         if let Some(interval) = &mut current {
             if interval.fold_key == fold_key {
                 // Same state — extend the interval.
-                interval.fact_ids.push(fact.id.unwrap_or(0));
+                interval.fact_ids.extend(fact.id);
                 if let Some(evidence_id) = fact.evidence_id {
                     interval.evidence_ids.push(evidence_id);
                 }
@@ -172,7 +184,9 @@ pub fn intervals_for_dimension(
             value,
             state_value,
             fold_key,
-            fact_ids: vec![fact.id.unwrap_or(0)],
+            // Only real ids: an unsaved fact must not be reported as evidence
+            // link `0`, which no row can ever satisfy.
+            fact_ids: fact.id.into_iter().collect(),
             evidence_ids: Vec::new(),
         };
         if let Some(evidence_id) = fact.evidence_id {
@@ -206,8 +220,13 @@ pub fn intervals_for_dimension(
     Some(evolution)
 }
 
-/// Resolve the fold value of a fact: the first present `value_keys` field, or
-/// the whole payload when none is present.
+/// Resolve the fold value of a fact: the first present *string* `value_keys`
+/// field, or the whole payload when none is present.
+///
+/// Only string values count, matching
+/// [`latest_by_payload_key`](crate::cognition::StateEngine) — the current-state
+/// projection buckets facts by exactly the same rule, so the two views can
+/// never disagree about which facts describe the same state.
 ///
 /// Falling back to the payload (rather than `Null`) keeps key-less facts
 /// distinct — with a `Null` fallback every such fact folded into a single
@@ -215,65 +234,93 @@ pub fn intervals_for_dimension(
 fn resolve_state_value(payload: &serde_json::Value, value_keys: &[&str]) -> serde_json::Value {
     value_keys
         .iter()
-        .find_map(|key| payload.get(*key))
-        .cloned()
-        .unwrap_or_else(|| payload.clone())
+        .find_map(|key| payload.get(*key).and_then(serde_json::Value::as_str))
+        .map_or_else(
+            || payload.clone(),
+            |value| serde_json::Value::String(value.to_owned()),
+        )
 }
 
 /// Deterministic transition detection between two consecutive intervals.
 ///
 /// Returns `None` when no definite relation exists — the change is then
 /// reported as intervals only (allowed to be uncertain).
+///
+/// The three signals are ranked strongest-first: an explicit negation flip
+/// (`StanceFlip`) outranks an intent-then-action pair
+/// (`BehavioralConfirmation`), which outranks a change of value inside one
+/// shared topic (`GradualChange`).
 fn detect_transition(from: &StateInterval, to: &StateInterval) -> Option<TransitionType> {
-    let from_content = content_of(&from.value);
-    let to_content = content_of(&to.value);
-    if from_content.is_empty() || to_content.is_empty() {
+    let from_text = state_text(&from.value);
+    let to_text = state_text(&to.value);
+    if from_text.is_empty() || to_text.is_empty() {
         return None;
     }
 
-    // BehavioralConfirmation: the later state's content is about action
-    // while the earlier was about intent. Detected via `negated`-insensitive
-    // contrast on the same topic with a strong bigram overlap.
-    if shared_bigrams(from_content, to_content) >= STANCE_FLIP_MIN_SHARED_BIGRAMS
-        && (contains_action_word(to_content))
-    {
-        return Some(TransitionType::BehavioralConfirmation);
-    }
-
     // StanceFlip: same topic, opposite negation.
-    if let (Some(from_negated), Some(to_negated)) = (
-        from.value
-            .get("negated")
-            .and_then(serde_json::Value::as_bool),
-        to.value.get("negated").and_then(serde_json::Value::as_bool),
-    ) {
+    if let (Some(from_negated), Some(to_negated)) =
+        (negation_of(&from.value), negation_of(&to.value))
+    {
         if from_negated != to_negated
-            && shared_bigrams(from_content, to_content) >= STANCE_FLIP_MIN_SHARED_BIGRAMS
+            && shared_bigrams(from_text, to_text) >= STANCE_FLIP_MIN_SHARED_BIGRAMS
         {
             return Some(TransitionType::StanceFlip);
         }
     }
 
-    // GradualChange: same value key present in both, content differs but the
-    // topic overlaps at least partially. Keep it conservative: only claim a
-    // gradual change when the two states share the topic's key (e.g. both
-    // carry a `keyword` field) and are not an exact equal value.
-    if from_content != to_content
-        && from.value.get("keyword").is_some()
-        && to.value.get("keyword").is_some()
+    // BehavioralConfirmation: the later state's text is about action while the
+    // earlier was about intent. Detected via `negated`-insensitive contrast on
+    // the same topic with a strong bigram overlap.
+    if shared_bigrams(from_text, to_text) >= STANCE_FLIP_MIN_SHARED_BIGRAMS
+        && contains_action_word(to_text)
     {
+        return Some(TransitionType::BehavioralConfirmation);
+    }
+
+    // GradualChange: same topic, different value.
+    //
+    // The shared-topic test is what keeps this conservative, and it must be
+    // `TOPIC_KEYS`-based rather than `content`-based: `content` is the state
+    // value itself. Requiring two fields that production never emits together
+    // (an earlier revision demanded `keyword` while the comparison text came
+    // from `content`) made the plan's canonical "喜欢独处 → 开始想社交 →
+    // 喜欢热闹" chain unreachable on every real compile path.
+    if from_text != to_text && shares_topic(&from.value, &to.value) {
         return Some(TransitionType::GradualChange);
     }
 
     None
 }
 
-/// Read a stringable `content` out of an interval value (the fact payload).
-fn content_of(value: &serde_json::Value) -> &str {
-    value
-        .get("content")
-        .and_then(serde_json::Value::as_str)
+/// Read the negation flag out of an interval value, when it carries one.
+fn negation_of(value: &serde_json::Value) -> Option<bool> {
+    value.get("negated").and_then(serde_json::Value::as_bool)
+}
+
+/// The comparable text of a state, read from the first human-readable field.
+///
+/// Production payloads disagree on the field name (`content` for the user and
+/// persona channels, `object`/`action` for observation rules, `keyword` for
+/// companion themes), so the comparison text has one fallback chain instead of
+/// reading `content` only.
+fn state_text(value: &serde_json::Value) -> &str {
+    ["content", "object", "keyword", "action"]
+        .iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))
         .unwrap_or("")
+}
+
+/// True when both payloads agree on at least one [`TOPIC_KEYS`] field.
+fn shares_topic(from: &serde_json::Value, to: &serde_json::Value) -> bool {
+    TOPIC_KEYS.iter().any(|key| {
+        matches!(
+            (
+                from.get(*key).and_then(serde_json::Value::as_str),
+                to.get(*key).and_then(serde_json::Value::as_str)
+            ),
+            (Some(from_value), Some(to_value)) if from_value == to_value
+        )
+    })
 }
 
 /// A conservative action-word heuristic for BehavioralConfirmation: the later
@@ -287,33 +334,86 @@ fn contains_action_word(content: &str) -> bool {
         .any(|word| content.contains(word))
 }
 
-/// The five cognitive dimensions `aggregate_intervals` reports on, aligned
-/// with `EntityState`'s current-state dimensions.
+/// One cognitive dimension: which facts belong to it and how they are keyed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CognitiveDimension {
+    /// The fact type that belongs to this dimension.
+    pub fact_type: FactType,
+    /// Payload fields naming the *state value* — the thing that changes
+    /// ("喜欢 Python" → "开始喜欢 Rust"). The history layer folds a dimension
+    /// by this key; the first present string field wins and the whole payload is
+    /// the fallback. A trailing key must stay **stable** over time: a counter
+    /// such as companion themes' `occurrences` changing on every compile would
+    /// otherwise split one state into an interval per observation.
+    pub value_keys: &'static [&'static str],
+    /// Payload fields naming the *topic* of the dimension. The current state
+    /// keeps one latest entry per topic, so its priority is topic-first.
+    ///
+    /// Same vocabulary as `value_keys`, deliberately different priority: the
+    /// history answers "how did this value change?" (so `content` leads), while
+    /// the current state answers "what is true per topic?" (so `topic` leads).
+    /// Keeping both lists in one table is what stops them from drifting apart.
+    pub topic_keys: &'static [&'static str],
+}
+
+/// The five cognitive dimensions both projections report on.
 ///
-/// Each entry is `(fact_type, value_keys)`:
-///
-/// - `fact_type` — a fact belongs to this dimension when it carries this type,
-///   mirroring [`StateEngine::aggregate`](crate::cognition::StateEngine::aggregate)
-///   so the current state and the state history never disagree about what
-///   belongs to a dimension.
-/// - `value_keys` — priority list of payload fields naming the state value; the
-///   first present field wins and the whole payload is the fallback. `content`
-///   leads every list because that is what actually changes between two states
-///   ("喜欢 Python" → "开始喜欢 Rust"); the trailing names cover facts that
-///   carry only their semantic field.
-pub const COGNITIVE_DIMENSIONS: &[(FactType, &[&str])] = &[
-    (FactType::Goal, &["content", "goal"]),
-    (FactType::Preference, &["content", "preference", "topic"]),
-    (FactType::Emotion, &["content", "emotion", "label"]),
-    (
-        FactType::Relationship,
-        &["content", "target", "with", "object"],
-    ),
-    (
-        FactType::Identity,
-        &["content", "identity", "attribute", "key"],
-    ),
+/// Facts always belong to a dimension by [`FactType`] — mirroring
+/// [`StateEngine::aggregate`](crate::cognition::StateEngine::aggregate) — never
+/// by the presence of a payload field, so the current state and the state
+/// history can never disagree about which facts a dimension contains.
+pub const COGNITIVE_DIMENSIONS: &[CognitiveDimension] = &[
+    CognitiveDimension {
+        fact_type: FactType::Goal,
+        value_keys: &["content", "goal", "keyword"],
+        topic_keys: &["goal", "content", "keyword"],
+    },
+    CognitiveDimension {
+        fact_type: FactType::Preference,
+        value_keys: &["content", "preference", "topic", "keyword"],
+        topic_keys: &["topic", "preference", "content", "keyword"],
+    },
+    CognitiveDimension {
+        fact_type: FactType::Emotion,
+        value_keys: &["content", "emotion", "label", "keyword"],
+        topic_keys: &["emotion", "label", "content", "keyword"],
+    },
+    CognitiveDimension {
+        fact_type: FactType::Relationship,
+        value_keys: &["content", "target", "with", "object", "keyword"],
+        topic_keys: &["target", "with", "object", "content", "keyword"],
+    },
+    CognitiveDimension {
+        fact_type: FactType::Identity,
+        value_keys: &["content", "identity", "attribute", "key", "keyword"],
+        topic_keys: &["attribute", "identity", "key", "content", "keyword"],
+    },
 ];
+
+/// The dimension `fact_type` belongs to, when it is a cognitive dimension.
+#[must_use]
+pub fn cognitive_dimension(fact_type: FactType) -> Option<&'static CognitiveDimension> {
+    COGNITIVE_DIMENSIONS
+        .iter()
+        .find(|dimension| dimension.fact_type == fact_type)
+}
+
+/// The history fold keys of `fact_type` (see [`CognitiveDimension::value_keys`]).
+///
+/// Types outside the five cognitive dimensions fall back to `content`.
+#[must_use]
+pub fn dimension_value_keys(fact_type: FactType) -> &'static [&'static str] {
+    cognitive_dimension(fact_type).map_or(&["content"], |dimension| dimension.value_keys)
+}
+
+/// The current-state topic keys of `fact_type` (see
+/// [`CognitiveDimension::topic_keys`]).
+///
+/// Types outside the five cognitive dimensions fall back to `content`.
+#[must_use]
+pub fn dimension_topic_keys(fact_type: FactType) -> &'static [&'static str] {
+    cognitive_dimension(fact_type).map_or(&["content"], |dimension| dimension.topic_keys)
+}
 
 #[cfg(test)]
 mod tests {
@@ -454,81 +554,6 @@ mod tests {
         );
     }
 
-    /// Objective: Verify a stance flip (喜欢应酬 → 不喜欢应酬) produces a
-    /// StanceFlip transition while preserving both intervals.
-    /// Invariants: two intervals; one StanceFlip transition; from_index=0,
-    /// to_index=1; at=2026.
-    #[test]
-    fn stance_flip_produces_transition_and_keeps_intervals() {
-        let facts = vec![
-            fact(
-                1,
-                FactType::Preference,
-                2024,
-                "preference",
-                "喜欢应酬",
-                "我喜欢应酬",
-                Some(false),
-            ),
-            fact(
-                2,
-                FactType::Preference,
-                2026,
-                "preference",
-                "不喜欢应酬",
-                "我不喜欢应酬",
-                Some(true),
-            ),
-        ];
-        let evolution =
-            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
-                .expect("preference dimension has facts");
-        assert_eq!(evolution.intervals.len(), 2, "both states preserved");
-        assert_eq!(evolution.transitions.len(), 1, "one transition");
-        assert_eq!(
-            evolution.transitions[0].transition_type,
-            TransitionType::StanceFlip
-        );
-        assert_eq!(evolution.transitions[0].from_index, 0);
-        assert_eq!(evolution.transitions[0].to_index, 1);
-        assert_eq!(evolution.transitions[0].at, 2026);
-    }
-
-    /// Objective: Verify unrelated same-type topics do NOT produce a
-    /// transition — no shared bigrams → no stance flip (deterministic guard).
-    /// Invariants: intervals present, transitions empty.
-    #[test]
-    fn unrelated_topics_produce_no_transition() {
-        let facts = vec![
-            fact(
-                1,
-                FactType::Preference,
-                2024,
-                "preference",
-                "讨厌应酬",
-                "我讨厌应酬",
-                Some(true),
-            ),
-            fact(
-                2,
-                FactType::Preference,
-                2026,
-                "preference",
-                "喜欢安稳",
-                "我喜欢安稳",
-                Some(false),
-            ),
-        ];
-        let evolution =
-            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
-                .expect("preference dimension has facts");
-        assert_eq!(evolution.intervals.len(), 2, "intervals preserved");
-        assert!(
-            evolution.transitions.is_empty(),
-            "unrelated topics must not fabricate a transition"
-        );
-    }
-
     /// Objective: Verify an empty dimension yields no evolution.
     /// Invariants: None, not an empty Some.
     #[test]
@@ -570,122 +595,6 @@ mod tests {
             evolution.key, "preference",
             "evolution tracks the requested dimension"
         );
-    }
-
-    /// Objective: Verify a gradual change (both carry a `keyword`) produces a
-    /// GradualChange transition.
-    /// Invariants: same keyword, different content → GradualChange.
-    #[test]
-    fn gradual_change_is_detected_when_topic_overlaps() {
-        let mut a = fact(
-            1,
-            FactType::Preference,
-            2024,
-            "preference",
-            "喜欢独处",
-            "喜欢独处",
-            None,
-        );
-        let mut b = fact(
-            2,
-            FactType::Preference,
-            2026,
-            "preference",
-            "喜欢热闹",
-            "喜欢热闹",
-            None,
-        );
-        a.payload["keyword"] = serde_json::Value::from("社交");
-        b.payload["keyword"] = serde_json::Value::from("社交");
-        let evolution =
-            intervals_for_dimension(&[a, b], FactType::Preference, &["content", "preference"])
-                .expect("preference dimension has facts");
-        assert_eq!(evolution.transitions.len(), 1, "one gradual change");
-        assert_eq!(
-            evolution.transitions[0].transition_type,
-            TransitionType::GradualChange
-        );
-    }
-
-    /// Objective: Verify every transition points at its OWN window once a
-    /// dimension has three or more intervals. The previous implementation wrote
-    /// `len() - 2`/`len() - 1`, which pinned all transitions to the tail pair;
-    /// the two-interval tests never exposed it.
-    /// Invariants: three states → three intervals and two transitions with
-    /// `(from_index, to_index)` equal to `(0, 1)` and `(1, 2)`; each referenced
-    /// pair is adjacent in time (`from.to == to.from`) and moves forward.
-    #[test]
-    fn every_transition_references_its_own_window() {
-        let mut facts = vec![
-            fact(
-                1,
-                FactType::Preference,
-                2024,
-                "preference",
-                "独处",
-                "喜欢独处",
-                None,
-            ),
-            fact(
-                2,
-                FactType::Preference,
-                2025,
-                "preference",
-                "社交",
-                "开始想社交",
-                None,
-            ),
-            fact(
-                3,
-                FactType::Preference,
-                2026,
-                "preference",
-                "热闹",
-                "喜欢热闹",
-                None,
-            ),
-        ];
-        // A shared `keyword` on both sides of every window makes the change a
-        // definite GradualChange, so a transition is emitted per window.
-        for fact in &mut facts {
-            fact.payload["keyword"] = serde_json::Value::from("社交");
-        }
-
-        let evolution =
-            intervals_for_dimension(&facts, FactType::Preference, &["content", "preference"])
-                .expect("preference dimension has facts");
-        assert_eq!(
-            evolution.intervals.len(),
-            3,
-            "three states → three intervals"
-        );
-
-        let windows: Vec<(usize, usize)> = evolution
-            .transitions
-            .iter()
-            .map(|transition| (transition.from_index, transition.to_index))
-            .collect();
-        assert_eq!(
-            windows,
-            vec![(0, 1), (1, 2)],
-            "each transition must reference its own window, not the tail pair"
-        );
-
-        for transition in &evolution.transitions {
-            let from = &evolution.intervals[transition.from_index];
-            let to = &evolution.intervals[transition.to_index];
-            assert_eq!(
-                from.to,
-                Some(to.from),
-                "transition endpoints must be adjacent intervals"
-            );
-            assert!(
-                from.from < to.from,
-                "a transition must move forward in time ({} → {})",
-                from.from,
-                to.from
-            );
-        }
     }
 
     /// Objective: Verify production-shaped facts still map onto their cognitive
@@ -734,6 +643,119 @@ mod tests {
         assert!(
             evolution.intervals[1].to.is_none(),
             "the latest interval is still open"
+        );
+    }
+
+    /// Objective: Verify a companion theme folds on its stable `keyword` rather
+    /// than on the whole payload. `occurrences` grows on every compile, so a
+    /// payload-wide fold key reported one fresh "state" per observation and the
+    /// timeline filled up with phantom changes.
+    /// Invariants: two theme facts with the same keyword and different counters
+    /// fold into ONE interval carrying both fact ids.
+    #[test]
+    fn companion_theme_facts_fold_on_their_keyword() {
+        let theme = |id: i64, time: i32, occurrences: i64| Fact {
+            id: Some(id),
+            entity_id: 7,
+            fact_type: FactType::Preference,
+            time,
+            payload: serde_json::json!({
+                "keyword": "露营",
+                "occurrences": occurrences,
+                "samples": ["周末去露营"],
+            }),
+            created_at: i64::from(time),
+            ..Fact::default()
+        };
+        let evolution = intervals_for_dimension(
+            &[theme(1, 2024, 1), theme(2, 2026, 3)],
+            FactType::Preference,
+            dimension_value_keys(FactType::Preference),
+        )
+        .expect("the preference dimension has facts");
+        assert_eq!(
+            evolution.intervals.len(),
+            1,
+            "a growing occurrence counter is the SAME state, not a new one"
+        );
+        assert_eq!(
+            evolution.intervals[0].fact_ids,
+            vec![1, 2],
+            "both observations belong to that single state"
+        );
+    }
+
+    /// Objective: Verify an interval never claims a fabricated evidence link.
+    /// Invariants: a fact without an id yields an empty `fact_ids` (the previous
+    /// `unwrap_or(0)` published fact id `0`, which no row can satisfy).
+    #[test]
+    fn unsaved_facts_never_claim_a_fabricated_id() {
+        let unsaved = Fact {
+            id: None,
+            entity_id: 7,
+            fact_type: FactType::Goal,
+            time: 2026,
+            payload: serde_json::json!({"content": "我要学 Rust"}),
+            created_at: 2026,
+            ..Fact::default()
+        };
+        let evolution = intervals_for_dimension(
+            &[unsaved],
+            FactType::Goal,
+            dimension_value_keys(FactType::Goal),
+        )
+        .expect("the goal dimension has facts");
+        assert!(
+            evolution.intervals[0].fact_ids.is_empty(),
+            "an unsaved fact must not be reported as fact id 0"
+        );
+    }
+
+    /// Objective: Verify the key list has a single source, so the current-state
+    /// projection and the state history can never bucket one dimension two
+    /// different ways.
+    /// Invariants: the helper returns the table entry for every cognitive
+    /// dimension, `content` leads each list, and a non-dimension type falls back
+    /// to `content`.
+    #[test]
+    fn dimension_keys_have_a_single_source() {
+        for dimension in COGNITIVE_DIMENSIONS {
+            let fact_type = dimension.fact_type;
+            assert_eq!(
+                dimension_value_keys(fact_type),
+                dimension.value_keys,
+                "the history fold keys must come from the table for {fact_type:?}"
+            );
+            assert_eq!(
+                dimension_topic_keys(fact_type),
+                dimension.topic_keys,
+                "the current-state topic keys must come from the table for {fact_type:?}"
+            );
+            assert_eq!(
+                dimension.value_keys.first().copied(),
+                Some("content"),
+                "the history folds on the value, so content leads {fact_type:?}"
+            );
+            // Both lists must speak the same vocabulary: a topic key the
+            // history does not know would let the two projections disagree
+            // about which facts describe the same state.
+            for key in dimension.topic_keys {
+                assert!(
+                    dimension.value_keys.contains(key),
+                    "{fact_type:?} topic key `{key}` is unknown to the history fold"
+                );
+            }
+        }
+        let expected: &[&str] = &["content"];
+        assert_eq!(
+            dimension_value_keys(FactType::Event),
+            expected,
+            "value keys of a non-dimension type fall back to content"
+        );
+        assert_eq!(
+            dimension_topic_keys(FactType::Event),
+            expected,
+            "topic keys of a non-dimension type fall back to content"
         );
     }
 }

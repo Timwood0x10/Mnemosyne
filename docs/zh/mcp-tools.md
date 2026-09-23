@@ -25,10 +25,10 @@
 | `character_network` | BFS 遍历人物关系图谱 | `name` |
 | `character_ingest` | 从小说语料蒸馏人物图谱 | （无） |
 | `character_graph` | 导出 3D 人物图谱 JSON 用于可视化 | （无） |
-| `state_timeline` | 还原实体认知状态的演化：分维度区间 + 确定性变迁 | `entity_id` |
-| `fact_provenance` | 审计一条事实：置信度 / 认知状态 / 证据 / 推导链 | `fact_id` |
-| `decision_trace` | 回溯决策的支持事实（非因果） | `decision_id` |
-| `decision_search` | 按关键词检索某主体的决策 | `subject` |
+| `state_timeline` | 还原实体认知状态的演化：分维度区间 + 确定性变迁 | `entity_id`（可选 `tenant_id`） |
+| `fact_provenance` | 审计一条事实：置信度 / 认知状态 / 证据 / 推导链 | `fact_id`（可选 `tenant_id`） |
+| `decision_trace` | 回溯决策的支持事实（非因果） | `decision_id`（可选 `tenant_id`） |
+| `decision_search` | 按关键词检索某主体的决策 | `subject`（可选 `tenant_id`） |
 
 ---
 
@@ -574,6 +574,7 @@
 |---|---|---|---|
 | `entity_id` | integer | 是 | 要还原状态史的实体 id |
 | `dimension` | string | 否 | 限定单个维度：`goal` / `preference` / `emotion` / `relationship` / `identity` |
+| `tenant_id` | string | 否 | 该实体必须属于的租户；给定时跨租户 id 会返回 not found |
 
 ### 示例请求
 
@@ -600,8 +601,15 @@
 
 - 维度按 `FactType` 选取，与当前状态口径（`cognitive_context`）一致；不是按 payload 字段选取。
 - 区间值是**状态生效时间**（`from`/`to`），不是观察时间；`to: null` 表示状态仍然成立。
-- `transitions` **允许为空**：没有确定信号时只给区间，绝不臆造变迁。
-- 折叠值优先取 payload 的 `content`，缺失时回退完整 payload，避免不同事实被折叠成同一区间。
+- 每个区间的 `evidence_ids` 指向 `evidence` 表中承载该状态的**原文**：编译期会把
+  `payload.evidence.text` 登记成证据行（同一条话语产生的多条事实共享一行），
+  因此"每个状态各自带证据"在真实数据上成立。
+- `transitions` **允许为空**：没有确定信号时只给区间，绝不臆造变迁。三种信号按强度排序：
+  `stance_flip`（同话题否定翻转）> `behavioral_confirmation`（先说意向、后见行动）> `gradual_change`（同话题内取值变化）。
+- 折叠值取该维度 `value_keys` 中第一个字符串字段（历史层以 `content` 优先），全部缺失时才回退完整 payload；
+  同一维度的当前状态视图用的是同一张表的 `topic_keys`（以话题优先，保留"每个话题的最新一条"语义）。
+- 折叠键只用**稳定**字段：像 companion 主题的 `occurrences` 这类每次编译都会增长的计数器，
+  一旦进入折叠键就会把同一个状态切成 N 个区间，因此不纳入。
 
 ---
 
@@ -614,6 +622,7 @@
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `fact_id` | integer | 是 | 要审计的事实 id（≥1） |
+| `tenant_id` | string | 否 | 该事实所属实体必须属于的租户；给定时跨租户 id 会返回 not found |
 
 ### 示例响应
 
@@ -630,7 +639,8 @@
 - `status` 为三态：`active` / `superseded` / `contradicted`，与 `confidence`、衰减三者正交。
 - `derived_from` 是**推导链**（`F2 derived_from F1` 表示 F2 由 F1 推得），**不是因果**。
 - 链式展开有深度/广度上限；损坏的链以 `{"fact_id":N,"missing":true}` 报告，而不是整体失败。
-- `evidence` 为 `null` 表示该事实没有原文证据锚点。
+- `evidence` 为 `null` 表示该事实没有原文证据锚点。编译产生的事实现在都带锚点
+  （写入时自动登记 `evidence` 行），所以这个字段对真实数据是**有值**的。
 - 只读工具，永不写入。
 
 ---
@@ -644,6 +654,7 @@
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `decision_id` | integer | 是 | 决策 id（≥1） |
+| `tenant_id` | string | 否 | 该决策主体必须属于的租户；给定时跨租户 id 会返回 not found |
 
 ### 示例响应
 
@@ -676,6 +687,7 @@
 | `subject` | integer | 是 | 决策主体的实体 id |
 | `keyword` | string | 否 | 在 `verb`/`object` 上做大小写不敏感匹配；空串表示不过滤 |
 | `limit` | integer | 否 | 返回条数上限，默认 10，最大 100（超出会被钳制） |
+| `tenant_id` | string | 否 | 该主体必须属于的租户；给定时跨租户 id 会返回 not found |
 
 ### 示例响应
 
@@ -689,3 +701,5 @@
 
 - 结果按 `made_at` 倒序（最新优先）。
 - `keyword` 中的 `%` / `_` / `\` 按**字面量**匹配，不作为 LIKE 通配符。
+- 给 `tenant_id` 时，`subject` 归属不符返回 not found（不暴露"该 id 存在"这一信息），
+  与 `memory_decay` 的租户隔离口径一致。

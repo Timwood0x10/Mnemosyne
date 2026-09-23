@@ -527,7 +527,6 @@ impl CliArgs {
 }
 
 #[cfg(test)]
-#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
 
@@ -541,18 +540,22 @@ mod tests {
 
     #[test]
     fn validate_rejects_zero_dim() {
-        let mut cfg = Config::default();
-        cfg.vector_dim = 0;
-        cfg.embedding_provider = EmbeddingProvider::Openai;
-        cfg.openai_api_key = Some("sk-test".into());
+        let cfg = Config {
+            vector_dim: 0,
+            embedding_provider: EmbeddingProvider::Openai,
+            openai_api_key: Some("sk-test".into()),
+            ..Config::default()
+        };
         let err = cfg.validate().unwrap_err();
         assert!(matches!(err, Error::Config(_)), "expected Config error");
     }
 
     #[test]
     fn validate_rejects_bad_min_importance() {
-        let mut cfg = Config::default();
-        cfg.min_importance = 1.7;
+        let cfg = Config {
+            min_importance: 1.7,
+            ..Config::default()
+        };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
             err.contains("min_importance"),
@@ -562,8 +565,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_bad_threshold() {
-        let mut cfg = Config::default();
-        cfg.conflict_threshold = -0.1;
+        let cfg = Config {
+            conflict_threshold: -0.1,
+            ..Config::default()
+        };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
             err.contains("conflict_threshold"),
@@ -603,10 +608,12 @@ mod tests {
 
     #[test]
     fn validate_rejects_openai_without_key() {
-        let mut cfg = Config::default();
-        cfg.embedding_provider = EmbeddingProvider::Openai;
-        cfg.vector_dim = 768;
-        cfg.openai_api_key = None;
+        let cfg = Config {
+            embedding_provider: EmbeddingProvider::Openai,
+            vector_dim: 768,
+            openai_api_key: None,
+            ..Config::default()
+        };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
             err.contains("MEMORY_OPENAI_API_KEY"),
@@ -616,9 +623,11 @@ mod tests {
 
     #[test]
     fn validate_rejects_vector_retrieval_without_embedding() {
-        let mut cfg = Config::default();
-        cfg.embedding_provider = EmbeddingProvider::None;
-        cfg.retrieval_mode = RetrievalMode::Vector;
+        let cfg = Config {
+            embedding_provider: EmbeddingProvider::None,
+            retrieval_mode: RetrievalMode::Vector,
+            ..Config::default()
+        };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(
             err.contains("retrieval_mode=vector"),
@@ -628,19 +637,23 @@ mod tests {
 
     #[test]
     fn validate_rejects_hybrid_retrieval_without_embedding() {
-        let mut cfg = Config::default();
-        cfg.embedding_provider = EmbeddingProvider::None;
-        cfg.retrieval_mode = RetrievalMode::Hybrid;
+        let cfg = Config {
+            embedding_provider: EmbeddingProvider::None,
+            retrieval_mode: RetrievalMode::Hybrid,
+            ..Config::default()
+        };
         assert!(cfg.validate().is_err(), "hybrid+none must fail validate");
     }
 
     #[test]
     fn validate_accepts_hybrid_with_embedding_provider() {
-        let mut cfg = Config::default();
-        cfg.embedding_provider = EmbeddingProvider::Openai;
-        cfg.vector_dim = 768;
-        cfg.openai_api_key = Some("sk-test".into());
-        cfg.retrieval_mode = RetrievalMode::Hybrid;
+        let cfg = Config {
+            embedding_provider: EmbeddingProvider::Openai,
+            vector_dim: 768,
+            openai_api_key: Some("sk-test".into()),
+            retrieval_mode: RetrievalMode::Hybrid,
+            ..Config::default()
+        };
         assert!(cfg.validate().is_ok(), "hybrid+openai must validate");
     }
 

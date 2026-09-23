@@ -127,7 +127,7 @@ impl ResolverStage for EmbeddingStage {
                 // the error is observable, then defer to the next stage. The
                 // stage API cannot return the error, but a silent `.ok()?`
                 // made failures indistinguishable from a clean miss.
-                eprintln!("entity resolver: embed failed for `{mention}`: {e}");
+                tracing::warn!(mention = %mention, error = %e, "entity resolver: embed failed");
                 return None;
             }
         };

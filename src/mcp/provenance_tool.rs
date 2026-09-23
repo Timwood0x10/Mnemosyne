@@ -3,8 +3,9 @@
 //! Given a fact id, the tool answers three questions (provenance):
 //!
 //! - **Why do we believe it?** — the original-text evidence anchor.
-//! - **How confident are we?** — `confidence` (legacy `weight`), plus the
-//!   fact's epistemic `status` (active/superseded/contradicted).
+//! - **How confident are we?** — `confidence` (its own column, independent of
+//!   decay), plus the fact's epistemic `status`
+//!   (active/superseded/contradicted).
 //! - **What was it derived from?** — the `derived_from` derivation chain,
 //!   recursively expanded into fact summaries (not causal claims: `F2
 //!   derived_from F1` means "F2 was inferred from F1", never "F1 caused F2").
@@ -21,6 +22,8 @@ use crate::cognition::{Fact, FactStore};
 use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
 use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+
+use super::tenant_scope;
 
 /// Cap on how many `derived_from` hops we expand, so a corrupted chain can
 /// never blow up the response.
@@ -112,6 +115,13 @@ impl ToolHandler for FactProvenanceTool {
             .store
             .get_fact_by_id(fact_id)?
             .ok_or_else(|| Error::NotFound(format!("no fact with id {fact_id}")))?;
+        // A fact id alone does not say who owns it: enforce the tenant when the
+        // caller supplied one.
+        tenant_scope::ensure_entity_tenant(
+            &self.store,
+            fact.entity_id,
+            tenant_scope::tenant_argument(args)?,
+        )?;
 
         // Fetch the original-text evidence anchor, if any.
         let evidence = match fact.evidence_id {
@@ -152,6 +162,10 @@ pub fn fact_provenance_definition() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Fact id to audit (required)"
+                },
+                "tenant_id": {
+                    "type": "string",
+                    "description": "Optional: the tenant the fact's entity must belong to. Implied by fact_id; supply it to have a cross-tenant fact rejected instead of served."
                 }
             },
             "required": ["fact_id"]
@@ -163,6 +177,53 @@ pub fn fact_provenance_definition() -> ToolDefinition {
 mod tests {
     use super::*;
     use crate::cognition::{FactStatus, FactType};
+
+    /// Objective: Verify the tool is tenant-scoped when the caller states a
+    /// tenant: a fact id carries no ownership, so any client could otherwise
+    /// audit another tenant's facts by guessing an id.
+    /// Invariants: wrong tenant → NotFound; owning tenant → served.
+    #[tokio::test]
+    async fn provenance_is_tenant_scoped_when_asked() {
+        let store = Arc::new(SqliteFactStore::open_in_memory().expect("open fact store"));
+        let entity_id = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve user");
+        let fact_id = store
+            .insert_fact(&Fact {
+                id: None,
+                entity_id,
+                fact_type: FactType::Goal,
+                time: 2026,
+                payload: json!({"content": "我要学 Rust"}),
+                evidence_id: None,
+                created_at: 2026,
+                ..Fact::default()
+            })
+            .expect("insert fact");
+        let tool = FactProvenanceTool::new(store);
+
+        let error = tool
+            .call(&json!({"fact_id": fact_id, "tenant_id": "tenant-b"}))
+            .await
+            .expect_err("another tenant's fact must not be served");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "a cross-tenant fact is NotFound, got {error:?}"
+        );
+
+        let result = tool
+            .call(&json!({"fact_id": fact_id, "tenant_id": "tenant-a"}))
+            .await
+            .expect("the owning tenant is served");
+        let payload: Value = serde_json::from_str(
+            result.content[0]
+                .text
+                .as_deref()
+                .expect("provenance returns a text block"),
+        )
+        .expect("valid JSON payload");
+        assert_eq!(payload["fact_id"], json!(fact_id));
+    }
 
     /// Objective: Verify the tool answers the full provenance story for a fact
     /// with an evidence anchor and a derivation chain.

@@ -15,13 +15,89 @@ impl SqliteFactStore {
     /// [`crate::decision::validate_decision`] (empty or oversized fields), and a
     /// storage error when the insert fails.
     pub fn insert_decision(&self, decision: &crate::decision::Decision) -> Result<i64> {
-        if let Some(field) = crate::decision::validate_decision(decision) {
-            return Err(Error::InvalidInput(format!(
-                "invalid decision field `{field}`"
-            )));
-        }
-        let because = serde_json::to_string(&decision.because)?;
+        Self::validate_decision_for_write(decision)?;
         let conn = self.lock_conn()?;
+        Self::insert_decision_on(&conn, decision)
+    }
+
+    /// Persist one compilation atomically: the compiled facts, the fact that
+    /// anchors each commitment, and the decisions themselves.
+    ///
+    /// Every write happens inside ONE transaction. The previous compile path
+    /// wrote the facts first and the decisions afterwards, so a rejected
+    /// decision (or a failed agent lookup) returned an error while the facts —
+    /// and sometimes an orphan anchor — stayed in the store, and a client retry
+    /// duplicated them.
+    ///
+    /// Each entry of `commitments` pairs a commitment with the anchor fact that
+    /// represents it. The anchor is inserted before `Decision::because` is
+    /// resolved, so the supporting-fact scan sees exactly the rows it would have
+    /// seen on the old two-step path (this turn's facts included, the anchor
+    /// itself excluded because `because` links to it explicitly).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] when any decision violates
+    /// `validate_decision` — checked before the first write, so a bad decision
+    /// leaves the store untouched — and a storage error when the transaction
+    /// fails.
+    pub(crate) fn insert_compilation(
+        &self,
+        facts: &[Fact],
+        commitments: &[(Fact, crate::decision::Decision)],
+    ) -> Result<(usize, usize)> {
+        for (_, decision) in commitments {
+            Self::validate_decision_for_write(decision)?;
+        }
+        let mut conn = self.lock_conn()?;
+        let transaction = conn.transaction()?;
+        // One evidence cache for the whole compilation: the several facts of a
+        // single utterance share their anchor row.
+        let mut anchors = std::collections::HashMap::new();
+        Self::insert_facts_on(&transaction, facts, &mut anchors)?;
+        let mut stored = facts.len();
+        for (anchor, decision) in commitments {
+            // Read the subject's facts BEFORE the anchor lands, so `because`
+            // never lists the anchor twice.
+            let existing = Self::get_facts_on(&transaction, decision.subject)?;
+            Self::insert_facts_on(&transaction, std::slice::from_ref(anchor), &mut anchors)?;
+            let anchor_id = transaction.last_insert_rowid();
+            stored += 1;
+            let mut linked = decision.clone();
+            linked.because = std::iter::once(anchor_id)
+                .chain(crate::commitment::supporting_fact_ids(
+                    &existing,
+                    decision.subject,
+                    &decision.object,
+                ))
+                .collect();
+            Self::insert_decision_on(&transaction, &linked)?;
+        }
+        transaction.commit()?;
+        Ok((stored, commitments.len()))
+    }
+
+    /// Reject a decision that `validate_decision` refuses, before any write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidInput`] naming the offending field.
+    fn validate_decision_for_write(decision: &crate::decision::Decision) -> Result<()> {
+        match crate::decision::validate_decision(decision) {
+            Some(field) => Err(Error::InvalidInput(format!(
+                "invalid decision field `{field}`"
+            ))),
+            None => Ok(()),
+        }
+    }
+
+    /// Insert a decision on an already-locked connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the insert fails.
+    fn insert_decision_on(conn: &Connection, decision: &crate::decision::Decision) -> Result<i64> {
+        let because = serde_json::to_string(&decision.because)?;
         conn.execute(
             "INSERT INTO decisions (subject, verb, object, made_at, because, outcome, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -450,6 +526,81 @@ mod tests {
             stored.status,
             crate::decision::DecisionStatus::Closed,
             "recording an outcome closes the decision"
+        );
+    }
+
+    /// Objective: Verify a compilation commits atomically — facts, anchors and
+    /// decisions land together or not at all. The previous compile path wrote
+    /// the facts first, so a rejected decision returned an error while the facts
+    /// (and sometimes an orphan anchor) stayed behind for a retry to duplicate.
+    /// Invariants: a rejected decision leaves zero facts and zero decisions; a
+    /// valid compilation stores the utterance plus its anchor and links the
+    /// decision to the anchor first, then to the supporting fact.
+    #[test]
+    fn compilation_is_atomic_and_links_supporting_facts() {
+        use crate::commitment::{anchor_fact, commitments_from_messages};
+        use crate::types::Message;
+
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let subject = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve the user entity");
+        let statement = "我答应你明天陪你去医院";
+        let messages = vec![Message::new("user", statement)];
+        let decisions = commitments_from_messages(&messages, "user", subject, 2026);
+        assert_eq!(decisions.len(), 1, "the utterance is a commitment");
+        let anchor = anchor_fact(&decisions[0], 2026);
+        let utterance = crate::cognition::Fact {
+            id: None,
+            entity_id: subject,
+            fact_type: crate::cognition::FactType::Event,
+            time: 2026,
+            payload: serde_json::json!({ "content": statement }),
+            evidence_id: None,
+            created_at: 2026,
+            ..crate::cognition::Fact::default()
+        };
+
+        let mut invalid = decisions[0].clone();
+        invalid.object = "   ".to_string();
+        let error = store
+            .insert_compilation(
+                std::slice::from_ref(&utterance),
+                &[(anchor.clone(), invalid)],
+            )
+            .expect_err("a blank object must abort the compilation");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "a blank object is InvalidInput, got {error:?}"
+        );
+        assert!(
+            store.get_facts(subject).expect("read facts").is_empty(),
+            "an aborted compilation must not leave facts behind"
+        );
+        assert!(
+            store
+                .get_decisions(subject)
+                .expect("read decisions")
+                .is_empty(),
+            "an aborted compilation must not leave decisions behind"
+        );
+
+        let (facts, recorded) = store
+            .insert_compilation(
+                std::slice::from_ref(&utterance),
+                &[(anchor, decisions[0].clone())],
+            )
+            .expect("commit the compilation");
+        assert_eq!(facts, 2, "the utterance and its anchor are both stored");
+        assert_eq!(recorded, 1, "one decision is recorded");
+        let rows = store.get_facts(subject).expect("read facts");
+        let utterance_id = rows[0].id.expect("the utterance has an id");
+        let anchor_id = rows[1].id.expect("the anchor has an id");
+        let stored = store.get_decisions(subject).expect("read decisions");
+        assert_eq!(
+            stored[0].because,
+            vec![anchor_id, utterance_id],
+            "the decision links its anchor first, then the supporting fact"
         );
     }
 

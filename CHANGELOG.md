@@ -128,6 +128,17 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `decision_search` → `decision_trace` → `fact_provenance`. Every other
   integration test called a handler directly, which is how hand-crafted payloads
   kept the state-layer defects invisible.
+- **The plan's Step 2 acceptance runs on real data.**
+  `tests/cognitive_state_e2e.rs::three_state_evolution_chain_carries_its_evidence`
+  drives the "宅家 → 想社交 → 第一次参加活动" corpus through the real compiler and
+  the real `state_timeline` / `fact_provenance` tools, asserting three validity
+  windows, a distinct evidence anchor per state, and the two transitions the data
+  can actually prove (`gradual_change`, then `behavioral_confirmation`).
+- **Optional `tenant_id` on the four id-addressed read tools.** `state_timeline`,
+  `fact_provenance`, `decision_trace` and `decision_search` address their subject
+  by a raw id, which says nothing about ownership. When a caller supplies the
+  tenant, the subject must belong to it and a mismatch is reported as not-found —
+  never as a permission error, which would confirm that the id exists.
 
 ### Fixed
 
@@ -157,6 +168,57 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `weight`/`archived`/`status`-independent state. Databases created before the
   split are migrated in place: when the column is first added it is backfilled
   from `weight`, so accumulated confidence survives.
+- **Cognitive-state transitions were unreachable on production data.**
+  `gradual_change` required a `keyword` payload field while the comparison text
+  came from `content`, and no compiler emits both — so the plan's own example
+  ("喜欢独处 → 开始想社交 → 喜欢热闹") could never be reported. The comparison
+  text now falls back through `content` → `object` → `keyword` → `action`, and a
+  value change counts as gradual when the two states share a topic
+  (`keyword`/`topic`/`preference`/`action`).
+- **A user's negated statements were discarded at compile time.** "我不喜欢应酬"
+  produced no fact at all, so the engine could not represent a negative stance and
+  `stance_flip` was structurally impossible for a user entity — negated facts only
+  ever existed for the agent's own persona. Negated observations now keep their
+  fact with `negated: true`; only `Goal` stays suppressed
+  (ELITE_LEXICON_PLAN §13.3), and the affirmative side declares `negated: false`
+  so both sides of a flip are readable.
+- **One state could be reported as an interval per observation.** Companion themes
+  carry `{keyword, occurrences, samples}`; folding on the whole payload meant the
+  ever-growing `occurrences` counter made every compile look like a new state. The
+  dimension key tables now lead with stable fields.
+- **`memory_decay` down-weighted almost the whole store on its first pass.** An
+  absent `access_count` was scored as "never accessed"; unknown access history is
+  now neutral, and only an explicit `0` decays. The documented role is corrected
+  too: decay is a curation signal exposed through `decay_status` / `list_archived`
+  — it never hides a fact from a read path.
+- **A legacy database with a NULL `weight` could not be opened at all.** The
+  `confidence` migration copied `weight` verbatim into a `NOT NULL` column, so a
+  single NULL row made `SqliteFactStore::open` fail; it now uses
+  `COALESCE(weight, 1.0)`.
+- **Commitment extraction could record the opposite of what was said.**
+  "compromise" matched the `promise` marker and "I will not help you" became a
+  commitment. ASCII markers now have to start on a word boundary, and a negation
+  cue in the same clause (or immediately after the marker) cancels the decision.
+- **A rejected decision left half a compilation behind.** Facts were written before
+  decisions were validated, so an error was returned while the facts — and
+  sometimes an orphan anchor — stayed behind, and a retry duplicated them. The
+  compile path now prepares everything, validates first, and commits facts,
+  anchors and decisions in ONE transaction.
+- **`state_timeline` published a fabricated evidence link.** An interval built from
+  a fact without an id reported `fact_ids: [0]`, an id no row can satisfy.
+- **Compiled facts never registered their evidence anchor.** The compilers keep the
+  original utterance in `payload.evidence` and the fact was written with
+  `evidence_id = NULL`, so nothing ever wrote the `evidence` table in production:
+  `fact_provenance`'s "why do we believe this?" answered `null` for every real fact
+  and `state_timeline` intervals never carried an `evidence_ids` entry, even though
+  the plan requires each state to carry its evidence. The write path now registers
+  the anchor inside the same transaction — one row per utterance, shared by the
+  facts it produced, with `doc_id: 0` ("not from a document") stored as NULL.
+- **Stale documentation.** The `confidence` field still described itself as
+  "mapped from the legacy `weight` column (decay down-weights it)" after the split;
+  `plan/cognitive-state-v03.md` and `plan/external-knowledge-plan.md` were dangling
+  links; and the tool's dimension list was a hand-maintained copy that would have
+  rejected any dimension added to the engine.
 
 ### Changed
 
@@ -167,6 +229,12 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   with the binary's `memory_*` / `character_*` tool handlers. `fact_store` and
   `knowledge/store` also gained their own test modules. `FactType::as_str`
   replaced three duplicated `fact_type_name` mappings.
+- **Suppression and stderr cleanups.** All `#[allow(...)]` attributes were removed
+  (a `field_reassign_with_default` on the config tests, a stale
+  `too_many_arguments`, and a `dead_code` JSON field that serde ignores anyway),
+  and library warnings now go through `tracing` instead of `eprintln!`. The
+  transition tests moved to `tests/state_transitions.rs`, which brings
+  `src/state.rs` back under the 1000-line rule.
 
 ### Docs
 

@@ -26,10 +26,10 @@ Each tool is a registered handler with an input schema validated at the JSON-RPC
 | `character_network` | BFS-traverse the character relationship graph | `name` |
 | `character_ingest` | Distill character graph from novel corpus | (none) |
 | `character_graph` | Export 3D character graph JSON for visualization | (none) |
-| `state_timeline` | How an entity's cognitive state emerged: per-dimension intervals + deterministic transitions | `entity_id` |
-| `fact_provenance` | Audit a fact: confidence / epistemic status / evidence / derivation chain | `fact_id` |
-| `decision_trace` | Trace a decision back to its supporting facts (not causality) | `decision_id` |
-| `decision_search` | Keyword-search a subject's decisions | `subject` |
+| `state_timeline` | How an entity's cognitive state emerged: per-dimension intervals + deterministic transitions | `entity_id`, `tenant_id?` |
+| `fact_provenance` | Audit a fact: confidence / epistemic status / evidence / derivation chain | `fact_id`, `tenant_id?` |
+| `decision_trace` | Trace a decision back to its supporting facts (not causality) | `decision_id`, `tenant_id?` |
+| `decision_search` | Keyword-search a subject's decisions | `subject`, `tenant_id?` |
 
 ---
 
@@ -592,6 +592,11 @@ the state can always be recomputed from them.
 |---|---|---|---|
 | `entity_id` | integer | yes | The entity whose state history to reconstruct |
 | `dimension` | string | no | Restrict to one dimension: `goal` / `preference` / `emotion` / `relationship` / `identity` |
+| `tenant_id` | string | no | Tenant the entity must belong to; a cross-tenant id then returns not found |
+
+Each interval's `evidence_ids` points at the original text that established the
+state: the compile path registers `payload.evidence.text` as an `evidence` row
+(one row per utterance, shared by the facts it produced).
 
 ### Example Request
 
@@ -636,6 +641,10 @@ Audits *why a fact is believed*.
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `fact_id` | integer | yes | The fact to audit (>= 1) |
+| `tenant_id` | string | no | Tenant the fact's entity must belong to; a cross-tenant id then returns not found |
+
+`evidence` is `null` only for facts that carry no anchor; compiled facts always
+do, because the write path registers their original utterance.
 
 ### Example Response
 
@@ -670,6 +679,7 @@ Traces a decision back to the facts that supported it (supporting evidence,
 | Argument | Type | Required | Description |
 |---|---|---|---|
 | `decision_id` | integer | yes | The decision id (>= 1) |
+| `tenant_id` | string | no | Tenant the decision's subject must belong to; a cross-tenant id then returns not found |
 
 ### Example Response
 
@@ -703,6 +713,7 @@ Keyword-searches one subject's decisions.
 | `subject` | integer | yes | Entity id whose decisions to search |
 | `keyword` | string | no | Case-insensitive match over `verb`/`object`; empty matches all |
 | `limit` | integer | no | Maximum results, default 10, capped at 100 |
+| `tenant_id` | string | no | Tenant the subject must belong to; a cross-tenant id then returns not found |
 
 ### Example Response
 

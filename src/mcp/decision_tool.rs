@@ -1,7 +1,7 @@
 //! Decision MCP tools (experimental) — the "why did the agent act
 //! this way?" layer.
 //!
-//! Two tools, no more (per `plan/cognitive-state-v03.md`):
+//! Two tools, no more (per `docs/zh/dev-plan-cognitive-state.md`):
 //!
 //! - `decision_trace` — trace a decision back to the facts that supported it
 //!   (`because`), each fact to its evidence. Supporting evidence, not
@@ -23,6 +23,8 @@ use crate::decision::{Decision, DecisionOutcome};
 use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
 use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+
+use super::tenant_scope;
 
 /// Upper bound on `decision_search` results, mirroring the tool schema's
 /// `maximum`. Enforced in code as well because a schema is advisory — a client
@@ -94,6 +96,13 @@ impl ToolHandler for DecisionTraceTool {
             .store
             .get_decision(decision_id)?
             .ok_or_else(|| Error::NotFound(format!("no decision with id {decision_id}")))?;
+        // A decision id alone does not say who owns it: enforce the tenant when
+        // the caller supplied one.
+        tenant_scope::ensure_entity_tenant(
+            &self.store,
+            decision.subject,
+            tenant_scope::tenant_argument(args)?,
+        )?;
         let payload = decision_json(self.store.as_ref(), &decision)?;
         Ok(ToolCallResult::text(payload.to_string()))
     }
@@ -134,6 +143,14 @@ impl ToolHandler for DecisionSearchTool {
                 requested.min(MAX_DECISION_SEARCH_LIMIT) as usize
             }
         };
+        // A subject id alone does not say who owns it: enforce the tenant when
+        // the caller supplied one, before any decision is read.
+        tenant_scope::ensure_entity_tenant(
+            &self.store,
+            subject,
+            tenant_scope::tenant_argument(args)?,
+        )?;
+
         let decisions = self.store.search_decisions(subject, &keyword)?;
         let mut payloads = Vec::new();
         for decision in decisions.into_iter().take(limit) {
@@ -158,6 +175,10 @@ pub fn decision_trace_definition() -> ToolDefinition {
                     "type": "integer",
                     "minimum": 1,
                     "description": "Decision id to trace (required)"
+                },
+                "tenant_id": {
+                    "type": "string",
+                    "description": "Optional: the tenant the decision's subject must belong to. Implied by decision_id; supply it to have a cross-tenant decision rejected instead of served."
                 }
             },
             "required": ["decision_id"]
@@ -188,6 +209,10 @@ pub fn decision_search_definition() -> ToolDefinition {
                     "maximum": 100,
                     "default": 10,
                     "description": "Maximum number of decisions to return"
+                },
+                "tenant_id": {
+                    "type": "string",
+                    "description": "Optional: the tenant the subject must belong to. Implied by subject; supply it to have a cross-tenant subject rejected instead of served."
                 }
             },
             "required": ["subject"]
@@ -228,6 +253,59 @@ mod tests {
             outcome: None,
             status: DecisionStatus::Open,
         }
+    }
+
+    /// Objective: Verify both decision tools are tenant-scoped when the caller
+    /// states a tenant: a decision id or subject id carries no ownership, so any
+    /// client could otherwise read another tenant's decisions by guessing an id.
+    /// Invariants: wrong tenant → NotFound on trace and search; owning tenant →
+    /// served on both; omitted tenant → legacy unscoped read.
+    #[tokio::test]
+    async fn decision_tools_are_tenant_scoped_when_asked() {
+        let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
+        let subject = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve user");
+        let decision_id = store
+            .insert_decision(&decision(subject, "promise", "明天去医院", Vec::new()))
+            .expect("insert decision");
+
+        let trace = DecisionTraceTool::new(store.clone());
+        let error = trace
+            .call(&json!({"decision_id": decision_id, "tenant_id": "tenant-b"}))
+            .await
+            .expect_err("another tenant's decision must not be traced");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "a cross-tenant decision is NotFound, got {error:?}"
+        );
+        trace
+            .call(&json!({"decision_id": decision_id, "tenant_id": "tenant-a"}))
+            .await
+            .expect("the owning tenant is served");
+
+        let search = DecisionSearchTool::new(store);
+        let error = search
+            .call(&json!({"subject": subject, "tenant_id": "tenant-b"}))
+            .await
+            .expect_err("another tenant's subject must not be searched");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "a cross-tenant subject is NotFound, got {error:?}"
+        );
+        let result = search
+            .call(&json!({"subject": subject, "tenant_id": "tenant-a"}))
+            .await
+            .expect("the owning tenant is served");
+        assert_eq!(
+            parse_payload(&result)["decisions"].as_array().map(Vec::len),
+            Some(1),
+            "the owning tenant sees its decision"
+        );
+        search
+            .call(&json!({"subject": subject}))
+            .await
+            .expect("an omitted tenant keeps the unscoped behaviour");
     }
 
     /// Objective: Verify `decision_trace` expands `because` into resolved

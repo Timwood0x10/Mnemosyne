@@ -73,8 +73,8 @@
 | `memory_compile` | 把对话编译为结构化事实 + 认知状态，可选蒸馏 | `messages[]` |
 | `cognitive_context` | 查询实体认知快照：身份 / 偏好 / 目标 / 事件 / 关系 | `name` |
 | `memory_context_check` | 主动上下文感知蒸馏：超过阈值自动编译对话为事实 + 长期记忆 + 用户画像；低于阈值则为只读诊断 | `messages[]` |
-| `state_timeline` | 还原实体状态如何演化：分维度状态区间（生效窗口 + 证据）与确定性变迁（`gradual_change`/`stance_flip`/`behavioral_confirmation`） | `entity_id` |
-| `fact_provenance` | 审计一条事实为何成立：置信度、认知状态（active/superseded/contradicted）、原文证据、`derived_from` 推导链 | `fact_id` |
+| `state_timeline` | 还原实体状态如何演化：分维度状态区间（生效窗口 + 证据）与确定性变迁（`gradual_change`/`stance_flip`/`behavioral_confirmation`） | `entity_id`, `dimension?`, `tenant_id?` |
+| `fact_provenance` | 审计一条事实为何成立：置信度、认知状态（active/superseded/contradicted）、原文证据、`derived_from` 推导链 | `fact_id`, `tenant_id?` |
 
 ### 决策工具
 
@@ -84,8 +84,8 @@ Event 事实作为锚点——再由以下两个工具读回。
 
 | 工具 | 功能 | 必填参数 |
 |------|----------|-----------------|
-| `decision_trace` | 回溯决策依据的支持事实（supporting evidence，非因果） | `decision_id` |
-| `decision_search` | 按关键词检索某主体的决策（verb/object），最新优先 | `subject` |
+| `decision_trace` | 回溯决策依据的支持事实（supporting evidence，非因果） | `decision_id`, `tenant_id?` |
+| `decision_search` | 按关键词检索某主体的决策（verb/object），最新优先 | `subject`, `keyword?`, `limit?`, `tenant_id?` |
 
 ### 记忆蒸馏工具
 

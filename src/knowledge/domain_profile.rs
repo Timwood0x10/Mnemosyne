@@ -61,8 +61,9 @@ static CONVERSATION_PROFILE: LazyLock<DomainProfile> = LazyLock::new(|| {
     match DomainProfile::load("conversation_cognition") {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "warning: conversation_cognition profile failed to load ({e}); using an empty profile"
+            tracing::warn!(
+                error = %e,
+                "conversation_cognition profile failed to load; using an empty profile"
             );
             DomainProfile::default()
         }

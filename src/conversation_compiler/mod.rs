@@ -373,16 +373,27 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
 }
 
 /// Convert precompiled user observations into immutable facts.
+///
+/// A negated statement is a *state*, not a non-event: "我不喜欢应酬" must become a
+/// Preference fact tagged `negated: true`. Dropping the observation instead left
+/// the engine unable to represent a user's negative stance at all, and made
+/// `StanceFlip` (喜欢 X → 不喜欢 X) structurally unreachable for a user entity —
+/// negated facts only ever existed for the agent's own persona.
+///
+/// The single exception is [`FactType::Goal`]: ELITE_LEXICON_PLAN §13.3 requires
+/// "I do not plan to X" to never surface as a goal, and neither projection
+/// filters `negated` when it lists current goals. Uncertain statements are kept
+/// but tagged.
 pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> Vec<Fact> {
     let rule = DefaultRule;
     observations
         .iter()
-        // Skip observations whose source message was negated
-        // (ELITE_LEXICON_PLAN §13.3: "I do not plan to X" must not produce an
-        // affirmative Goal). Uncertain statements are kept but tagged.
-        .filter(|observation| !has_modifier(observation, "negated"))
         .flat_map(|observation| {
+            let negated = has_modifier(observation, "negated");
             let mut facts = rule.apply(observation);
+            if negated {
+                facts.retain(|fact| fact.fact_type != FactType::Goal);
+            }
             for fact in &mut facts {
                 fact.time = time;
                 fact.created_at = i64::from(time);
@@ -393,6 +404,11 @@ pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> 
                 {
                     fact.payload["content"] = serde_json::Value::String(content.value.clone());
                 }
+                // Written for BOTH stances, like the agent/persona channels do:
+                // a stance is only readable as a stance when the affirmative
+                // side declares `negated: false`, and `StanceFlip` detection
+                // needs a flag on each side of the window.
+                fact.payload["negated"] = serde_json::Value::Bool(negated);
                 if has_modifier(observation, "uncertain") {
                     fact.payload["uncertain"] = serde_json::Value::Bool(true);
                 }
@@ -779,6 +795,55 @@ mod tests {
         assert!(
             facts.iter().all(|fact| fact.time == 20260730),
             "All facts should retain the supplied logical time"
+        );
+    }
+
+    /// Objective: Verify a negated preference is recorded as a negated state
+    /// instead of being dropped. Discarding it made a user's negative stance
+    /// unrepresentable and left `StanceFlip` unreachable for a user entity
+    /// (negated facts existed only for the agent's own persona).
+    /// Invariants: "我不喜欢应酬" keeps its `喜欢` (Preference) fact and its
+    /// `应酬` (Emotion) fact, each tagged `negated: true` with the verbatim
+    /// message preserved as content.
+    #[test]
+    fn negated_preference_is_recorded_as_a_negated_state() {
+        let messages = vec![Message::new("user", "我不喜欢应酬")];
+
+        let facts = compile_user_facts(&messages, 99, 20260730);
+
+        let preference = facts
+            .iter()
+            .find(|fact| fact.fact_type == FactType::Preference)
+            .expect("the 喜欢 marker must still compile to a Preference fact");
+        assert_eq!(
+            preference.payload["negated"],
+            serde_json::Value::Bool(true),
+            "the negation must be recorded on the fact"
+        );
+        assert_eq!(
+            preference.payload["content"], "我不喜欢应酬",
+            "the verbatim message is preserved"
+        );
+        assert!(
+            facts
+                .iter()
+                .all(|fact| fact.payload["negated"] == serde_json::Value::Bool(true)),
+            "every fact from a negated message carries the negation, got {facts:?}"
+        );
+    }
+
+    /// Objective: Verify a negated plan still never surfaces as a Goal
+    /// (ELITE_LEXICON_PLAN §13.3) now that negated observations are kept.
+    /// Invariants: "我不打算学 Rust" produces no Goal fact at all.
+    #[test]
+    fn negated_plan_never_becomes_a_goal() {
+        let messages = vec![Message::new("user", "我不打算学 Rust")];
+
+        let facts = compile_user_facts(&messages, 99, 20260730);
+
+        assert!(
+            facts.iter().all(|fact| fact.fact_type != FactType::Goal),
+            "a negated plan must not become a goal, got {facts:?}"
         );
     }
 }
