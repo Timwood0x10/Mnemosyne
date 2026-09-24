@@ -1,0 +1,122 @@
+{
+  "_meta": {
+    "purpose": "编译产出质量的标注语料：每条真实感口语标注『应该产出什么』，由 tests/compile_yield.rs 计算 recall / 幻影率 / 过度抽取，并锁住不回退。这是回答『陪伴型 AI 是否真的记得住』的唯一度量。",
+    "tiers": {
+      "must_catch": "当前机制（observation marker 表）明确设计要命中的表达 → 构成回归下限，掉了就是回归",
+      "should_catch": "人类期望被记住、但当前机制可能覆盖不到的表达（身份/关系/兴趣/间接陈述/英文大小写）→ 度量能力缺口",
+      "must_ignore": "寒暄与噪声，产出任何事实都算幻影"
+    },
+    "expect": "可接受的 FactType 集合：preference / goal / emotion / identity / event / relationship / interest / location / occupation / habit。空数组表示『不得产出』",
+    "note": "语料为合成但贴近真实陪伴对话：口语、简写、否定、间接陈述、中英混说。想扩展质量面直接往 sessions 里加行即可，无需改代码。"
+  },
+  "sessions": [
+    {
+      "id": 1,
+      "title": "初次见面",
+      "lines": [
+        { "text": "你好呀，我叫小林，26 岁，在杭州做后端开发", "tier": "should_catch", "expect": ["identity", "occupation"] },
+        { "text": "我特别喜欢做饭，周末基本都泡在厨房", "tier": "must_catch", "expect": ["preference"] },
+        { "text": "不太喜欢人多的地方，容易紧张", "tier": "must_catch", "expect": ["preference", "emotion"] },
+        { "text": "我养了一只猫，叫豆豆", "tier": "should_catch", "expect": ["relationship"] },
+        { "text": "平时会去爬山，算是为数不多的爱好", "tier": "should_catch", "expect": ["interest"] }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "工作压力",
+      "lines": [
+        { "text": "这周又加班到十一点，整个人都是空的", "tier": "must_catch", "expect": ["emotion", "event"] },
+        { "text": "项目卡住了，那个并发问题搞不定", "tier": "must_catch", "expect": ["event", "emotion"] },
+        { "text": "我真的好累，白天开会晚上写代码", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "我觉得领导根本不了解这个需求", "tier": "must_catch", "expect": ["event", "emotion"] },
+        { "text": "压力大到失眠，凌晨三点还在刷手机", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "感觉自己有点内耗，明明做完了还是焦虑", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "准备下个月调岗，想换个方向试试", "tier": "must_catch", "expect": ["goal"] }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "情绪低谷（口语化）",
+      "lines": [
+        { "text": "今天有点 emo，说不上来为什么", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "我真的麻了，连续改了三版方案又被推翻", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "心态崩了，感觉做啥都没意义", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "有点破防，同事随口一句话我难受了半天", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "最近挺自闭的，谁都不想见", "tier": "must_catch", "expect": ["emotion", "goal"] },
+        { "text": "I'm so tired today, I can barely think", "tier": "should_catch", "expect": ["emotion"] },
+        { "text": "I love this show, I binge watched it twice", "tier": "should_catch", "expect": ["preference"] }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "生活事件",
+      "lines": [
+        { "text": "我下个月要搬家了，从城西搬到滨江", "tier": "must_catch", "expect": ["event"] },
+        { "text": "我妈下周要做手术，我得请假回去一趟", "tier": "should_catch", "expect": ["event"] },
+        { "text": "朋友最近辞职了，我也在想要不要换工作", "tier": "must_catch", "expect": ["event", "goal"] },
+        { "text": "房东突然说要涨租，一下子多八百", "tier": "should_catch", "expect": ["event"] },
+        { "text": "我妹妹考上研究生了，全家都很开心", "tier": "must_catch", "expect": ["event", "emotion"] }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "计划与愿望",
+      "lines": [
+        { "text": "我打算明年去日本看樱花", "tier": "must_catch", "expect": ["goal"] },
+        { "text": "想学吉他很久了，一直在纠结买不买", "tier": "must_catch", "expect": ["goal"] },
+        { "text": "希望年底能存下五万块", "tier": "must_catch", "expect": ["goal"] },
+        { "text": "正在准备考雅思，目标是 7 分", "tier": "must_catch", "expect": ["goal"] },
+        { "text": "一直憧憬那种能远程工作的生活", "tier": "must_catch", "expect": ["goal"] },
+        { "text": "特别想去海边住一段时间，什么都不干", "tier": "must_catch", "expect": ["goal"] }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "否定表达（应产出 negated 事实，且不得翻成肯定）",
+      "lines": [
+        { "text": "我不喜欢应酬，能推就推", "tier": "must_catch", "expect": ["preference"] },
+        { "text": "最近不太想出门，只想躺着", "tier": "should_catch", "expect": ["goal"] },
+        { "text": "我不打算考公务员了，那条路不适合我", "tier": "must_catch", "expect": ["goal"] },
+        { "text": "现在真的受不了加班文化了", "tier": "must_catch", "expect": ["preference", "emotion"] },
+        { "text": "我不觉得努力就一定有回报", "tier": "must_catch", "expect": ["event", "emotion"] },
+        { "text": "别再劝我早睡了，我做不到", "tier": "should_catch", "expect": ["emotion", "event"] }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "寒暄与噪声（必须零产出）",
+      "lines": [
+        { "text": "在吗", "tier": "must_ignore", "expect": [] },
+        { "text": "嗯嗯", "tier": "must_ignore", "expect": [] },
+        { "text": "哈哈哈哈", "tier": "must_ignore", "expect": [] },
+        { "text": "好的，谢谢", "tier": "must_ignore", "expect": [] },
+        { "text": "早上好", "tier": "must_ignore", "expect": [] },
+        { "text": "2333", "tier": "must_ignore", "expect": [] },
+        { "text": "你说得对", "tier": "must_ignore", "expect": [] },
+        { "text": "我先去吃饭了", "tier": "must_ignore", "expect": [] },
+        { "text": "刚刚在忙，没看到消息", "tier": "must_ignore", "expect": [] }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "习惯与身体状态",
+      "lines": [
+        { "text": "每天都要喝两杯咖啡，不喝就头疼", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "最近老熬夜，白天困得不行", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "腰疼好几天了，坐久了更难受", "tier": "must_catch", "expect": ["emotion"] }
+      ]
+    }
+  ],
+  "commitments": {
+    "note": "承诺抽取（src/commitment.rs）与 marker 表独立度量：decisions 为期望条数，0 表示这条话不得成为决策；verb 为期望动词（decisions=0 时忽略）",
+    "cases": [
+      { "text": "我答应你明天陪你去医院", "decisions": 1, "verb": "promise" },
+      { "text": "我保证周五之前把方案发你", "decisions": 1, "verb": "commit" },
+      { "text": "我保证不熬夜了，真的", "decisions": 0, "verb": null },
+      { "text": "我保证不去", "decisions": 0, "verb": null },
+      { "text": "我会考虑一下这个方案", "decisions": 0, "verb": null },
+      { "text": "我们达成了一致，各让一步", "decisions": 0, "verb": null },
+      { "text": "I promise to send it tonight", "decisions": 1, "verb": "promise" }
+    ]
+  }
+}

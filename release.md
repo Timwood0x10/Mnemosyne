@@ -100,12 +100,25 @@ falls back to built-in defaults and keeps working.
   `state_timeline` intervals never carried an `evidence_ids` entry. The write
   path now registers the anchor (one row per utterance, shared by the facts it
   produced).
+- **Compile-yield measurement** — `tests/compile_yield.rs` runs an annotated
+  colloquial corpus through the real compiler and reports recall / phantom /
+  over-extraction (baseline: explicit signals 100%, phantoms 0/9, capability gaps
+  22%), documented in `docs/zh/compile-quality.md`.
 - **Optional `tenant_id`** on `state_timeline`, `fact_provenance`,
   `decision_trace` and `decision_search`; a cross-tenant id is reported as
   not-found instead of being served.
 
 ### Fixed
 
+- **A single negation word anywhere in a sentence discarded an affirmative plan**
+  ("想学吉他很久了，一直在纠结买不买" lost its goal to the `买不买` cue): negation is
+  now resolved per marker inside its own clause, which took explicit-signal recall
+  from 84% to 100% on the new corpus.
+- **A negated statement was reported as the current state** — `aggregate` listed
+  "我不喜欢应酬" as a *preference*; negated facts are now excluded from the
+  affirmative current-state projection and kept in the history layer instead.
+- **Negated goals were dropped entirely**, so "我不打算考公务员了" was lost; they are
+  now kept as negated facts, which still never surface as an active goal.
 - **Cognitive-state transitions were unreachable on production data.** A
   `gradual_change` required a `keyword` payload field while the comparison text
   came from `content`, and no compiler emits both — so the plan's own example
@@ -168,6 +181,7 @@ falls back to built-in defaults and keeps working.
 ## Docs
 
 - [README](README.md) / [README.zh.md](README.zh.md)
+- [Compile quality baseline](docs/zh/compile-quality.md) / [编译产出质量基线](docs/zh/compile-quality.md)
 - [Architecture](docs/en/architecture.md) / [Architecture (zh)](docs/zh/architecture.md)
 - [Module docs](docs/en/compiler.md) / [Module docs (zh)](docs/zh/compiler.md)
 

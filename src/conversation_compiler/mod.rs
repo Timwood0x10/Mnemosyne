@@ -308,18 +308,14 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
         .filter(|message| message.is_user())
         .flat_map(|message| {
             let subject = subject.clone();
-            // Detect negation/uncertainty in a single pass over the message
-            // using the pre-built functional-word matcher (P3). Functional
-            // words live in `config/dictionary.json` (ELITE_LEXICON_PLAN §5.3).
-            let mut negated = false;
-            let mut uncertain = false;
-            for m in FUNCTIONAL_MATCHER.find_iter(&message.content) {
-                match m.semantic_class.as_str() {
-                    "negation" => negated = true,
-                    "uncertainty" => uncertain = true,
-                    _ => {}
-                }
-            }
+            // Collect the functional cues (negation / uncertainty) ONCE per
+            // message using the pre-built functional-word matcher (P3).
+            // Functional words live in `config/dictionary.json`
+            // (ELITE_LEXICON_PLAN §5.3). Negation is then resolved per MARKER —
+            // see `negation_near` for why a message-level flag is too blunt.
+            let cues: Vec<crate::lexicon::LexiconMatch> =
+                FUNCTIONAL_MATCHER.find_iter(&message.content).collect();
+            let uncertain = cues.iter().any(|m| m.semantic_class == "uncertainty");
 
             // Collect every marker hit first, then emit ONE observation per
             // action. A sentence matching several same-action markers
@@ -342,7 +338,7 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
                     key: "content".to_string(),
                     value: message.content.clone(),
                 }];
-                if negated {
+                if negation_near(&message.content, offset, marker.len(), &cues) {
                     modifiers.push(crate::cognition::Modifier {
                         key: "negated".to_string(),
                         value: "true".to_string(),
@@ -372,17 +368,69 @@ pub fn compile_user_observations(messages: &[Message], user_entity_id: i64) -> V
         .collect()
 }
 
+/// Characters that end a clause. A negation cue on the far side of one belongs
+/// to a different statement and must not negate this marker.
+const CLAUSE_BREAKS: &[char] = &[
+    '，', '。', '！', '？', '；', '、', '：', ',', '.', '!', '?', ';', ':',
+];
+
+/// How many characters after a marker still count as "immediately negated"
+/// ("开心不起来").
+const NEGATION_WINDOW_CHARS: usize = 3;
+
+/// True when the marker at `offset` is negated **in its own clause**.
+///
+/// A message-level negation flag is too blunt. "想学吉他很久了，一直在纠结买不买"
+/// and "特别想去海边住一段时间，什么都不干" both contain a cue, yet their plan is
+/// affirmative — flagging the whole message marked those goals negated, and
+/// negated goals are dropped (ELITE_LEXICON_PLAN §13.3), so the plans silently
+/// disappeared. A cue only counts when it sits before the marker with no clause
+/// break in between, or within [`NEGATION_WINDOW_CHARS`] characters after it —
+/// the same rule `src/commitment.rs` applies to promises.
+fn negation_near(
+    content: &str,
+    offset: usize,
+    marker_len: usize,
+    cues: &[crate::lexicon::LexiconMatch],
+) -> bool {
+    let before = |cue: &crate::lexicon::LexiconMatch| {
+        cue.semantic_class == "negation"
+            && cue.end <= offset
+            && !content[cue.end..offset].contains(CLAUSE_BREAKS)
+    };
+    if cues.iter().any(before) {
+        return true;
+    }
+    let after_start = offset + marker_len;
+    let window: String = content[after_start..]
+        .chars()
+        .take_while(|c| !CLAUSE_BREAKS.contains(c))
+        .take(NEGATION_WINDOW_CHARS)
+        .collect();
+    cues.iter().any(|cue| {
+        cue.semantic_class == "negation"
+            && cue.start >= after_start
+            && cue.start < after_start + window.len()
+    })
+}
+
 /// Convert precompiled user observations into immutable facts.
 ///
-/// A negated statement is a *state*, not a non-event: "我不喜欢应酬" must become a
+/// A negated statement is a *state*, not a non-event: "我不喜欢应酬" becomes a
 /// Preference fact tagged `negated: true`. Dropping the observation instead left
 /// the engine unable to represent a user's negative stance at all, and made
 /// `StanceFlip` (喜欢 X → 不喜欢 X) structurally unreachable for a user entity —
 /// negated facts only ever existed for the agent's own persona.
 ///
-/// The single exception is [`FactType::Goal`]: ELITE_LEXICON_PLAN §13.3 requires
-/// "I do not plan to X" to never surface as a goal, and neither projection
-/// filters `negated` when it lists current goals. Uncertain statements are kept
+/// The same holds for [`FactType::Goal`]: "我不打算考公务员了" is kept as a
+/// **negated** goal. ELITE_LEXICON_PLAN §13.3 forbids it surfacing as an
+/// *affirmative* goal, and that is guaranteed by the flag plus
+/// `StateEngine::aggregate` (which lists current state from affirmative facts
+/// only) — not by discarding the fact, which lost the change entirely. The
+/// history layer then reports the real `stance_flip` on the goal dimension.
+///
+/// Whether the statement was negated is decided per marker in its own clause
+/// (`negation_near`), never by a message-wide flag. Uncertain statements are kept
 /// but tagged.
 pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> Vec<Fact> {
     let rule = DefaultRule;
@@ -391,9 +439,6 @@ pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> 
         .flat_map(|observation| {
             let negated = has_modifier(observation, "negated");
             let mut facts = rule.apply(observation);
-            if negated {
-                facts.retain(|fact| fact.fact_type != FactType::Goal);
-            }
             for fact in &mut facts {
                 fact.time = time;
                 fact.created_at = i64::from(time);
@@ -832,18 +877,61 @@ mod tests {
         );
     }
 
-    /// Objective: Verify a negated plan still never surfaces as a Goal
-    /// (ELITE_LEXICON_PLAN §13.3) now that negated observations are kept.
-    /// Invariants: "我不打算学 Rust" produces no Goal fact at all.
+    /// Objective: Verify a negated plan never surfaces as an AFFIRMATIVE goal
+    /// (ELITE_LEXICON_PLAN §13.3) while still being remembered as the negated
+    /// state it is. Discarding the fact kept the rule but lost the information:
+    /// "我不打算考公务员了" is exactly the kind of change a companion must not miss.
+    /// Invariants: a Goal fact is produced, and it carries `negated: true`;
+    /// exactly one Goal fact exists (no mirrored affirmative twin).
     #[test]
-    fn negated_plan_never_becomes_a_goal() {
+    fn negated_plan_is_kept_as_a_negated_goal() {
         let messages = vec![Message::new("user", "我不打算学 Rust")];
 
         let facts = compile_user_facts(&messages, 99, 20260730);
+        let goals: Vec<&Fact> = facts
+            .iter()
+            .filter(|fact| fact.fact_type == FactType::Goal)
+            .collect();
 
+        assert_eq!(
+            goals.len(),
+            1,
+            "the plan must be remembered once: {facts:?}"
+        );
+        assert_eq!(
+            goals[0].payload["negated"],
+            serde_json::Value::Bool(true),
+            "the goal must be stored as negated, so the current-state projection \
+             never lists it as an active plan"
+        );
         assert!(
-            facts.iter().all(|fact| fact.fact_type != FactType::Goal),
-            "a negated plan must not become a goal, got {facts:?}"
+            !facts.iter().any(|fact| fact.fact_type == FactType::Goal
+                && fact.payload["negated"] != serde_json::Value::Bool(true)),
+            "no affirmative goal may be produced from a negated plan, got {facts:?}"
+        );
+    }
+
+    /// Objective: Verify negation is resolved per marker in its own clause, not
+    /// per message. A message-wide flag turned any sentence containing 不/没/别
+    /// into a negated one: "想学吉他很久了，一直在纠结买不买" lost its plan
+    /// entirely, because a cue in a later clause ("买不买") marked the whole
+    /// message negated and negated plans were dropped.
+    /// Invariants: the plan survives and is affirmative; the `买不买` cue does not
+    /// touch it.
+    #[test]
+    fn negation_is_resolved_per_clause() {
+        let messages = vec![Message::new("user", "想学吉他很久了，一直在纠结买不买")];
+
+        let facts = compile_user_facts(&messages, 99, 20260730);
+        let goal = facts
+            .iter()
+            .find(|fact| fact.fact_type == FactType::Goal)
+            .unwrap_or_else(|| panic!("the plan must survive a cue in another clause: {facts:?}"));
+
+        assert_eq!(
+            goal.payload["negated"],
+            serde_json::Value::Bool(false),
+            "a cue in a different clause must not negate this plan: {facts:?}"
         );
     }
 }

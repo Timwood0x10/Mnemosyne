@@ -158,11 +158,7 @@ pub fn intervals_for_dimension(
         // SAME state (Python), but "喜欢应酬" then "不喜欢应酬" is a DIFFERENT
         // state even though both carry `preference: 应酬`.
         let state_value = resolve_state_value(&fact.payload, value_keys);
-        let negated = fact
-            .payload
-            .get("negated")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let negated = fact.negated();
         let fold_key = (state_value.clone(), negated);
         if let Some(interval) = &mut current {
             if interval.fold_key == fold_key {

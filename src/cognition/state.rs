@@ -203,9 +203,19 @@ impl Default for StateEngine {
 /// This is the exact rule [`resolve_state_value`](crate::state) applies when it
 /// folds facts into state intervals, so the current state and the state history
 /// agree on what "the same state" means.
+///
+/// **Negated facts are skipped**: this projection answers "what does the entity
+/// currently like / want / have?", and the model has no field for an explicitly
+/// rejected state. A negated fact lives in the state *history* instead, where
+/// `StateInterval` folds on `(value, negated)` so the change becomes a
+/// `StanceFlip`. Without this filter, "我不喜欢应酬" would be reported as a
+/// *preference* for 应酬 — the exact opposite of what was said.
 fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> Vec<Fact> {
     let mut latest = std::collections::BTreeMap::new();
-    for fact in facts.iter().filter(|fact| fact.fact_type == fact_type) {
+    for fact in facts
+        .iter()
+        .filter(|fact| fact.fact_type == fact_type && !fact.negated())
+    {
         let semantic_key = keys
             .iter()
             .find_map(|key| fact.payload.get(*key).and_then(|value| value.as_str()))

@@ -3,7 +3,8 @@
 > 状态：**v3 定稿（2026-08-15，架构冻结）· 已实施（2026-09-23）**
 >
 > 里程碑以 **Step 1 / Step 2 / Step 3** 表述，不绑定发布版本号；三者随 **0.1.3**
-> 一并发布。实施结果见 [`review-2026-09-22.md`](../../review-2026-09-22.md) §6–§7。
+> 一并发布。实施与加固明细见 [`CHANGELOG.md`](../../CHANGELOG.md) 的 `0.1.3` 段、
+> [编译产出质量基线](./compile-quality.md) 与 [`plan/postmortem.md`](../../plan/postmortem.md) §七。
 >
 > 借鉴对象：[semantica-agi/semantica](https://github.com/semantica-agi/semantica)（Graph-Native Infrastructure for Context and Accountable AI Systems）。
 > 只吸收其 **Provenance → Temporal → Conflict → Causal → Decision** 五种思想，并将其重解释为
@@ -383,8 +384,11 @@ struct Decision {
   - Step 3 — 同文件 `declared_outcome_closes_the_decision_loop_over_mcp`：
     承诺 → 检索 → 宿主声明结果 → 决策关闭，且首次结果不可被覆盖。
 - **实现期加固（2026-09-23）**：三轮评审共 15 项缺陷已全部修复，明细见
-  `review-2026-09-22.md` 与 `review-2026-09-23.md`；其中 5 项直接动摇本计划的验收
+  [`CHANGELOG.md`](../../CHANGELOG.md) 的 `0.1.3` 段；其中 5 项直接动摇本计划的验收
   （变迁类型生产不可达、用户否定被丢弃、折叠键不稳定、证据链未落库、Decision 无法关闭）。
+- **产出质量已量化**：见 [编译产出质量基线](./compile-quality.md)
+  （显性信号 recall 100%、噪声幻影 0/9、能力缺口 22%），度量由
+  `tests/compile_yield.rs` + `tests/fixtures/compile_yield_zh.json` 持续守护。
 - 三者随 **0.1.3** 发布。
 
 ---

@@ -134,6 +134,13 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `outcome`, so every decision stayed `open` forever. Nothing is inferred from the
   conversation, the first outcome recorded wins, and unknown ids come back as
   `missing` instead of failing the call.
+- **Compile-yield measurement.** `tests/compile_yield.rs` drains an annotated
+  corpus of colloquial companion dialogue
+  (`tests/fixtures/compile_yield_zh.json`) through the real compiler and reports
+  `must_catch` / `should_catch` recall, phantom lines and over-extraction, with
+  regression floors and per-fact invariants (source sentence + evidence anchor,
+  determinism, no fact from filler). Baseline: explicit signals 100%, phantoms
+  0/9, capability gaps 22% — documented in `docs/zh/compile-quality.md`.
 - **The plan's Step 2 acceptance runs on real data.**
   `tests/cognitive_state_e2e.rs::three_state_evolution_chain_carries_its_evidence`
   drives the "宅家 → 想社交 → 第一次参加活动" corpus through the real compiler and
@@ -174,6 +181,22 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `weight`/`archived`/`status`-independent state. Databases created before the
   split are migrated in place: when the column is first added it is backfilled
   from `weight`, so accumulated confidence survives.
+- **A single negation word anywhere in a sentence discarded an affirmative plan.**
+  Negation was decided once per message, so "想学吉他很久了，一直在纠结买不买" and
+  "特别想去海边…什么都不干" were marked negated and their goals thrown away
+  (`买不买` / `什么都不干` negated the whole sentence). Negation is now resolved per
+  marker inside its own clause — the rule `src/commitment.rs` already applied to
+  promises. `must_catch` recall on the new corpus went 84% → 100%.
+- **A negated statement was reported as the current state.** Preserving negated
+  facts (below) made `StateEngine::aggregate` list "我不喜欢应酬" under the entity's
+  *preferences* — the opposite of what was said. The current-state projection now
+  skips negated facts (`Fact::negated`), while the history layer keeps folding on
+  them so the change still surfaces as a `StanceFlip`.
+- **Negated goals were dropped, losing the change entirely.** "我不打算考公务员了"
+  produced no fact at all, so a companion could never learn that the user gave up
+  that plan. Negated goals are now kept as `negated: true`; ELITE_LEXICON_PLAN
+  §13.3 (never an *affirmative* goal) is guaranteed by the flag plus the
+  affirmative-only current-state projection, not by discarding the fact.
 - **Cognitive-state transitions were unreachable on production data.**
   `gradual_change` required a `keyword` payload field while the comparison text
   came from `content`, and no compiler emits both — so the plan's own example

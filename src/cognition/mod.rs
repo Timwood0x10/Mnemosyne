@@ -202,6 +202,22 @@ impl Default for Fact {
     }
 }
 
+impl Fact {
+    /// True when the fact stores a **negated** statement ("我不喜欢应酬").
+    ///
+    /// One accessor for the whole engine: the compile path writes the flag, the
+    /// current-state projection must skip it (the affirmative views have no field
+    /// for "explicitly rejected"), and the state-history projection folds on it
+    /// so a flip becomes a `StanceFlip`.
+    #[must_use]
+    pub fn negated(&self) -> bool {
+        self.payload
+            .get("negated")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Rule trait (Observation → Fact)
 // ═══════════════════════════════════════════════════════════════════════════
@@ -367,6 +383,49 @@ mod tests {
             "both unkeyed goals must survive, got {}: {:?}",
             state.goals.len(),
             state.goals
+        );
+    }
+
+    /// Objective: Verify the current-state projection ignores NEGATED facts.
+    /// "我不喜欢应酬" is a rejection, and the model has no field for one — listing it
+    /// under `preferences` would report the exact opposite of what was said. The
+    /// compile path keeps negated facts (so history and `StanceFlip` can see
+    /// them), which is exactly why this projection must filter them.
+    /// Invariants: the negated fact never appears as current state; the newest
+    /// affirmative fact for the same topic still does.
+    #[test]
+    fn negated_facts_never_become_current_state() {
+        let facts = vec![
+            fact(
+                FactType::Preference,
+                2024,
+                serde_json::json!({
+                    "action": "prefer",
+                    "content": "我喜欢应酬",
+                    "negated": false,
+                }),
+            ),
+            fact(
+                FactType::Preference,
+                2026,
+                serde_json::json!({
+                    "action": "prefer",
+                    "content": "我不喜欢应酬",
+                    "negated": true,
+                }),
+            ),
+        ];
+        let state = StateEngine::new().aggregate(&facts);
+
+        assert_eq!(
+            state.preferences.len(),
+            1,
+            "only the affirmative fact may be current, got {:?}",
+            state.preferences
+        );
+        assert_eq!(
+            state.preferences[0].payload["content"], "我喜欢应酬",
+            "the affirmative fact is the current state"
         );
     }
 
