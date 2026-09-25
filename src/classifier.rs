@@ -30,6 +30,12 @@ const TYPE_KEYWORDS: [(MemoryType, &[&str]); 6] = [
             "i'm from",
             "my role",
             "my job",
+            // Chinese identity
+            "我是",
+            "我叫",
+            "我姓",
+            "我在",
+            "我的名字",
         ],
     ),
     (
@@ -48,6 +54,13 @@ const TYPE_KEYWORDS: [(MemoryType, &[&str]); 6] = [
             "tab indentation",
             "snake_case",
             "camelcase",
+            // Chinese preference
+            "喜欢",
+            "偏好",
+            "习惯用",
+            "不喜欢",
+            "讨厌",
+            "更喜欢",
         ],
     ),
     (
@@ -119,6 +132,13 @@ const TYPE_KEYWORDS: [(MemoryType, &[&str]); 6] = [
             "we learned",
             "retrospective",
             "incident",
+            // Chinese experience
+            "我们试过",
+            "我们发现",
+            "教训",
+            "复盘",
+            "线上",
+            "事故",
         ],
     ),
 ];

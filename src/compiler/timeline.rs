@@ -206,10 +206,13 @@ pub fn build_character_arcs(markers: Vec<PersonalityMarker>) -> Vec<CharacterArc
     ];
 
     fn classify_trait(t: &str, pos: &[&str], neg: &[&str]) -> i32 {
-        if pos.iter().any(|p| t.contains(p)) {
-            1
-        } else if neg.iter().any(|n| t.contains(n)) {
+        // Check the NEGATIVE table first: "善妒" contains the positive char
+        // "善", so a positive-first scan classified an explicitly negative
+        // trait as positive and inverted the arc direction (growth vs decline).
+        if neg.iter().any(|n| t.contains(n)) {
             -1
+        } else if pos.iter().any(|p| t.contains(p)) {
+            1
         } else {
             0
         }
@@ -220,9 +223,16 @@ pub fn build_character_arcs(markers: Vec<PersonalityMarker>) -> Vec<CharacterArc
         by_entity.entry(m.entity.clone()).or_default().push(m);
     }
 
+    // Deterministic output order: HashMap iteration is process-random, so the
+    // returned arc list (and anything serialized from it) differed across runs
+    // of identical input — same class as the build_timeline flush sort.
+    let mut entity_keys: Vec<String> = by_entity.keys().cloned().collect();
+    entity_keys.sort();
+
     let mut arcs = Vec::new();
-    for (entity, mut entity_markers) in by_entity {
-        entity_markers.sort_by_key(|m| m.chapter);
+    for entity in entity_keys {
+        let entity_markers = by_entity.get_mut(&entity).expect("key from keys()");
+        entity_markers.sort_by_key(|m| (m.chapter, m.trait_name.clone(), m.context.clone()));
         let traits: Vec<String> = entity_markers
             .iter()
             .map(|m| m.trait_name.clone())
@@ -333,18 +343,33 @@ pub fn build_timeline(
                 // update when the type ACTUALLY changes — the old code
                 // unconditionally inserted, clobbering valid_from on every
                 // event even when the type was unchanged (NEW-H22).
+                //
+                // BOTH directions live in `current`, but a type change must
+                // emit the closed relation only ONCE (the end-of-flush path
+                // already dedups reverse pairs). Closing under both keys
+                // doubled every type-changed relation.
+                let mut closed_this_pair = false;
                 for key in &[&key_a_b, &key_b_a] {
                     if let Some((old_type, started)) = current.get(key) {
                         if *old_type != rel_type {
-                            // Relation changed — close the old one
-                            results.push(Relation {
-                                source: key.0.clone(),
-                                target: key.1.clone(),
-                                relation_type: old_type.clone(),
-                                valid_from: *started,
-                                valid_to: ts,
-                                confidence: 0.8,
-                            });
+                            if !closed_this_pair {
+                                // Canonicalize direction so the closed row is
+                                // stable regardless of which key matched first.
+                                let (src, tgt) = if key.0 <= key.1 {
+                                    (key.0.clone(), key.1.clone())
+                                } else {
+                                    (key.1.clone(), key.0.clone())
+                                };
+                                results.push(Relation {
+                                    source: src,
+                                    target: tgt,
+                                    relation_type: old_type.clone(),
+                                    valid_from: *started,
+                                    valid_to: ts,
+                                    confidence: 0.8,
+                                });
+                                closed_this_pair = true;
+                            }
                             // Update to the new type + timestamp
                             current.insert((key.0.clone(), key.1.clone()), (rel_type.clone(), ts));
                         }
@@ -439,6 +464,8 @@ mod tests {
                 },
             ],
             importance: 0.5,
+            start_offset: None,
+            end_offset: None,
         }
     }
 

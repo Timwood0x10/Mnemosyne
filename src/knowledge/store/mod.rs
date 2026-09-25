@@ -30,14 +30,41 @@ use super::{
 mod queries;
 mod trait_def;
 mod types;
+mod world_io;
 
 pub use trait_def::KnowledgeStore;
-pub use types::{GraphCounts, WorldEntity, WorldProfile, WorldRelation};
+pub use types::{GraphCounts, WorldEntity, WorldEvent, WorldProfile, WorldRelation, WorldState};
 
 use types::{
     json_to_string, row_to_chapter, row_to_document, row_to_edge, row_to_evidence, row_to_mention,
     row_to_object,
 };
+
+/// Add `column` to `table` when it is missing (idempotent).
+///
+/// `CREATE TABLE IF NOT EXISTS` never alters an existing table, so columns
+/// introduced after a database was first created need an explicit ALTER.
+/// Returns `Ok(())` whether or not the column already existed.
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let mut exists = false;
+    {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            if row.get::<_, String>(1)? == column {
+                exists = true;
+                break;
+            }
+        }
+    }
+    if !exists {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {definition}"
+        ))
+        .map_err(|e| StorageError::Schema(format!("add {table}.{column}: {e}")))?;
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests;
@@ -98,6 +125,11 @@ impl SQLiteKnowledgeStore {
         // as the destination for DocumentSource/domain-pack output.
         conn.execute_batch(WORLD_SCHEMA)
             .map_err(|e| StorageError::Schema(format!("init world schema: {e}")))?;
+        // `CREATE TABLE IF NOT EXISTS` never adds columns to an existing
+        // table — databases created before the events offset columns need an
+        // idempotent ALTER (same pattern as fact_store::ensure_column).
+        ensure_column(&conn, "events", "start_offset", "INTEGER")?;
+        ensure_column(&conn, "events", "end_offset", "INTEGER")?;
         Ok(())
     }
 
@@ -195,8 +227,11 @@ impl SQLiteKnowledgeStore {
         let result = self.clear_all_inner().await;
         match &result {
             Ok(_) => {
-                let _ = self.set_foreign_keys_enabled(true).await;
+                // COMMIT first: `PRAGMA foreign_keys` is a no-op inside an
+                // open transaction, so re-enabling BEFORE commit left FK
+                // enforcement OFF for the connection's remaining lifetime.
                 self.commit_transaction().await?;
+                let _ = self.set_foreign_keys_enabled(true).await;
             }
             Err(_) => {
                 let _ = self.rollback_transaction().await;
@@ -242,8 +277,9 @@ impl SQLiteKnowledgeStore {
         let result = self.clear_for_document_inner(doc_id).await;
         match &result {
             Ok(_) => {
-                let _ = self.set_foreign_keys_enabled(true).await;
+                // COMMIT first: PRAGMA foreign_keys is a no-op in a transaction.
                 self.commit_transaction().await?;
+                let _ = self.set_foreign_keys_enabled(true).await;
             }
             Err(_) => {
                 let _ = self.rollback_transaction().await;
@@ -686,22 +722,7 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
     }
 
     async fn find_world_entity(&self, name: &str) -> Result<Option<WorldEntity>> {
-        let conn = self.conn.lock().await;
-        let row = conn
-            .query_row(
-                "SELECT id, name, entity_type, importance FROM world_entities WHERE name = ?1",
-                params![name],
-                |r| {
-                    Ok(WorldEntity {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        entity_type: r.get(2)?,
-                        importance: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(row)
+        self.find_world_entity_row(name).await
     }
 
     async fn upsert_world_entity(
@@ -710,25 +731,8 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         entity_type: &str,
         importance: f64,
     ) -> Result<i64> {
-        let conn = self.conn.lock().await;
-        // Atomic upsert (P2): a single INSERT ... ON CONFLICT (relying on the
-        // UNIQUE(name) index added to WORLD_SCHEMA) instead of a
-        // check-then-insert. Two stores sharing one SQLite file can no longer
-        // both pass the SELECT and create duplicate rows; the conflict
-        // clause updates in place and RETURNING gives the id in one round
-        // trip. SQLite supports RETURNING since 3.35.
-        conn.query_row(
-            "INSERT INTO world_entities (name, entity_type, importance)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(name) DO UPDATE SET
-                 entity_type = excluded.entity_type,
-                 importance = excluded.importance,
-                 updated_at = strftime('%s','now')
-             RETURNING id",
-            params![name, entity_type, importance],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(Into::into)
+        self.upsert_world_entity_row(name, entity_type, importance)
+            .await
     }
 
     async fn upsert_world_profile(
@@ -737,16 +741,10 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         key: &str,
         value: &str,
         confidence: f64,
+        evidence_id: Option<i64>,
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO world_entity_profiles (entity_id, key, value, confidence) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(entity_id, key) DO UPDATE SET value = excluded.value, \
-                 confidence = excluded.confidence",
-            params![entity_id, key, value, confidence],
-        )?;
-        Ok(())
+        self.upsert_world_profile_row(entity_id, key, value, confidence, evidence_id)
+            .await
     }
 
     async fn upsert_world_relation(
@@ -756,75 +754,86 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         relation_type: &str,
         confidence: f64,
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO world_relations (source_id, target_id, relation_type, confidence) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET \
-                 confidence = excluded.confidence",
-            params![source_id, target_id, relation_type, confidence],
-        )?;
-        Ok(())
+        self.upsert_world_relation_row(source_id, target_id, relation_type, confidence)
+            .await
+    }
+
+    async fn upsert_world_event(
+        &self,
+        title: &str,
+        event_type: &str,
+        timestamp: Option<i32>,
+        location: Option<&str>,
+        description: &str,
+        importance: f64,
+        start_offset: Option<i64>,
+        end_offset: Option<i64>,
+    ) -> Result<i64> {
+        self.upsert_world_event_row(
+            title,
+            event_type,
+            timestamp,
+            location,
+            description,
+            importance,
+            start_offset,
+            end_offset,
+        )
+        .await
+    }
+
+    async fn link_event_participant(
+        &self,
+        event_id: i64,
+        entity_name: &str,
+        role: &str,
+    ) -> Result<()> {
+        self.link_event_participant_row(event_id, entity_name, role)
+            .await
+    }
+
+    async fn list_world_events(&self) -> Result<Vec<WorldEvent>> {
+        self.list_world_events_row().await
+    }
+
+    async fn upsert_world_state(
+        &self,
+        entity_name: &str,
+        slot: &str,
+        value: &str,
+        chapter: Option<i32>,
+        event_id: Option<i64>,
+        start_offset: Option<i64>,
+        end_offset: Option<i64>,
+        confidence: f64,
+    ) -> Result<i64> {
+        self.upsert_world_state_row(
+            entity_name,
+            slot,
+            value,
+            chapter,
+            event_id,
+            start_offset,
+            end_offset,
+            confidence,
+        )
+        .await
+    }
+
+    async fn list_world_states(&self, entity_name: Option<&str>) -> Result<Vec<WorldState>> {
+        self.list_world_states_row(entity_name).await
     }
 
     async fn list_world_entities(&self) -> Result<Vec<WorldEntity>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, entity_type, importance FROM world_entities ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldEntity {
-                id: r.get("id")?,
-                name: r.get("name")?,
-                entity_type: r.get("entity_type")?,
-                importance: r.get("importance")?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.list_world_entities_row().await
     }
 
     async fn list_world_profiles(&self) -> Result<Vec<WorldProfile>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT entity_id, key, value, confidence FROM world_entity_profiles ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldProfile {
-                entity_id: r.get("entity_id")?,
-                key: r.get("key")?,
-                value: r.get("value")?,
-                confidence: r.get("confidence")?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.list_world_profiles_row().await
     }
 
     async fn list_world_relations(&self) -> Result<Vec<WorldRelation>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT source_id, target_id, relation_type, confidence FROM world_relations ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldRelation {
-                source_id: r.get("source_id")?,
-                target_id: r.get("target_id")?,
-                relation_type: r.get("relation_type")?,
-                confidence: r.get("confidence")?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.list_world_relations_row().await
     }
 
     async fn create_run(&self, r: &CompilerRun) -> Result<i64> {

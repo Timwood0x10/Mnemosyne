@@ -186,6 +186,12 @@ pub fn agent_facts_from_messages(
                     "attribution": "agent",
                     "action": "completed",
                     "content": msg.content,
+                    "evidence": {
+                        "doc_id": 0,
+                        "offset": 0,
+                        "length": msg.content.len(),
+                        "text": msg.content,
+                    },
                 }),
                 evidence_id: None,
                 created_at: i64::from(logical_time),
@@ -328,12 +334,31 @@ pub fn derived_facts_from_messages(
             continue;
         }
         let lower = msg.content.to_lowercase();
+        // Skip PURE interrogative restatements: "你觉得呢？" is a filler
+        // question addressed TO the user, not an assertion about them.
+        // Tag-questions that carry a statement ("你计划学 Rust，对吗？")
+        // still count — they restate a goal with a comma-clause before the ?.
+        let trimmed = msg.content.trim();
+        let pure_question = (trimmed.ends_with('?') || trimmed.ends_with('？'))
+            && !trimmed.contains('，')
+            && !trimmed.contains('。');
+        if pure_question {
+            continue;
+        }
         for pattern in RESTATEMENT_PATTERNS {
             if !lower.contains(pattern.marker) && !msg.content.contains(pattern.marker) {
                 continue;
             }
             let preceding_user = nearest_preceding_user(messages, idx);
+            // Standard EvidenceRef shape (doc_id/offset/length/text) so
+            // anchor_evidence_on can create a real evidence row. The structured
+            // agent/user quotes stay under `restatement` for audit detail.
+            let user_text = preceding_user.map(|m| m.content.as_str()).unwrap_or("");
             let mut evidence = serde_json::json!({
+                "doc_id": 0,
+                "offset": 0,
+                "length": user_text.len(),
+                "text": user_text,
                 "agent_restatement": msg.content,
             });
             if let Some(user_msg) = preceding_user {
@@ -344,6 +369,11 @@ pub fn derived_facts_from_messages(
                 entity_id: user_entity_id,
                 fact_type: pattern.fact_type,
                 time: logical_time,
+                // Column confidence MUST carry the discount: payload-only
+                // left fact.confidence at 1.0 (Fact::default), so provenance
+                // and ranking treated agent-derived claims like first-hand
+                // user statements (zero-pollution / §C3).
+                confidence: DERIVED_CONFIDENCE_DISCOUNT,
                 payload: serde_json::json!({
                     "attribution": "agent_derived",
                     "content": msg.content,

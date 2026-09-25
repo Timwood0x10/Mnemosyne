@@ -77,10 +77,13 @@ pub(super) fn row_to_edge(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEdge
 
 /// Convert a rusqlite row into an [`Evidence`].
 pub(super) fn row_to_evidence(row: &rusqlite::Row) -> rusqlite::Result<Evidence> {
+    // `doc_id`/`chapter_id` are nullable (shared schema with the fact store);
+    // a fact-anchor row with NULL chapter must decode as 0 rather than
+    // InvalidColumnType, so knowledge queries can list it without failing.
     Ok(Evidence {
         id: row.get("id")?,
-        doc_id: row.get("doc_id")?,
-        chapter_id: row.get("chapter_id")?,
+        doc_id: row.get::<_, Option<i64>>("doc_id")?.unwrap_or(0),
+        chapter_id: row.get::<_, Option<i64>>("chapter_id")?.unwrap_or(0),
         start_offset: row.get("start_offset")?,
         end_offset: row.get("end_offset")?,
         content: row.get("content")?,
@@ -137,6 +140,8 @@ pub struct WorldProfile {
     pub key: String,
     pub value: String,
     pub confidence: f64,
+    /// Evidence row anchoring this claim to a source byte span.
+    pub evidence_id: Option<i64>,
 }
 
 /// A V7 world-model relation row (`world_relations`).
@@ -145,5 +150,42 @@ pub struct WorldRelation {
     pub source_id: i64,
     pub target_id: i64,
     pub relation_type: String,
+    pub confidence: f64,
+}
+
+/// A V7 world-model event row (`events`), including its source byte span.
+///
+/// `start_offset`/`end_offset` are absolute positions in the original
+/// document (dialogue = whole sentence; action = verb-match window). `None`
+/// for legacy rows written before the columns existed.
+#[derive(Debug, Clone)]
+pub struct WorldEvent {
+    pub id: i64,
+    pub title: String,
+    pub event_type: String,
+    pub timestamp: Option<i32>,
+    pub location: Option<String>,
+    pub description: String,
+    pub importance: f64,
+    pub start_offset: Option<i64>,
+    pub end_offset: Option<i64>,
+}
+
+/// A V7 character-state slot row (`world_states`).
+///
+/// One row = one observation of `(entity, slot)` at a narrative time,
+/// anchored to the event that produced it and the source byte span.
+/// The *current* state of a slot is the row with the highest
+/// `(chapter, id)` — never overwritten in place (ADD-only).
+#[derive(Debug, Clone)]
+pub struct WorldState {
+    pub id: i64,
+    pub entity_name: String,
+    pub slot: String,
+    pub value: String,
+    pub chapter: Option<i32>,
+    pub event_id: Option<i64>,
+    pub start_offset: Option<i64>,
+    pub end_offset: Option<i64>,
     pub confidence: f64,
 }

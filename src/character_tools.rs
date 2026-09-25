@@ -1,5 +1,6 @@
 //! V1 `character_*` tool handlers kept on the binary side.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use mnemosyne::character::{CharacterStore, SQLiteCharacterStore, traverse_character_network};
@@ -140,6 +141,22 @@ impl ToolHandler for CharacterIngestTool {
             .get("corpus_dir")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("corpus");
+
+        // Path sandbox: same policy as knowledge_attach — reject absolute
+        // paths and `..` escapes so a remote client cannot point the ingest
+        // at an arbitrary host directory.
+        if PathBuf::from(corpus_dir).is_absolute()
+            || corpus_dir.split('/').any(|seg| seg == "..")
+            || corpus_dir.split('\\').any(|seg| seg == "..")
+        {
+            return Ok(ToolCallResult::text(
+                serde_json::json!({
+                    "status": "rejected",
+                    "error": format!("corpus_dir must be a relative path under the workspace; rejected: {corpus_dir}"),
+                })
+                .to_string(),
+            ));
+        }
 
         let pipeline = IngestionPipeline::new(self.store.clone(), corpus_dir);
         let stats = pipeline.run().await?;

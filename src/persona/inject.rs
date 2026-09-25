@@ -110,12 +110,14 @@ fn fact_negated(fact: &Fact) -> bool {
 ///
 /// Facts are grouped by [`FactType`]:
 ///
-/// - `Identity` → `identity` (prefers a non-negated statement, else the first).
-/// - `Preference` / `Emotion` / `Goal` → `persona` (listed likes / dislikes,
-///   emotional leanings, goals / stances).
-/// - `Relationship` → `relationship` (an array of relationship statements).
+/// - `Identity` → `identity` (the NEWEST non-negated statement wins, so an
+///   evolved identity replaces the origin; falls back to the oldest if only
+///   negated ones exist).
+/// - `Preference` / `Emotion` / `Goal` → `persona` (the NEWEST
+///   [`MAX_PERSONA_ITEMS`] statements — iterating store order kept the five
+///   earliest lines forever and discarded everything learned later).
+/// - `Relationship` → `relationship` (newest-first, same rationale).
 ///
-/// Each facet is capped at [`MAX_PERSONA_ITEMS`] so the card stays bounded.
 /// `style` and `taboos` are never derived from facts and stay empty here.
 #[must_use]
 pub fn build_persona_card_from_facts(
@@ -125,38 +127,46 @@ pub fn build_persona_card_from_facts(
 ) -> PersonaCard {
     let mut card = PersonaCard::empty(tenant_id, agent_id);
 
+    let mut persona_facts = filter_persona_facts(facts);
+    // Store order is time ASC; walk newest-first so the card reflects who the
+    // agent has BECOME, not who they were at first contact.
+    persona_facts.reverse();
+
     let mut identity: Option<String> = None;
-    let mut identity_first: Option<String> = None;
+    let mut identity_oldest: Option<String> = None;
     let mut persona: Vec<String> = Vec::new();
     let mut relationship: Vec<String> = Vec::new();
 
-    for fact in filter_persona_facts(facts) {
+    for fact in persona_facts {
         let content = fact_content(fact);
         if content.is_empty() {
             continue;
         }
         match fact.fact_type {
             FactType::Identity => {
-                if identity_first.is_none() {
-                    identity_first = Some(content.clone());
+                if identity_oldest.is_none() {
+                    identity_oldest = Some(content.clone());
                 }
+                // Newest non-negated identity wins (first in reverse order).
                 if !fact_negated(fact) && identity.is_none() {
                     identity = Some(content);
                 }
             }
             FactType::Preference | FactType::Emotion | FactType::Goal
-                if persona.len() < MAX_PERSONA_ITEMS =>
+                if persona.len() < MAX_PERSONA_ITEMS && !persona.contains(&content) =>
             {
                 persona.push(content);
             }
-            FactType::Relationship if relationship.len() < MAX_PERSONA_ITEMS => {
+            FactType::Relationship
+                if relationship.len() < MAX_PERSONA_ITEMS && !relationship.contains(&content) =>
+            {
                 relationship.push(content);
             }
             _ => {}
         }
     }
 
-    card.identity = identity.or(identity_first).unwrap_or_default();
+    card.identity = identity.or(identity_oldest).unwrap_or_default();
     card.persona = persona;
     card.relationship = if relationship.is_empty() {
         Value::Null
@@ -202,12 +212,14 @@ pub fn lookup_persona_card(cards: &Value, tenant_id: &str, agent_id: &str) -> Op
         .cloned()
 }
 
-/// Merge a JSON file entry into a fact-aggregated card, preferring the file.
+/// Merge a JSON file entry into a fact-aggregated card.
 ///
-/// Each field present in `file` (and non-empty) overrides the corresponding
-/// field of `base`; fields absent from the file keep the aggregated values.
-/// This lets a hand-authored card pin `style` / `taboos` (which facts never
-/// produce) while still inheriting the fact-derived identity and persona.
+/// Contract (module docs): file entries **fill in** fields the fact
+/// aggregation did not produce (`style`, `taboos`, and optionally a pinned
+/// `identity`). They must NOT wholesale-replace learned `persona` /
+/// `relationship` content — a static card that always wins would freeze the
+/// companion at whatever the file said, discarding months of evolved facts
+/// on every injection.
 #[must_use]
 pub fn merge_persona_card_file(mut base: PersonaCard, file: &Value) -> PersonaCard {
     if let Some(s) = file.get("identity").and_then(Value::as_str) {
@@ -215,10 +227,19 @@ pub fn merge_persona_card_file(mut base: PersonaCard, file: &Value) -> PersonaCa
             base.identity = s.to_string();
         }
     }
+    // Persona: UNION file entries with fact-derived ones (file first so a
+    // hand-authored line is visible, then the learned statements).
     if let Some(v) = file.get("persona") {
         let items = value_str_array(v);
         if !items.is_empty() {
-            base.persona = items;
+            let mut merged = items;
+            for p in &base.persona {
+                if !merged.contains(p) {
+                    merged.push(p.clone());
+                }
+            }
+            merged.truncate(MAX_PERSONA_ITEMS * 2);
+            base.persona = merged;
         }
     }
     if let Some(v) = file.get("style") {
@@ -233,9 +254,20 @@ pub fn merge_persona_card_file(mut base: PersonaCard, file: &Value) -> PersonaCa
             base.taboos = items;
         }
     }
+    // Relationship: MERGE keys rather than replacing the whole value, so a
+    // file pinning `status: stranger` cannot erase the learned intimacy/stage.
     if let Some(r) = file.get("relationship") {
-        if !r.is_null() {
-            base.relationship = r.clone();
+        match (&mut base.relationship, r) {
+            (Value::Object(base_obj), Value::Object(file_obj)) => {
+                for (k, v) in file_obj {
+                    base_obj.insert(k.clone(), v.clone());
+                }
+            }
+            // base was Null/non-object: adopt the file object as-is. A null
+            // `relationship` is deliberately a no-op, so it falls through to
+            // the arm below instead of being spelled out as a dead branch.
+            (_, Value::Object(_)) => base.relationship = r.clone(),
+            _ => {}
         }
     }
     base

@@ -78,6 +78,22 @@ const NARRATIVE_VERBS: &[&str] = &[
 /// Maximum length of an event object name derived from its sentence.
 const MAX_EVENT_TITLE: usize = 24;
 
+/// Stable FNV-1a hash used to disambiguate truncated event titles.
+///
+/// Dependency-free and deterministic so re-compiling the same sentence always
+/// yields the same `title#hash` name (idempotent reuse), while two sentences
+/// sharing a 24-char prefix get distinct object identities.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h = FNV_OFFSET;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(FNV_PRIME);
+    }
+    h
+}
+
 /// Materialize story events for a prose document.
 ///
 /// For every sentence that mentions a discovered cast member AND carries a
@@ -139,8 +155,18 @@ pub async fn materialize_story_events(
         // Event object named after the real sentence (evidence-bearing, not a
         // placeholder). Reuse an existing event with the same name in this doc
         // so re-compiling enriches rather than duplicates.
+        //
+        // When the title is TRUNCATED, append a short content hash: two
+        // distinct sentences sharing their first MAX_EVENT_TITLE chars
+        // ("刘备说道：此事需从长计议" vs "…需再三思量") used to collide on the
+        // same name, silently merging edges/evidence onto the first event.
         let title: String = t.chars().take(MAX_EVENT_TITLE).collect();
-        let event_id = match store.find_object_by_name(&title, Some(doc_id)).await? {
+        let event_name = if title.chars().count() < t.chars().count() {
+            format!("{title}#{:08x}", fnv1a(t.as_bytes()))
+        } else {
+            title.clone()
+        };
+        let event_id = match store.find_object_by_name(&event_name, Some(doc_id)).await? {
             Some(existing) => existing.id,
             None => {
                 store
@@ -148,7 +174,7 @@ pub async fn materialize_story_events(
                         id: 0,
                         doc_id,
                         object_type: ObjectType::Event,
-                        name: title.clone(),
+                        name: event_name.clone(),
                         properties: serde_json::json!({ "source": "story_events" }),
                         confidence: 0.7,
                         created_at: now,
@@ -179,7 +205,11 @@ pub async fn materialize_story_events(
                             target_id: event_id,
                             predicate: "participated_in".into(),
                             properties: serde_json::json!({}),
-                            origin: Origin::Observed,
+                            // Participation is INFERRED from "sentence contains
+                            // cast name AND a narrative verb", not transcribed
+                            // verbatim — Observed/Derived separation requires
+                            // Derived for rule-engine guesses.
+                            origin: Origin::Derived,
                             confidence: 0.7,
                             valid_from: None,
                             valid_to: None,
@@ -192,14 +222,15 @@ pub async fn materialize_story_events(
         }
 
         // Anchor the sentence as evidence on the event object so the key-event
-        // scorer sees corroborating original text.
+        // scorer sees corroborating original text. Persist the exact byte span
+        // so a repeated sentence can still be re-located in the source document.
         let evidence_id = store
             .create_evidence(&Evidence {
                 id: 0,
                 doc_id,
                 chapter_id,
-                start_offset: None,
-                end_offset: None,
+                start_offset: Some(sent.start_offset as i64),
+                end_offset: Some(sent.end_offset as i64),
                 content: t.to_string(),
                 created_at: now,
             })

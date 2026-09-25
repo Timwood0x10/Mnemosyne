@@ -51,14 +51,23 @@ fn search_json_db_matches_substring_and_sorts() {
     assert!(search_json_db(&rows, "alpha", 0).is_empty());
 }
 
+/// Unique temp path per call — fixed names race across parallel test
+/// processes (and across tests that clean up the same file mid-run).
+fn unique_temp(name: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("{name}_{}_{}", std::process::id(), n))
+}
+
 /// Objective: Verify load_json_db accepts both a bare array and a
 /// {"documents": [...]} wrapper, and rejects rows missing id/text.
 /// Invariants: bare array loads 2 rows; wrapper loads 1; missing id errors.
 #[test]
 fn load_json_db_accepts_array_and_wrapper() {
-    let dir = std::env::temp_dir();
-    // Bare array.
-    let bare = dir.join("lorescope_test_bare.json");
+    // Unique paths: fixed names race when this test runs alongside others
+    // that clean up the same temp files.
+    let bare = unique_temp("lorescope_test_bare.json");
     std::fs::write(
         &bare,
         r#"[{"id":"1","text":"one","score":0.4},{"id":"2","text":"two"}]"#,
@@ -69,14 +78,14 @@ fn load_json_db_accepts_array_and_wrapper() {
     assert_eq!(rows[1].score, 0.5, "missing score defaults to 0.5");
 
     // Documents wrapper.
-    let wrapped = dir.join("lorescope_test_wrapped.json");
+    let wrapped = unique_temp("lorescope_test_wrapped.json");
     std::fs::write(&wrapped, r#"{"documents":[{"id":"x","text":"hello"}]}"#)
         .expect("write wrapped");
     let rows = load_json_db(wrapped.to_str().unwrap()).expect("wrapped loads");
     assert_eq!(rows.len(), 1, "wrapper yields 1 row");
 
     // Missing id → error.
-    let bad = dir.join("lorescope_test_bad.json");
+    let bad = unique_temp("lorescope_test_bad.json");
     std::fs::write(&bad, r#"[{"text":"no id"}]"#).expect("write bad");
     let err = load_json_db(bad.to_str().unwrap()).unwrap_err();
     assert!(
@@ -99,8 +108,8 @@ fn load_json_db_accepts_array_and_wrapper() {
 async fn knowledge_attach_document_registers_and_rebuilds_linker() {
     let registry = Arc::new(ExternalKnowledgeRegistry::new());
     let linker: SharedEntityLinker = Arc::new(RwLock::new(EntityLinker::new()));
-    // Write a temp text file to attach.
-    let path = std::env::temp_dir().join("lorescope_attach_test.txt");
+    // Write a temp text file to attach (unique path — fixed names race).
+    let path = unique_temp("lorescope_attach_test.txt");
     std::fs::write(&path, "Alice met Bob at the park.").expect("write txt");
 
     let handler = KnowledgeAttachHandler {
@@ -149,7 +158,7 @@ async fn knowledge_attach_document_registers_and_rebuilds_linker() {
 async fn knowledge_attach_db_registers_signal_provider() {
     let registry = Arc::new(ExternalKnowledgeRegistry::new());
     let linker: SharedEntityLinker = Arc::new(RwLock::new(EntityLinker::new()));
-    let db_path = std::env::temp_dir().join("lorescope_attach_db.json");
+    let db_path = unique_temp("lorescope_attach_db.json");
     std::fs::write(
         &db_path,
         r#"[{"id":"r1","text":"rust async","score":0.8},{"id":"r2","text":"python sync"}]"#,
@@ -192,7 +201,7 @@ async fn knowledge_ingest_materializes_into_graph() {
     let store = Arc::new(SQLiteKnowledgeStore::open_in_memory().await.expect("open"));
 
     // Attach a text document first.
-    let path = std::env::temp_dir().join("lorescope_ingest_test.txt");
+    let path = unique_temp("lorescope_ingest_test.txt");
     std::fs::write(&path, "Zhaoyun charged through the enemy lines.").expect("write txt");
     let attach = KnowledgeAttachHandler {
         registry: registry.clone(),
@@ -251,7 +260,7 @@ async fn knowledge_ingest_reingest_is_fully_idempotent() {
     let store = Arc::new(SQLiteKnowledgeStore::open_in_memory().await.expect("open"));
 
     // Attach a text document first.
-    let path = std::env::temp_dir().join("lorescope_reingest_test.txt");
+    let path = unique_temp("lorescope_reingest_test.txt");
     std::fs::write(&path, "Liu Bei met Guan Yu in the peach garden.").expect("write txt");
     let attach = KnowledgeAttachHandler {
         registry: registry.clone(),

@@ -34,7 +34,12 @@ pub const MAX_IDEAL_LENGTH: usize = 400;
 pub const MAX_KEYWORD_MATCHES: usize = 6;
 
 /// High-value keywords that signal important content.
+///
+/// Bilingual: an English-only table made `keyword_score` always 0 for Chinese
+/// content while English collected up to 0.48 extra — combined with
+/// `min_importance = 0.6` that systematically dropped Chinese memories.
 const HIGH_VALUE_KEYWORDS: &[&str] = &[
+    // English
     "error",
     "exception",
     "crash",
@@ -54,6 +59,28 @@ const HIGH_VALUE_KEYWORDS: &[&str] = &[
     "memory leak",
     "race condition",
     "deadlock",
+    // Chinese
+    "报错",
+    "错误",
+    "异常",
+    "崩溃",
+    "修复",
+    "解决",
+    "重要",
+    "关键",
+    "安全",
+    "漏洞",
+    "弃用",
+    "迁移",
+    "生产",
+    "部署",
+    "配置",
+    "性能",
+    "内存泄漏",
+    "竞态",
+    "死锁",
+    "上线",
+    "回滚",
 ];
 
 /// Per-type baseline bias in `[0.0, 1.0]`.
@@ -159,7 +186,12 @@ impl ImportanceScorer {
         let combined_lower = combined.to_lowercase();
 
         let kw = keyword_score(&combined_lower);
-        let len = length_score(combined.len());
+        // Character count, not byte length: the ideal window (16..=400) is
+        // reasoned about in characters. Byte length made a 6-char Chinese
+        // problem (18 bytes) earn full LENGTH_WEIGHT while a 300-char Chinese
+        // pair (~900 bytes) scored 0 and was silently dropped below
+        // `min_importance`.
+        let len = length_score(combined.chars().count());
         let type_score = type_bias(mem_type) * TYPE_WEIGHT;
 
         let raw = BASE_SCORE + kw + len + type_score;

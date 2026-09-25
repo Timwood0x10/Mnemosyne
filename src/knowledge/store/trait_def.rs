@@ -131,12 +131,16 @@ pub trait KnowledgeStore: Send + Sync {
     ) -> Result<i64>;
     /// Insert a V7 entity profile key/value, or update the value when the key
     /// already exists for this entity (upsert by `(entity_id, key)`).
+    ///
+    /// `evidence_id` anchors the claim to an `evidence` row that carries the
+    /// source byte span — without it a profile claim is unlocatable.
     async fn upsert_world_profile(
         &self,
         entity_id: i64,
         key: &str,
         value: &str,
         confidence: f64,
+        evidence_id: Option<i64>,
     ) -> Result<()>;
     /// Insert a V7 relation, deduplicating by `(source_id, target_id,
     /// relation_type)` — re-inserting the same edge is a no-op.
@@ -147,6 +151,59 @@ pub trait KnowledgeStore: Send + Sync {
         relation_type: &str,
         confidence: f64,
     ) -> Result<()>;
+    /// Insert a V7 world event, or return the existing id when an event with
+    /// the same `(title, timestamp, start_offset, end_offset)` already exists.
+    ///
+    /// The offset pair is part of the identity so the same title at two
+    /// different source spans stays two events, while a re-compile of the
+    /// same sentence is a no-op.
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_world_event(
+        &self,
+        title: &str,
+        event_type: &str,
+        timestamp: Option<i32>,
+        location: Option<&str>,
+        description: &str,
+        importance: f64,
+        start_offset: Option<i64>,
+        end_offset: Option<i64>,
+    ) -> Result<i64>;
+    /// Link an event to a world entity by name (upserting the entity when it
+    /// is not yet in `world_entities`). Idempotent via the
+    /// `event_participants UNIQUE(event_id, entity_id)` constraint.
+    async fn link_event_participant(
+        &self,
+        event_id: i64,
+        entity_name: &str,
+        role: &str,
+    ) -> Result<()>;
+    /// List all V7 world events (ordered by id), for export and tests.
+    async fn list_world_events(&self) -> Result<Vec<WorldEvent>>;
+    /// Upsert a character-state slot (`world_states`) anchored to its source
+    /// event. Identity is `(entity_id, slot, event_id, chapter)` so a
+    /// re-compile of the same document is a no-op while a *new* event at a
+    /// later chapter appends history (ADD-only — state stays reconstructable).
+    ///
+    /// `entity_name` is upserted into `world_entities` when unseen (same
+    /// contract as `link_event_participant`).
+    ///
+    /// Returns the `world_states.id`.
+    #[allow(clippy::too_many_arguments)]
+    async fn upsert_world_state(
+        &self,
+        entity_name: &str,
+        slot: &str,
+        value: &str,
+        chapter: Option<i32>,
+        event_id: Option<i64>,
+        start_offset: Option<i64>,
+        end_offset: Option<i64>,
+        confidence: f64,
+    ) -> Result<i64>;
+    /// List world states ordered by (chapter, id), optionally filtered by
+    /// entity name. `None` returns every entity's history.
+    async fn list_world_states(&self, entity_name: Option<&str>) -> Result<Vec<WorldState>>;
     /// List all V7 world entities (id, name, type, importance), for export.
     async fn list_world_entities(&self) -> Result<Vec<WorldEntity>>;
     /// List all V7 entity profiles, for export.

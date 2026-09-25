@@ -45,6 +45,18 @@ impl DomainProfile {
     /// - [`Error::Io`] when the file is missing.
     /// - [`Error::Config`] when the JSON is unparseable.
     pub fn load(name: &str) -> Result<Self> {
+        // Path-traversal guard: `name` is joined into a filesystem path, so
+        // `../../../home/user/.config/secret` would read arbitrary *.json
+        // (generalize_compile accepts a client-supplied `profile`).
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(Error::InvalidInput(format!(
+                "invalid profile name `{name}`: only [A-Za-z0-9_-] is allowed"
+            )));
+        }
         let base = crate::config::resolve_resource_path("config/domain_profiles");
         let path = base.join(format!("{name}.json"));
         let raw = std::fs::read_to_string(&path).map_err(Error::Io)?;

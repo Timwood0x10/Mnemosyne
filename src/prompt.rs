@@ -21,7 +21,11 @@ impl PromptBuilder {
                 } else {
                     &mem.summary
                 };
-                parts.push(format!("- [{}%] {}", (mem.importance * 100.0) as u32, line));
+                parts.push(format!(
+                    "- [{}%] {}",
+                    (mem.importance * 100.0).round() as u32,
+                    line
+                ));
             }
             parts.push(String::new());
         }

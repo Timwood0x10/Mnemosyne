@@ -295,12 +295,20 @@ fn name_before(prefix: &str) -> Option<String> {
 }
 
 /// A candidate character qualifies as a name if it is a CJK name-shaped token
-/// and not in the common non-name list.
+/// that passes the soft person-name validator (no function words / noun tails)
+/// and is not in the common non-name list.
+///
+/// Soft (no surname requirement): literary dialogue speakers like "流苏" have
+/// no standard surname, but "感觉" before a dialogue verb is still rejected
+/// via function-word/noun-tail gates + NON_NAMES + min_frequency.
 fn is_plausible_person(name: &str) -> bool {
     if name.chars().count() < 2 {
         return false;
     }
-    !NON_NAMES.iter().any(|n| name.contains(n))
+    if NON_NAMES.iter().any(|n| name.contains(n)) {
+        return false;
+    }
+    crate::compiler::name_validation::is_plausible_person_name(name)
 }
 
 /// CJK ideograph or a common name punctuation role.

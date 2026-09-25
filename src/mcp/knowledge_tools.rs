@@ -475,6 +475,12 @@ impl ToolHandler for CognitiveContextHandler {
         // 1. Resolve persisted knowledge entities. User identities are scoped
         // by tenant and external user id; legacy callers still resolve the
         // default User root through the compatible empty-id mapping.
+        //
+        // Non-user names must resolve through the FACT store's entity space
+        // (tenant-scoped), never by reusing `knowledge_objects.id`: those two
+        // id spaces are independent AUTOINCREMENT sequences, so feeding a
+        // graph object id into `get_facts` returned another entity's
+        // cognitive snapshot (or empty).
         let (entity_id, entity_name, entity_type) = if name.eq_ignore_ascii_case("user") {
             let entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
             let entity_name = if user_id.is_empty() {
@@ -484,11 +490,38 @@ impl ToolHandler for CognitiveContextHandler {
             };
             (entity_id, entity_name, "User".to_string())
         } else {
+            // Prefer a graph object for the display name/type, but only use
+            // its id when a same-named fact-store entity exists in this
+            // tenant; otherwise resolve as an agent-like entity by name.
             let object = store
                 .find_object_by_name(&name, None)
                 .await?
                 .ok_or_else(|| Error::NotFound(format!("entity `{name}` not found")))?;
-            (object.id, object.name, format!("{:?}", object.object_type))
+            let fact_entity = self
+                .fact_store
+                .find_entity(tenant_id, None, &object.name)?
+                .map(|(id, _, _)| id)
+                .or_else(|| {
+                    // Fall back to the agent external-key form so companion
+                    // characters bridged via story_bridge resolve by name.
+                    self.fact_store
+                        .find_entity(
+                            tenant_id,
+                            Some(&format!("agent:{}", object.name)),
+                            &format!("Agent:{}", object.name),
+                        )
+                        .ok()
+                        .flatten()
+                        .map(|(id, _, _)| id)
+                });
+            match fact_entity {
+                Some(id) => (id, object.name, format!("{:?}", object.object_type)),
+                None => {
+                    return Err(Error::NotFound(format!(
+                        "entity `{name}` has no cognitive facts in tenant `{tenant_id}`"
+                    )));
+                }
+            }
         };
 
         // 2. Read Facts from the same SQLite database as the knowledge store.

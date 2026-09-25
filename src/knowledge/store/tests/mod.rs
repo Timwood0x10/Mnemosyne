@@ -13,13 +13,23 @@ async fn fresh() -> SQLiteKnowledgeStore {
 
 /// Objective: Verify the P2 fix — `upsert_world_entity` is atomic and
 /// unique-by-name is DB-enforced. Two INDEPENDENT store instances sharing
-/// the same SQLite file must not create duplicate rows when they upsert
-/// the same name concurrently.
+/// the same SQLite file must not create duplicate rows when they upsert the
+/// same name concurrently.
 /// Invariants: after racing two instances on one name, exactly ONE
 /// `world_entities` row exists with that name.
 #[tokio::test]
 async fn concurrent_upsert_does_not_duplicate() {
-    let path = std::env::temp_dir().join("lorescope_p2_dup.db");
+    // Unique path per run: a fixed name raced with parallel cargo-test
+    // processes on the same machine (two binaries / nextest workers) and
+    // intermittently failed the uniqueness assertion.
+    let path = std::env::temp_dir().join(format!(
+        "lorescope_p2_dup_{}_{}.db",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     let _ = std::fs::remove_file(&path);
     // Two independent connections to the SAME file — each has its own
     // mutex, so the pre-fix check-then-insert could both pass the SELECT.
@@ -72,6 +82,7 @@ async fn world_schema_tables_are_created() {
         "world_entity_profiles",
         "world_relations",
         "events",
+        "world_states",
     ] {
         let count: i64 = conn
             .query_row(
@@ -348,6 +359,37 @@ async fn find_object_by_alias_rejects_ambiguous_substring() {
         ambiguous.is_none(),
         "ambiguous substring must not silently pick one entity"
     );
+}
+
+/// Objective: Verify the no-doc SQL path uses the RAW query as the reverse
+/// LIKE haystack. The escaped form (`foo\_bar`) was previously bound as ?3,
+/// so backslashes became part of the searched text and a query containing
+/// `_`/`%` failed to match a stored substring the Rust filter would accept
+/// (e.g. query `foo_bar` vs stored `oo_ba`).
+/// Invariants: a query with `_` still resolves an unambiguous stored
+/// substring via the no-doc path; exact names remain preferred.
+#[tokio::test]
+async fn find_object_by_alias_no_doc_escapes_pattern_not_haystack() {
+    let store = fresh().await;
+    let did = seed_doc(&store, "underscore regression").await;
+    seed_person(&store, did, "oo_ba", json!({})).await;
+
+    // doc-scoped path (list + filter) already worked; the bug is the no-doc
+    // SQL branch. Call with doc_id = None so the escaped haystack would be
+    // used if still present.
+    let hit = store
+        .find_object_by_alias("foo_bar", None)
+        .await
+        .expect("alias lookup must not fail")
+        .expect(
+            "query `foo_bar` must still match stored `oo_ba` \
+             (escaped haystack regression)",
+        );
+    assert_eq!(
+        hit.name, "oo_ba",
+        "reverse containment must search the raw query, not the escaped form"
+    );
+    let _ = did;
 }
 
 /// Objective: Verify `update_object_properties` merges new keys into an
@@ -646,6 +688,190 @@ async fn evidence_link_is_idempotent() {
         .expect("get evidence");
     assert_eq!(evs.len(), 1, "duplicate link must not duplicate rows");
     assert_eq!(evs[0].content, "赵云单骑救主");
+}
+
+/// Objective: Verify world events persist their source byte spans and that
+/// re-upserting the same (title, timestamp, span) is idempotent while the
+/// same title at a different span stays a separate event.
+/// Invariants: offsets round-trip; second upsert returns the same id; a
+/// different start_offset creates a new row; participant links are no-ops
+/// on repeat.
+#[tokio::test]
+async fn world_event_offsets_round_trip_and_upsert_is_idempotent() {
+    let store = fresh().await;
+    let id1 = store
+        .upsert_world_event(
+            "刘备曰",
+            "dialogue",
+            Some(3),
+            None,
+            "刘备曰：进攻",
+            0.5,
+            Some(100),
+            Some(120),
+        )
+        .await
+        .expect("insert event");
+    // Same identity → same id (re-compile must not duplicate).
+    let id1_again = store
+        .upsert_world_event(
+            "刘备曰",
+            "dialogue",
+            Some(3),
+            None,
+            "刘备曰：进攻",
+            0.5,
+            Some(100),
+            Some(120),
+        )
+        .await
+        .expect("re-insert");
+    assert_eq!(id1, id1_again, "identical (title, ts, span) reuses the row");
+
+    // Same title at a different span is a distinct event.
+    let id2 = store
+        .upsert_world_event(
+            "刘备曰",
+            "dialogue",
+            Some(3),
+            None,
+            "刘备曰：撤退",
+            0.5,
+            Some(500),
+            Some(520),
+        )
+        .await
+        .expect("insert second");
+    assert_ne!(id1, id2, "different span must not merge events");
+
+    let events = store.list_world_events().await.expect("list");
+    assert_eq!(events.len(), 2, "two span-distinct events");
+    let first = events.iter().find(|e| e.id == id1).expect("first event");
+    assert_eq!(first.start_offset, Some(100), "start span persisted");
+    assert_eq!(first.end_offset, Some(120), "end span persisted");
+    assert_eq!(first.timestamp, Some(3), "chapter persisted");
+
+    // Participant link is idempotent (UNIQUE event_id+entity_id).
+    store
+        .link_event_participant(id1, "刘备", "speaker")
+        .await
+        .expect("link once");
+    store
+        .link_event_participant(id1, "刘备", "speaker")
+        .await
+        .expect("link twice is a no-op");
+    let world = store
+        .find_world_entity("刘备")
+        .await
+        .expect("query")
+        .expect("participant upserted into world_entities");
+    assert_eq!(world.name, "刘备");
+}
+
+/// Objective: Verify world-state slots persist with their event anchor and
+/// byte span, that a re-observation of the same (entity, slot, event) is
+/// idempotent, and that a later chapter appends history (ADD-only).
+/// Invariants: offsets round-trip; second upsert returns the same id and
+/// does not grow the list; a different chapter adds a row; entity filter
+/// scopes the result.
+#[tokio::test]
+async fn world_state_slots_round_trip_and_append_history() {
+    let store = fresh().await;
+    let event_id = store
+        .upsert_world_event(
+            "吕布 杀 董卓",
+            "action",
+            Some(3),
+            None,
+            "吕布杀董卓",
+            0.6,
+            Some(100),
+            Some(112),
+        )
+        .await
+        .expect("event");
+
+    let id1 = store
+        .upsert_world_state(
+            "董卓",
+            "status",
+            "deceased",
+            Some(3),
+            Some(event_id),
+            Some(100),
+            Some(112),
+            0.75,
+        )
+        .await
+        .expect("state 1");
+    // Same (entity, slot, event, chapter) → same row (re-compile no-op).
+    let id1_again = store
+        .upsert_world_state(
+            "董卓",
+            "status",
+            "deceased",
+            Some(3),
+            Some(event_id),
+            Some(100),
+            Some(112),
+            0.75,
+        )
+        .await
+        .expect("state re-upsert");
+    assert_eq!(id1, id1_again, "identical observation must reuse the row");
+
+    let all = store.list_world_states(None).await.expect("list all");
+    assert_eq!(all.len(), 1, "idempotent upsert must not grow history");
+    assert_eq!(all[0].entity_name, "董卓");
+    assert_eq!(all[0].slot, "status");
+    assert_eq!(all[0].value, "deceased");
+    assert_eq!(all[0].chapter, Some(3));
+    assert_eq!(
+        all[0].event_id,
+        Some(event_id),
+        "state anchors to its event"
+    );
+    assert_eq!(all[0].start_offset, Some(100), "span persisted");
+    assert_eq!(all[0].end_offset, Some(112));
+
+    // A later chapter (different event) appends history — ADD-only.
+    let event2 = store
+        .upsert_world_event(
+            "华雄 斩 某",
+            "action",
+            Some(5),
+            None,
+            "华雄斩某",
+            0.6,
+            Some(200),
+            Some(210),
+        )
+        .await
+        .expect("event 2");
+    store
+        .upsert_world_state(
+            "华雄",
+            "status",
+            "deceased",
+            Some(5),
+            Some(event2),
+            Some(200),
+            Some(210),
+            0.7,
+        )
+        .await
+        .expect("state 2");
+
+    let all = store.list_world_states(None).await.expect("list all");
+    assert_eq!(all.len(), 2, "a new event appends, never overwrites");
+    // Ordered by (chapter, id): ch3 first, ch5 second.
+    assert_eq!(all[0].chapter, Some(3));
+    assert_eq!(all[1].chapter, Some(5));
+
+    // Entity-name filter scopes the query.
+    let one = store.list_world_states(Some("董卓")).await.expect("filter");
+    assert_eq!(one.len(), 1, "filter by entity name");
+    assert_eq!(one[0].entity_name, "董卓");
 }
 
 mod views;

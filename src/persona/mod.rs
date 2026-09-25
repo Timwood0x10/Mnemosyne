@@ -141,6 +141,10 @@ pub fn signal_to_fact(
         entity_id: attribution.entity_id,
         fact_type: signal.fact_type,
         time: logical_time,
+        // Column confidence carries the signal score so consumers reading
+        // `fact.confidence` (provenance, ranking) see the real value —
+        // payload-only left it at Fact::default 1.0.
+        confidence: f64::from(signal.confidence).clamp(0.0, 1.0),
         payload: serde_json::json!({
             "attribution": crate::agent_personality::AGENT_PERSONALITY_ATTRIBUTION,
             "speaker": attribution.speaker.as_str(),

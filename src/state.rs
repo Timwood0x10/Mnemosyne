@@ -253,22 +253,31 @@ fn detect_transition(from: &StateInterval, to: &StateInterval) -> Option<Transit
         return None;
     }
 
-    // StanceFlip: same topic, opposite negation.
+    // StanceFlip: same topic, opposite negation. Bigram overlap alone is too
+    // loose across formulaic templates ("我喜欢和你聊天" vs "我不喜欢和你
+    // 吵架" share 喜欢/欢和/和你) — when BOTH payloads carry a topic-bearing
+    // key, require them to agree after stripping stance verbs that some
+    // fixtures embed in the preference value itself ("喜欢应酬" vs
+    // "不喜欢应酬" are the same topic 应酬).
     if let (Some(from_negated), Some(to_negated)) =
         (negation_of(&from.value), negation_of(&to.value))
     {
         if from_negated != to_negated
             && shared_bigrams(from_text, to_text) >= STANCE_FLIP_MIN_SHARED_BIGRAMS
+            && (!both_have_topic_fields(&from.value, &to.value)
+                || shares_normalized_topic(&from.value, &to.value))
         {
             return Some(TransitionType::StanceFlip);
         }
     }
 
     // BehavioralConfirmation: the later state's text is about action while the
-    // earlier was about intent. Detected via `negated`-insensitive contrast on
-    // the same topic with a strong bigram overlap.
+    // earlier was still intent/preference (not itself an action). Two already-
+    // performed actions ("参加了训练" → "参加了比赛") are NOT a confirmation;
+    // an intent marker OR a non-action earlier state qualifies the transition.
     if shared_bigrams(from_text, to_text) >= STANCE_FLIP_MIN_SHARED_BIGRAMS
         && contains_action_word(to_text)
+        && (contains_intent_word(from_text) || !contains_action_word(from_text))
     {
         return Some(TransitionType::BehavioralConfirmation);
     }
@@ -306,6 +315,49 @@ fn state_text(value: &serde_json::Value) -> &str {
         .unwrap_or("")
 }
 
+/// True when both payloads carry at least one topic-bearing key (so the
+/// shared-topic guard is meaningful rather than vacuously true).
+fn both_have_topic_fields(from: &serde_json::Value, to: &serde_json::Value) -> bool {
+    TOPIC_KEYS.iter().any(|key| {
+        from.get(*key).and_then(serde_json::Value::as_str).is_some()
+            && to.get(*key).and_then(serde_json::Value::as_str).is_some()
+    })
+}
+
+/// Like [`shares_topic`], but strips stance verbs embedded in topic values
+/// before comparing ("喜欢应酬" and "不喜欢应酬" both normalize to "应酬").
+fn shares_normalized_topic(from: &serde_json::Value, to: &serde_json::Value) -> bool {
+    TOPIC_KEYS.iter().any(|key| {
+        matches!(
+            (
+                from.get(*key).and_then(serde_json::Value::as_str).map(normalize_stance_topic),
+                to.get(*key).and_then(serde_json::Value::as_str).map(normalize_stance_topic)
+            ),
+            (Some(a), Some(b)) if !a.is_empty() && a == b
+        )
+    })
+}
+
+/// Strip common stance verbs so a preference value that embeds the stance
+/// still yields the underlying topic for flip detection.
+///
+/// If stripping empties the string (e.g. the whole value IS "喜欢"), keep the
+/// original — an empty topic must never compare equal by accident, and two
+/// identical `action:"喜欢"` markers are the same topic.
+fn normalize_stance_topic(s: &str) -> String {
+    let stripped = s
+        .trim_start_matches("不喜欢")
+        .trim_start_matches("讨厌")
+        .trim_start_matches("喜欢")
+        .trim_start_matches("不")
+        .trim();
+    if stripped.is_empty() {
+        s.to_string()
+    } else {
+        stripped.to_string()
+    }
+}
+
 /// True when both payloads agree on at least one [`TOPIC_KEYS`] field.
 fn shares_topic(from: &serde_json::Value, to: &serde_json::Value) -> bool {
     TOPIC_KEYS.iter().any(|key| {
@@ -328,6 +380,16 @@ fn contains_action_word(content: &str) -> bool {
     ["参加", "去了", "做了", "报名", "主动"]
         .iter()
         .any(|word| content.contains(word))
+}
+
+/// Intent markers required in the EARLIER state for BehavioralConfirmation:
+/// the doc contract is "stated intent later confirmed by behavior".
+fn contains_intent_word(content: &str) -> bool {
+    [
+        "想", "要", "计划", "打算", "希望", "准备", "want", "plan", "hope", "will",
+    ]
+    .iter()
+    .any(|word| content.contains(word))
 }
 
 /// One cognitive dimension: which facts belong to it and how they are keyed.
@@ -371,7 +433,13 @@ pub const COGNITIVE_DIMENSIONS: &[CognitiveDimension] = &[
     },
     CognitiveDimension {
         fact_type: FactType::Emotion,
-        value_keys: &["content", "emotion", "label", "keyword"],
+        // Emotion key FIRST: payloads from companion_extract carry
+        // `content` (the per-observation quote) plus `emotion` (the label).
+        // Leading with content split every repeated observation of the SAME
+        // emotion into its own interval (phantom splits); leading with the
+        // label folds "烦死了" → "我好烦" into one continuous state. Payloads
+        // without `emotion`/`label` still fall back to `content`.
+        value_keys: &["emotion", "label", "content", "keyword"],
         topic_keys: &["emotion", "label", "content", "keyword"],
     },
     CognitiveDimension {
@@ -729,8 +797,16 @@ mod tests {
             );
             assert_eq!(
                 dimension.value_keys.first().copied(),
-                Some("content"),
-                "the history folds on the value, so content leads {fact_type:?}"
+                // Emotion deliberately leads with the label so repeated
+                // observations of the same emotion fold into one interval;
+                // every other dimension still leads with `content`.
+                if dimension.fact_type == FactType::Emotion {
+                    Some("emotion")
+                } else {
+                    Some("content")
+                },
+                "history fold keys start with the stable value field for {fact_type:?}",
+                fact_type = dimension.fact_type
             );
             // Both lists must speak the same vocabulary: a topic key the
             // history does not know would let the two projections disagree

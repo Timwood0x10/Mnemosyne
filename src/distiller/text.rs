@@ -58,17 +58,30 @@ pub(super) fn content_hash(s: &str) -> u64 {
 
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
-        s.to_string()
-    } else {
-        let mut out = String::with_capacity(max + 3);
-        for c in s.chars() {
-            let next_len = out.len() + c.len_utf8();
-            if next_len > max {
-                out.push('…');
-                break;
-            }
-            out.push(c);
-        }
-        out
+        return s.to_string();
     }
+    // Reserve the ellipsis inside the budget: pushing '…' after filling
+    // `max` bytes produced output of up to `max + 3` bytes, exceeding the
+    // documented cap that compress_pair's tests assert.
+    let budget = max.saturating_sub('…'.len_utf8());
+    let mut out = String::with_capacity(budget + '…'.len_utf8());
+    for c in s.chars() {
+        let next_len = out.len() + c.len_utf8();
+        if next_len > budget {
+            out.push('…');
+            return out;
+        }
+        out.push(c);
+    }
+    // Pathological: every char fit under budget but total still > max
+    // (impossible for well-formed UTF-8 once budget reserves the ellipsis,
+    // but keep the cap absolute).
+    if out.len() > max {
+        out.truncate(max);
+        while !out.is_char_boundary(out.len()) {
+            out.pop();
+        }
+        out.push('…');
+    }
+    out
 }

@@ -22,9 +22,11 @@ use crate::persona::check::is_persona_fact;
 
 /// A time gap (in `fact.time` units) large enough to count as a turning point.
 ///
-/// `fact.time` is a logical timestamp; the value is deliberately large so it
-/// only fires on genuinely separated events.
-const LARGE_GAP_THRESHOLD: i32 = 1_000_000;
+/// Production `fact.time` is epoch **seconds** (e.g. `Utc::now().timestamp()`),
+/// so the previous logical-unit threshold of 1_000_000 flagged a mere ~11.6-day
+/// silence as a turning point and drowned StanceFlip/NewTheme in LargeGap noise.
+/// 90 days of epoch seconds matches the companion TTL horizon.
+const LARGE_GAP_THRESHOLD: i32 = 90 * 24 * 3600;
 
 /// Minimum number of shared character-bigrams required for two same-type
 /// facts to count as the "same topic" in stance-flip detection. Without this,
@@ -134,12 +136,17 @@ fn find_current(facts: &[Fact]) -> Option<Fact> {
 /// - **LargeGap**: a `fact.time` jump larger than [`LARGE_GAP_THRESHOLD`].
 fn find_milestones(facts: &[Fact]) -> Vec<Milestone> {
     let mut milestones = Vec::new();
-    let mut last_stance: HashMap<FactType, (bool, String)> = HashMap::new();
+    // Stance history per fact_type: each entry is (negated, content). Flip
+    // detection scans ALL prior same-type entries with opposite negation and
+    // ≥2 shared bigrams — keying by FactType alone and only comparing the
+    // immediately previous fact let an interleaved preference mask the real
+    // flip; keying by content meant a flip against a different-but-related
+    // string never fired.
+    let mut stance_history: HashMap<FactType, Vec<(bool, String)>> = HashMap::new();
     let mut seen_types: HashSet<FactType> = HashSet::new();
     let mut prev_time: Option<i32> = None;
 
     for fact in facts {
-        // Stance flip: same fact_type, opposite negated flag, same topic.
         if let Some(negated) = fact
             .payload
             .get("negated")
@@ -149,23 +156,25 @@ fn find_milestones(facts: &[Fact]) -> Vec<Milestone> {
                 .payload
                 .get("content")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("");
-            if let Some((prev_negated, prev_content)) = last_stance.get(&fact.fact_type) {
-                if *prev_negated != negated
-                    && crate::persona::check::shared_bigrams(prev_content, content)
+                .unwrap_or("")
+                .to_string();
+            let history = stance_history.entry(fact.fact_type).or_default();
+            let flipped = history.iter().any(|(prev_neg, prev_content)| {
+                *prev_neg != negated
+                    && crate::persona::check::shared_bigrams(prev_content, &content)
                         >= STANCE_FLIP_MIN_SHARED_BIGRAMS
-                {
-                    milestones.push(Milestone {
-                        fact: fact.clone(),
-                        milestone_type: MilestoneType::StanceFlip,
-                        note: format!(
-                            "stance flip: {:?} went from negated={prev_negated} to negated={negated}",
-                            fact.fact_type
-                        ),
-                    });
-                }
+            });
+            if flipped {
+                milestones.push(Milestone {
+                    fact: fact.clone(),
+                    milestone_type: MilestoneType::StanceFlip,
+                    note: format!(
+                        "stance flip: {:?} went to negated={negated}",
+                        fact.fact_type
+                    ),
+                });
             }
-            last_stance.insert(fact.fact_type, (negated, content.to_string()));
+            history.push((negated, content));
         }
 
         // New theme: first fact of a fresh fact_type.
@@ -350,6 +359,30 @@ mod tests {
                 .iter()
                 .any(|m| m.milestone_type == MilestoneType::LargeGap),
             "a large time gap must be a milestone"
+        );
+    }
+
+    /// Objective: Verify an interleaved preference does NOT reset flip
+    /// detection for the original topic: A(喜欢应酬) → B(喜欢爬山) →
+    /// C(不喜欢应酬) must still report A→C as a StanceFlip.
+    /// Invariants: exactly one StanceFlip milestone exists.
+    #[test]
+    fn interleaved_preference_does_not_mask_stance_flip() {
+        let facts = vec![
+            fact(1, FactType::Preference, 2024, Some(false), "我喜欢应酬"),
+            fact(2, FactType::Preference, 2025, Some(false), "我喜欢爬山"),
+            fact(3, FactType::Preference, 2026, Some(true), "我不喜欢应酬"),
+        ];
+        let timeline = build_evolution_timeline(&facts);
+        let flips: Vec<&Milestone> = timeline
+            .milestones
+            .iter()
+            .filter(|m| m.milestone_type == MilestoneType::StanceFlip)
+            .collect();
+        assert_eq!(
+            flips.len(),
+            1,
+            "A→C flip must survive the interleaved B, got {flips:?}"
         );
     }
 

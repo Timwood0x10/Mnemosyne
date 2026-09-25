@@ -231,7 +231,14 @@ mod tests {
     /// Invariants: a temp txt yields one ExternalDoc with doc_type "text".
     #[test]
     fn file_source_loads_txt() {
-        let path = std::env::temp_dir().join("lorescope_doc_source_test.txt");
+        let path = std::env::temp_dir().join(format!(
+            "lorescope_doc_source_test_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
         std::fs::write(&path, "测试文档内容\n").expect("write temp");
         let source = FileSource::new(&path);
         let docs = source.load().expect("load");

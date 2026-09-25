@@ -153,9 +153,16 @@ fn is_boundary_char(candidate: Option<char>) -> bool {
 /// merely mentions a negation would swallow most real promises.
 fn negated_commitment(lowered: &str, at: usize, marker_len: usize) -> bool {
     let prefix = &lowered[..at];
+    // `rfind` returns the BYTE index of the clause-break char. Advancing by a
+    // fixed `+ 1` lands mid-character for multi-byte breaks (', ' is 3 bytes)
+    // and panics on the slice below. Advance by the matched char's UTF-8
+    // length instead so the clause tail always starts on a char boundary.
     let clause_start = prefix
         .rfind(|c: char| CLAUSE_BREAKS.contains(&c))
-        .map_or(0, |index| index + 1);
+        .map_or(0, |index| {
+            let break_char = prefix[index..].chars().next().unwrap_or(' ');
+            index + break_char.len_utf8()
+        });
     if contains_negation_cue(&prefix[clause_start..]) {
         return true;
     }
@@ -483,6 +490,32 @@ mod tests {
             "a cue behind the marker describes the promise, it does not negate it"
         );
         assert_eq!(decisions[0].verb, "promise");
+    }
+
+    /// Objective: Verify a multi-byte clause break before the marker does not
+    /// panic the negation guard. `rfind` returns the break's byte index;
+    /// advancing by a fixed `+ 1` used to slice mid-character (', ' is 3
+    /// UTF-8 bytes) and crash on "好的，我保证完成".
+    /// Invariants: no panic; a genuine affirmative promise after a Chinese
+    /// comma is still recorded; a negation in that same trailing clause still
+    /// suppresses it.
+    #[test]
+    fn multibyte_clause_break_before_marker_does_not_panic() {
+        let affirmative =
+            commitments_from_messages(&[message("user", "好的，我保证完成任务")], "user", 7, 2026);
+        assert_eq!(
+            affirmative.len(),
+            1,
+            "a promise after a Chinese comma must be recorded without panicking, got {affirmative:?}"
+        );
+        assert_eq!(affirmative[0].verb, "commit", "保证 maps to commit");
+
+        let negated =
+            commitments_from_messages(&[message("user", "好的，我不保证能完成")], "user", 7, 2026);
+        assert!(
+            negated.is_empty(),
+            "a negation in the clause before the marker must still suppress the decision, got {negated:?}"
+        );
     }
 
     /// Objective: Verify the verb comes from the earliest marker in the text, so

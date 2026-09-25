@@ -265,15 +265,34 @@ impl Default for Config {
 
 impl Config {
     /// Load configuration from environment variables, applying defaults
-    /// for any variable that is unset.
+    /// for any variable that is unset. A variable that IS set but fails to
+    /// parse is an error — silently substituting the default discarded the
+    /// operator's explicit configuration without warning.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when a set variable cannot be parsed or when
+    /// [`Self::validate`] rejects the resulting values.
     pub fn from_env() -> Result<Self> {
+        fn parse_env<T>(name: &str) -> crate::error::Result<Option<T>>
+        where
+            T: std::str::FromStr,
+            T::Err: std::fmt::Display,
+        {
+            match std::env::var(name) {
+                Err(_) => Ok(None),
+                Ok(v) => v
+                    .parse::<T>()
+                    .map(Some)
+                    .map_err(|e| Error::Config(format!("invalid {name}={v:?}: {e}"))),
+            }
+        }
+
         let mut cfg = Self::default();
         if let Ok(v) = std::env::var("MEMORY_DB_PATH") {
             cfg.db_path = v;
         }
-        if let Ok(v) = std::env::var("MEMORY_VECTOR_DIM")
-            && let Ok(dim) = v.parse::<usize>()
-        {
+        if let Some(dim) = parse_env::<usize>("MEMORY_VECTOR_DIM")? {
             cfg.vector_dim = dim;
         }
         if let Ok(v) = std::env::var("MEMORY_EMBEDDING_URL") {
@@ -282,29 +301,19 @@ impl Config {
         if let Ok(v) = std::env::var("MEMORY_EMBEDDING_MODEL") {
             cfg.embedding_model = v;
         }
-        if let Ok(v) = std::env::var("MEMORY_EMBEDDING_TIMEOUT_MS")
-            && let Ok(ms) = v.parse::<u64>()
-        {
+        if let Some(ms) = parse_env::<u64>("MEMORY_EMBEDDING_TIMEOUT_MS")? {
             cfg.embedding_timeout = Duration::from_millis(ms);
         }
-        if let Ok(v) = std::env::var("MEMORY_MIN_IMPORTANCE")
-            && let Ok(f) = v.parse::<f64>()
-        {
+        if let Some(f) = parse_env::<f64>("MEMORY_MIN_IMPORTANCE")? {
             cfg.min_importance = f;
         }
-        if let Ok(v) = std::env::var("MEMORY_CONFLICT_THRESHOLD")
-            && let Ok(f) = v.parse::<f64>()
-        {
+        if let Some(f) = parse_env::<f64>("MEMORY_CONFLICT_THRESHOLD")? {
             cfg.conflict_threshold = f;
         }
-        if let Ok(v) = std::env::var("MEMORY_MAX_PER_DISTILL")
-            && let Ok(n) = v.parse::<usize>()
-        {
+        if let Some(n) = parse_env::<usize>("MEMORY_MAX_PER_DISTILL")? {
             cfg.max_memories_per_distillation = n;
         }
-        if let Ok(v) = std::env::var("MEMORY_MAX_SOLUTIONS")
-            && let Ok(n) = v.parse::<usize>()
-        {
+        if let Some(n) = parse_env::<usize>("MEMORY_MAX_SOLUTIONS")? {
             cfg.max_solutions_per_tenant = n;
         }
         if let Ok(v) = std::env::var("MEMORY_DISABLE_CROSS_TURN")
@@ -312,14 +321,10 @@ impl Config {
         {
             cfg.enable_cross_turn = false;
         }
-        if let Ok(v) = std::env::var("MEMORY_EMBEDDING_PROVIDER")
-            && let Ok(p) = v.parse::<EmbeddingProvider>()
-        {
+        if let Some(p) = parse_env::<EmbeddingProvider>("MEMORY_EMBEDDING_PROVIDER")? {
             cfg.embedding_provider = p;
         }
-        if let Ok(v) = std::env::var("MEMORY_RETRIEVAL_MODE")
-            && let Ok(m) = v.parse::<RetrievalMode>()
-        {
+        if let Some(m) = parse_env::<RetrievalMode>("MEMORY_RETRIEVAL_MODE")? {
             cfg.retrieval_mode = m;
         }
         if let Ok(v) = std::env::var("MEMORY_OPENAI_API_KEY") {
@@ -484,6 +489,11 @@ pub enum Command {
         #[arg(long, default_value = "corpus")]
         corpus_dir: String,
     },
+    /// Report how the runtime resource files loaded — which marker files were
+    /// read, what each contributed, the effective word count per action, and
+    /// every entry that was dropped — without starting the server. Exits
+    /// non-zero when the marker table cannot be trusted.
+    ConfigCheck,
 }
 
 impl CliArgs {

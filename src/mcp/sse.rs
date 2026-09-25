@@ -20,6 +20,11 @@ use crate::error::{Error, Result};
 use crate::mcp::transport::Transport;
 use crate::mcp::types::JSONRPCMessage;
 
+/// Cap on a single SSE line, mirroring stdio's `MAX_LINE_BYTES`.
+const MAX_SSE_LINE_BYTES: usize = 1_000_000;
+/// Cap on the accumulated `data:` payload of one event.
+const MAX_SSE_PAYLOAD_BYTES: usize = 1_000_000;
+
 /// SSE framing over a generic byte stream.
 ///
 /// `S` is any `AsyncRead + AsyncWrite` pair (TCP stream, duplex test pair,
@@ -49,6 +54,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for SseTransport<S> {
     async fn recv(&mut self) -> Result<Option<JSONRPCMessage>> {
         // Read SSE events: lines of `data: <payload>` until a blank line
         // terminates the event. A clean EOF before any data → None.
+        // Both the per-line and accumulated payload sizes are bounded so a
+        // malicious peer cannot OOM the process with one endless `data:` line.
         let mut payload = String::new();
         let mut saw_event = false;
         loop {
@@ -65,6 +72,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for SseTransport<S> {
                 }
                 return Ok(None);
             }
+            if line.len() > MAX_SSE_LINE_BYTES {
+                return Err(Error::JsonRpcParse(format!(
+                    "sse line exceeds {MAX_SSE_LINE_BYTES} bytes"
+                )));
+            }
             let trimmed = line.trim_end_matches(['\r', '\n']);
             if trimmed.is_empty() {
                 // Blank line terminates the event.
@@ -76,6 +88,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Transport for SseTransport<S> {
             if let Some(data) = trimmed.strip_prefix("data:") {
                 let data = data.trim();
                 if !data.is_empty() {
+                    if payload.len() + data.len() > MAX_SSE_PAYLOAD_BYTES {
+                        return Err(Error::JsonRpcParse(format!(
+                            "sse payload exceeds {MAX_SSE_PAYLOAD_BYTES} bytes"
+                        )));
+                    }
                     saw_event = true;
                     payload.push_str(data);
                 }

@@ -61,10 +61,21 @@ pub struct ExportEdge {
 }
 
 /// An evidence snippet, keyed for dedup by `(doc_title, content)`.
+///
+/// Carries the original-text span so a restored graph stays
+/// evidence-traceable: without `start_offset`/`end_offset` an import rewrote
+/// every anchor to `NULL` and "backup → another machine" lost the ability to
+/// locate the claim in the source document.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportEvidence {
     pub doc_title: String,
     pub content: String,
+    /// Byte start of the snippet in the source document, when known.
+    #[serde(default)]
+    pub start_offset: Option<i64>,
+    /// Byte end (exclusive) of the snippet in the source document.
+    #[serde(default)]
+    pub end_offset: Option<i64>,
 }
 
 /// A fact↔evidence link (object evidence), keyed for dedup by
@@ -90,6 +101,10 @@ pub struct ExportWorldProfile {
     pub key: String,
     pub value: String,
     pub confidence: f64,
+    /// Evidence content that anchors this claim's source span (content-keyed
+    /// so the import can re-locate the row after a restore).
+    #[serde(default)]
+    pub evidence_content: Option<String>,
 }
 
 /// A V7 world relation, keyed for dedup by
@@ -151,6 +166,10 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
     let mut objects = Vec::new();
     let mut edges = Vec::new();
     let mut evidence = Vec::new();
+    // evidence id → content, so world profiles can carry a portable
+    // content-keyed anchor alongside their numeric evidence_id.
+    let mut evidence_content_by_id: std::collections::HashMap<i64, String> =
+        std::collections::HashMap::new();
 
     for doc in store.list_documents().await? {
         documents.push(ExportDocument {
@@ -189,9 +208,12 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
         }
 
         for ev in store.list_evidence_by_document(doc.id).await? {
+            evidence_content_by_id.insert(ev.id, ev.content.clone());
             evidence.push(ExportEvidence {
                 doc_title: doc.title.clone(),
                 content: ev.content.clone(),
+                start_offset: ev.start_offset,
+                end_offset: ev.end_offset,
             });
         }
     }
@@ -238,6 +260,11 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
                 key: p.key,
                 value: p.value,
                 confidence: p.confidence,
+                // Carry the evidence content so import can re-create a
+                // span-bearing row (content alone is portable across stores).
+                evidence_content: p
+                    .evidence_id
+                    .and_then(|id| evidence_content_by_id.get(&id).cloned()),
             })
         })
         .collect();
@@ -417,8 +444,8 @@ pub async fn import_bundle(
                     id: 0,
                     doc_id,
                     chapter_id,
-                    start_offset: None,
-                    end_offset: None,
+                    start_offset: export_ev.start_offset,
+                    end_offset: export_ev.end_offset,
                     content: export_ev.content.clone(),
                     created_at: now_ts(),
                 })
@@ -451,6 +478,18 @@ pub async fn import_bundle(
             export_edge.target_name.clone(),
         );
         if !seen_edges.insert(dedup_key) {
+            continue;
+        }
+        // Idempotent re-import: skip when the store already has this
+        // (source, target, predicate) edge — `create_edge` is a bare INSERT
+        // with no UNIQUE, so a second import of the same bundle used to
+        // double every relation.
+        let already_exists = store
+            .get_edges_touching(source_id)
+            .await?
+            .iter()
+            .any(|e| e.target_id == target_id && e.predicate == export_edge.predicate);
+        if already_exists {
             continue;
         }
         let origin = Origin::from_str(&export_edge.origin).unwrap_or(Origin::Observed);
@@ -501,8 +540,15 @@ pub async fn import_bundle(
         let Some(&entity_id) = world_id_by_name.get(&p.entity_name) else {
             continue;
         };
+        // Re-anchor the claim by content: evidence rows were already imported
+        // (or exist in the store) with valid doc/chapter FKs — never create a
+        // doc_id:0 row here (that violates the documents FK).
+        let evidence_id = match p.evidence_content.as_deref() {
+            Some(content) => global_evidence_by_content(store, content).await?,
+            None => None,
+        };
         store
-            .upsert_world_profile(entity_id, &p.key, &p.value, p.confidence)
+            .upsert_world_profile(entity_id, &p.key, &p.value, p.confidence, evidence_id)
             .await?;
     }
     for r in &bundle.world_relations {
@@ -602,6 +648,8 @@ mod tests {
             evidence: vec![ExportEvidence {
                 doc_title: "会话-导出".into(),
                 content: "我偏好简洁的架构。".into(),
+                start_offset: Some(0),
+                end_offset: Some(10),
             }],
             evidence_links: vec![ExportEvidenceLink {
                 source_name: "用户".into(),
@@ -617,6 +665,7 @@ mod tests {
                 key: "偏好".into(),
                 value: "简洁".into(),
                 confidence: 0.8,
+                evidence_content: None,
             }],
             world_relations: vec![],
         }

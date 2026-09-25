@@ -117,6 +117,9 @@ impl SqliteFactStore {
     /// Returns a storage error if SQLite cannot open or initialize the schema.
     pub fn open(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // busy_timeout: several connections share one DB file; without it a
+        // concurrent writer gets SQLITE_BUSY immediately (0 ms default).
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         Self::initialize_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
@@ -130,6 +133,7 @@ impl SqliteFactStore {
     /// Returns a storage error if SQLite cannot initialize the schema.
     pub fn open_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
+        conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         Self::initialize_schema(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),

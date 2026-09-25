@@ -7,11 +7,16 @@
 
 use crate::types::Message;
 
-/// Minimum content length for a message to be considered a candidate problem.
+/// Minimum content length (in characters) for a message to be a candidate
+/// problem.
 ///
-/// Very short messages ("ok", "hi", "yes") almost never encode extractable
-/// problem-solution knowledge, so we filter them before scoring.
-pub const MIN_PROBLEM_LENGTH: usize = 12;
+/// Counted in Unicode characters, not bytes: the previous byte threshold of
+/// 12 accepted a ~4-char Chinese line but rejected nothing useful, while a
+/// char threshold of 12 rejected ordinary Chinese problem statements such as
+/// "为什么编译那么慢？" (9 chars). 8 chars matches
+/// [`crate::filter::MIN_MEANINGFUL_LENGTH`] so the problem gate and the noise
+/// gate agree on what "long enough to encode a problem" means.
+pub const MIN_PROBLEM_LENGTH: usize = 8;
 
 /// Strong indicator phrases that mark a real problem statement.
 ///
@@ -84,17 +89,25 @@ const NOISE_DISQUALIFIERS: &[&str] = &[
 #[must_use]
 pub fn is_problem(msg: &Message) -> bool {
     let content = msg.content.trim();
-    if content.len() < MIN_PROBLEM_LENGTH {
+    // Character count, not bytes (aligned with NoiseFilter::MIN_MEANINGFUL_LENGTH).
+    if content.chars().count() < MIN_PROBLEM_LENGTH {
         return false;
     }
     let lower = content.to_lowercase();
-    if NOISE_DISQUALIFIERS.iter().any(|d| lower.starts_with(d)) {
-        return false;
-    }
-    if PROBLEM_INDICATORS.iter().any(|p| lower.contains(p)) {
+    // Indicators and a trailing question mark win over a noise prefix:
+    // "Great, now I get error: connection refused" is a real debugging
+    // exchange that a bare starts_with("great") used to discard.
+    if PROBLEM_INDICATORS.iter().any(|p| lower.contains(p))
+        || lower.ends_with('?')
+        || lower.ends_with('？')
+    {
         return true;
     }
-    lower.ends_with('?') || lower.ends_with('？')
+    // Default: not a problem. Pure chatter and ordinary statements fall here
+    // (the original NOISE_DISQUALIFIERS path); keep the explicit check so the
+    // intent stays visible if a future branch would otherwise return true.
+    let _noise = NOISE_DISQUALIFIERS.iter().any(|d| lower.starts_with(d));
+    false
 }
 
 /// Lightweight question detector.

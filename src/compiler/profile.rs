@@ -94,152 +94,190 @@ pub fn extract_profiles(
     extra_patterns: &[ProfilePattern],
     lang: &dyn LanguageProvider,
 ) {
-    for line in text.lines() {
-        let line = line.trim();
-        if line.len() < 6 {
-            continue;
+    // Walk with a byte cursor so each extracted claim can carry its source
+    // span — `text.lines()` alone discards absolute positions.
+    let mut line_start = 0usize;
+    for raw_line in text.split_inclusive('\n') {
+        let line_end = line_start + raw_line.len();
+        let leading = raw_line.len() - raw_line.trim_start().len();
+        let line = raw_line.trim();
+        if line.len() >= 6 {
+            // Absolute span of the trimmed line in the original document.
+            let claim_start = line_start + leading;
+            let claim_end = claim_start + line.len();
+            extract_profiles_from_line(
+                line,
+                ctx,
+                dict,
+                extra_patterns,
+                lang,
+                claim_start,
+                claim_end,
+            );
         }
+        line_start = line_end;
+    }
+}
 
-        // Try dictionary-based entity lookup first, then heuristic discovery.
-        let dictionary_entity = dict
-            .and_then(|dictionary| find_entity_in_text(line, dictionary))
-            .map(|(name, _)| name);
-        // Entity-name validation happens INSIDE discover_entity_name's Chinese
-        // branch (English title names like "Mr. Bennet" bypass it); dictionary
-        // hits are trusted and skip it — 三国/水浒 with a known lexicon keep
-        // their entities.
-        let discovered_entity = dictionary_entity
-            .is_none()
-            .then(|| discover_entity_name(line, lang.discovery_markers()))
-            .flatten();
-        let entity_name = dictionary_entity.or_else(|| discovered_entity.clone());
+/// Run the Pass1 extraction rules against one already-trimmed line, stamping
+/// every produced [`EntityProfile`] with `claim_start`/`claim_end`.
+fn extract_profiles_from_line(
+    line: &str,
+    ctx: &mut CompileContext,
+    dict: Option<&EntityDictionary>,
+    extra_patterns: &[ProfilePattern],
+    lang: &dyn LanguageProvider,
+    claim_start: usize,
+    claim_end: usize,
+) {
+    // Try dictionary-based entity lookup first, then heuristic discovery.
+    let dictionary_entity = dict
+        .and_then(|dictionary| find_entity_in_text(line, dictionary))
+        .map(|(name, _)| name);
+    // Entity-name validation happens INSIDE discover_entity_name's Chinese
+    // branch (English title names like "Mr. Bennet" bypass it); dictionary
+    // hits are trusted and skip it — 三国/水浒 with a known lexicon keep
+    // their entities.
+    let discovered_entity = dictionary_entity
+        .is_none()
+        .then(|| discover_entity_name(line, lang.discovery_markers()))
+        .flatten();
+    let entity_name = dictionary_entity.or_else(|| discovered_entity.clone());
 
-        let Some(entity_name) = entity_name else {
-            continue;
-        };
+    let Some(entity_name) = entity_name else {
+        return;
+    };
 
-        // Extract profile attributes using configured or default patterns.
-        let mut profiles: Vec<(&str, String)> = Vec::new();
-        if let Some(title) = discovered_entity
-            .as_deref()
-            .and_then(|name| discover_title(name, lang.discovery_markers()))
-        {
-            profiles.push(("title", title.to_string()));
+    // Extract profile attributes using configured or default patterns.
+    let mut profiles: Vec<(&str, String)> = Vec::new();
+    if let Some(title) = discovered_entity
+        .as_deref()
+        .and_then(|name| discover_title(name, lang.discovery_markers()))
+    {
+        profiles.push(("title", title.to_string()));
+    }
+
+    // Pattern source 1: JSON-configured patterns
+    for pp in extra_patterns {
+        if line.contains(&pp.pattern) {
+            let mode = pp.to_extract_mode();
+            let val = match &mode {
+                ExtractMode::After => extract_after(line, &pp.pattern),
+                ExtractMode::Before => extract_before(line, &pp.pattern),
+                ExtractMode::Between(suffix) => extract_between(line, &pp.pattern, suffix),
+                ExtractMode::Until(stop) => extract_until(line, &pp.pattern, stop),
+                ExtractMode::BeforeWithFallback(fallback) => {
+                    extract_before(line, &pp.pattern).or_else(|| extract_before(line, fallback))
+                }
+            };
+            if let Some(v) = val {
+                profiles.push((pp.key.as_str(), strip_leading_entity(&v, &entity_name)));
+            }
         }
+    }
 
-        // Pattern source 1: JSON-configured patterns
-        for pp in extra_patterns {
-            if line.contains(&pp.pattern) {
-                let mode = pp.to_extract_mode();
-                let val = match &mode {
-                    ExtractMode::After => extract_after(line, &pp.pattern),
-                    ExtractMode::Before => extract_before(line, &pp.pattern),
-                    ExtractMode::Between(suffix) => extract_between(line, &pp.pattern, suffix),
-                    ExtractMode::Until(stop) => extract_until(line, &pp.pattern, stop),
-                    ExtractMode::BeforeWithFallback(fallback) => {
-                        extract_before(line, &pp.pattern).or_else(|| extract_before(line, fallback))
+    // Pattern source 2: language frontend definitions.
+    for definition in lang.profile_patterns() {
+        if line.contains(definition.pattern) {
+            let value = if definition.key == "title" {
+                Some(definition.pattern.to_string())
+            } else {
+                match definition.mode {
+                    "After" => extract_after(line, definition.pattern),
+                    "Before" => extract_before(line, definition.pattern),
+                    "Between" => definition
+                        .suffix
+                        .and_then(|suffix| extract_between(line, definition.pattern, suffix)),
+                    "Until" => definition
+                        .suffix
+                        .and_then(|stop| extract_until(line, definition.pattern, stop)),
+                    "BeforeWithFallback" => {
+                        extract_before(line, definition.pattern).or_else(|| {
+                            definition
+                                .suffix
+                                .and_then(|fallback| extract_before(line, fallback))
+                        })
                     }
-                };
-                if let Some(v) = val {
-                    profiles.push((pp.key.as_str(), strip_leading_entity(&v, &entity_name)));
+                    _ => None,
+                }
+            };
+            if let Some(value) = value {
+                profiles.push((definition.key, strip_leading_entity(&value, &entity_name)));
+            }
+        }
+    }
+
+    // Pattern source 3: legacy defaults retained for Chinese compatibility.
+    for &(pattern, key, ref mode) in DEFAULT_PROFILE_PATTERNS {
+        if line.contains(pattern) {
+            let val = match mode {
+                ExtractMode::After => extract_after(line, pattern),
+                ExtractMode::Before => extract_before(line, pattern),
+                ExtractMode::Between(suffix) => extract_between(line, pattern, suffix),
+                ExtractMode::Until(stop) => extract_until(line, pattern, stop),
+                ExtractMode::BeforeWithFallback(fallback) => {
+                    extract_before(line, pattern).or_else(|| extract_before(line, fallback))
+                }
+            };
+            if let Some(v) = val {
+                let v = strip_leading_entity(&v, &entity_name);
+                // Dedup on key AND value: comparing the value against the
+                // key name (`v.contains(k)`) asked whether the extracted
+                // text contains the string "courtesy_name" — effectively
+                // never true, so the local dedup was dead code.
+                if !profiles
+                    .iter()
+                    .any(|(k, existing)| *k == key && *existing == v)
+                {
+                    profiles.push((key, v));
                 }
             }
         }
+    }
 
-        // Pattern source 2: language frontend definitions.
-        for definition in lang.profile_patterns() {
-            if line.contains(definition.pattern) {
-                let value = if definition.key == "title" {
-                    Some(definition.pattern.to_string())
-                } else {
-                    match definition.mode {
-                        "After" => extract_after(line, definition.pattern),
-                        "Before" => extract_before(line, definition.pattern),
-                        "Between" => definition
-                            .suffix
-                            .and_then(|suffix| extract_between(line, definition.pattern, suffix)),
-                        "Until" => definition
-                            .suffix
-                            .and_then(|stop| extract_until(line, definition.pattern, stop)),
-                        "BeforeWithFallback" => {
-                            extract_before(line, definition.pattern).or_else(|| {
-                                definition
-                                    .suffix
-                                    .and_then(|fallback| extract_before(line, fallback))
-                            })
-                        }
-                        _ => None,
-                    }
-                };
-                if let Some(value) = value {
-                    profiles.push((definition.key, strip_leading_entity(&value, &entity_name)));
-                }
-            }
-        }
+    if profiles.is_empty() {
+        return;
+    }
 
-        // Pattern source 3: legacy defaults retained for Chinese compatibility.
-        for &(pattern, key, ref mode) in DEFAULT_PROFILE_PATTERNS {
-            if line.contains(pattern) {
-                let val = match mode {
-                    ExtractMode::After => extract_after(line, pattern),
-                    ExtractMode::Before => extract_before(line, pattern),
-                    ExtractMode::Between(suffix) => extract_between(line, pattern, suffix),
-                    ExtractMode::Until(stop) => extract_until(line, pattern, stop),
-                    ExtractMode::BeforeWithFallback(fallback) => {
-                        extract_before(line, pattern).or_else(|| extract_before(line, fallback))
-                    }
-                };
-                if let Some(v) = val {
-                    let v = strip_leading_entity(&v, &entity_name);
-                    if !profiles.iter().any(|(k, _)| *k == key && v.contains(k)) {
-                        profiles.push((key, v));
-                    }
-                }
-            }
-        }
+    // Create Entity (if not already in ctx)
+    let name = entity_name.to_string();
+    if !ctx.entities.iter().any(|e| e.name == name) {
+        ctx.entities.push(Entity {
+            id: None,
+            name: name.clone(),
+            entity_type: "person".into(),
+            status: "active".into(),
+            importance: 0.5,
+        });
+    }
 
-        if profiles.is_empty() {
-            continue;
-        }
+    // Assign a synthetic ID for linking profiles to entities.
+    // Write it back to Entity.id so downstream code (e.g.
+    // register_discovered_entities) can match profiles to entities.
+    let eid = ctx
+        .entities
+        .iter()
+        .position(|e| e.name == name)
+        .map(|i| (i + 1) as i64);
+    if let Some(pos) = ctx.entities.iter().position(|e| e.name == name) {
+        ctx.entities[pos].id = eid;
+    }
 
-        // Create Entity (if not already in ctx)
-        let name = entity_name.to_string();
-        if !ctx.entities.iter().any(|e| e.name == name) {
-            ctx.entities.push(Entity {
-                id: None,
-                name: name.clone(),
-                entity_type: "person".into(),
-                status: "active".into(),
-                importance: 0.5,
-            });
-        }
-
-        // Assign a synthetic ID for linking profiles to entities.
-        // Write it back to Entity.id so downstream code (e.g.
-        // register_discovered_entities) can match profiles to entities.
-        let eid = ctx
-            .entities
+    // Create Profiles
+    for (key, value) in &profiles {
+        if !ctx
+            .profiles
             .iter()
-            .position(|e| e.name == name)
-            .map(|i| (i + 1) as i64);
-        if let Some(pos) = ctx.entities.iter().position(|e| e.name == name) {
-            ctx.entities[pos].id = eid;
-        }
-
-        // Create Profiles
-        for (key, value) in &profiles {
-            if !ctx
-                .profiles
-                .iter()
-                .any(|p| p.entity_id == eid && p.key == *key)
-            {
-                ctx.profiles.push(EntityProfile {
-                    entity_id: eid,
-                    key: key.to_string(),
-                    value: value.clone(),
-                    confidence: 0.9,
-                });
-            }
+            .any(|p| p.entity_id == eid && p.key == *key)
+        {
+            ctx.profiles.push(EntityProfile {
+                entity_id: eid,
+                key: key.to_string(),
+                value: value.clone(),
+                confidence: 0.9,
+                start_offset: Some(claim_start),
+                end_offset: Some(claim_end),
+            });
         }
     }
 }
@@ -527,26 +565,40 @@ fn is_gutenberg_metadata(line: &str) -> bool {
 }
 
 /// Extract text after a prefix pattern, stopping at the first stop character.
+///
+/// Iterates ALL occurrences and returns the first non-empty value: anchoring
+/// only on `find` (first hit) meant "其文字固佳，刘备字玄德" took the `字`
+/// inside `文字` and stored the wrong `courtesy_name`.
 fn extract_after(line: &str, prefix: &str) -> Option<String> {
-    let start = line.find(prefix)?;
-    let after = &line[start + prefix.len()..];
-    let value: String = after.chars().take_while(|c| !is_stop(*c)).collect();
-    if value.is_empty() { None } else { Some(value) }
+    for (start, _) in line.match_indices(prefix) {
+        let after = &line[start + prefix.len()..];
+        let value: String = after.chars().take_while(|c| !is_stop(*c)).collect();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
 }
 
-/// Extract text before a suffix pattern, taking the last segment.
+/// Extract text before a suffix pattern, taking the last segment before each
+/// occurrence (first non-empty win), so a later valid `字` is not missed when
+/// an earlier occurrence yields an empty/stop-truncated value.
 fn extract_before(line: &str, suffix: &str) -> Option<String> {
-    let end = line.find(suffix)?;
-    let before = &line[..end];
-    let value: String = before
-        .chars()
-        .rev()
-        .take_while(|c| !is_stop(*c))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    if value.is_empty() { None } else { Some(value) }
+    for (end, _) in line.match_indices(suffix) {
+        let before = &line[..end];
+        let value: String = before
+            .chars()
+            .rev()
+            .take_while(|c| !is_stop(*c))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if !value.is_empty() {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// Strip a leading known entity name from an extracted profile value.
@@ -566,19 +618,33 @@ fn strip_leading_entity(value: &str, entity_name: &str) -> String {
 }
 
 /// Extract text between prefix and suffix.
+///
+/// Same multi-occurrence rule as [`extract_after`]: the first prefix hit that
+/// also has a non-empty interior before a suffix wins.
 fn extract_between(line: &str, prefix: &str, suffix: &str) -> Option<String> {
-    let start = line.find(prefix)?;
-    let after = &line[start + prefix.len()..];
-    let end = after.find(suffix)?;
-    Some(after[..end].to_string())
+    for (start, _) in line.match_indices(prefix) {
+        let after = &line[start + prefix.len()..];
+        if let Some(end) = after.find(suffix) {
+            let value = &after[..end];
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 /// Extract text after pattern until stop.
 fn extract_until(line: &str, pattern: &str, stop: &str) -> Option<String> {
-    let start = line.find(pattern)?;
-    let after = &line[start + pattern.len()..];
-    let end = after.find(stop).unwrap_or(after.len());
-    Some(after[..end].to_string())
+    for (start, _) in line.match_indices(pattern) {
+        let after = &line[start + pattern.len()..];
+        let end = after.find(stop).unwrap_or(after.len());
+        let value = &after[..end];
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 #[cfg(test)]

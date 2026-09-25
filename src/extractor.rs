@@ -97,7 +97,11 @@ impl ExperienceExtractor {
             // Look ahead for the assistant answer.
             if let Some(exp) = self.try_direct_extract(messages, i) {
                 out.push(exp);
-                i += 2;
+                // Advance past the problem message; the extractor's next
+                // iteration will skip assistant/tool lines naturally. The old
+                // `i += 2` jumped over the real answer when the immediate
+                // next message was a tool call.
+                i += 1;
                 continue;
             }
 
@@ -122,24 +126,28 @@ impl ExperienceExtractor {
 
     /// Attempt a direct `user -> assistant` extraction starting at `user_idx`.
     fn try_direct_extract(&self, messages: &[Message], user_idx: usize) -> Option<RawExperience> {
-        let asst_idx = user_idx + 1;
-        if asst_idx >= messages.len() {
-            return None;
+        // Find the LAST assistant message before the next user message: tool
+        // turns often carry empty content or a "let me check" preamble, and
+        // pairing against them stored empty solutions while skipping the real
+        // final answer (`i += 2` jumped past the turn).
+        let mut asst_idx = user_idx + 1;
+        let mut best: Option<RawExperience> = None;
+        while asst_idx < messages.len() && !messages[asst_idx].is_user() {
+            let asst = &messages[asst_idx];
+            if asst.is_assistant()
+                && asst.tool_invocation.is_none()
+                && !asst.content.trim().is_empty()
+                && !self.question_detector.is_question(&asst.content)
+            {
+                best = Some(RawExperience {
+                    problem: messages[user_idx].content.clone(),
+                    solution: asst.content.clone(),
+                    method: ExtractionMethod::Direct,
+                });
+            }
+            asst_idx += 1;
         }
-        let asst = &messages[asst_idx];
-        if !asst.is_assistant() {
-            return None;
-        }
-        // If the assistant message is itself a clarification question,
-        // direct extraction yields low-quality pairs — defer to cross-turn.
-        if self.question_detector.is_question(&asst.content) {
-            return None;
-        }
-        Some(RawExperience {
-            problem: messages[user_idx].content.clone(),
-            solution: asst.content.clone(),
-            method: ExtractionMethod::Direct,
-        })
+        best
     }
 
     /// Attempt a cross-turn extraction.
@@ -164,21 +172,28 @@ impl ExperienceExtractor {
             // Assistant didn't ask a clarification — not a cross-turn case.
             return None;
         }
-        // Find the next assistant message after the clarification; the user
-        // message between them is the user's answer to the clarification,
-        // which we don't store separately (it's folded into the solution
-        // context if needed by downstream stages).
-        let next_asst_idx = self.next_after(messages, asst_clarify_idx, "assistant")?;
-        let final_asst = &messages[next_asst_idx];
-        if self.question_detector.is_question(&final_asst.content) {
-            // Another clarification — bail out; chain too long.
-            return None;
+        // Require a USER answer between the clarification and the final
+        // assistant: without it, Q1 could be paired with the answer to an
+        // unrelated Q2 asked later (wrong problem-solution memory).
+        let answer_idx = (asst_clarify_idx + 1..messages.len()).find(|&i| messages[i].is_user())?;
+        // Final assistant after the user's answer, stopping at the next user.
+        let mut final_asst_idx = answer_idx + 1;
+        while final_asst_idx < messages.len() && !messages[final_asst_idx].is_user() {
+            let m = &messages[final_asst_idx];
+            if m.is_assistant()
+                && m.tool_invocation.is_none()
+                && !m.content.trim().is_empty()
+                && !self.question_detector.is_question(&m.content)
+            {
+                return Some(RawExperience {
+                    problem: messages[user_idx].content.clone(),
+                    solution: m.content.clone(),
+                    method: ExtractionMethod::CrossTurn,
+                });
+            }
+            final_asst_idx += 1;
         }
-        Some(RawExperience {
-            problem: messages[user_idx].content.clone(),
-            solution: final_asst.content.clone(),
-            method: ExtractionMethod::CrossTurn,
-        })
+        None
     }
 
     /// Returns the index of the next message with the given role after

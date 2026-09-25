@@ -116,6 +116,13 @@ sequenceDiagram
   （facts + decisions + session state + reasoning chain）。
 - `compile_user_observations` / `compile_user_facts` / `user_facts_from_memories`
   分别从消息、观察、既有记忆派生用户事实。
+- `compile_user_facts` 汇总**两条互补的抽取通道**（哪一条都替代不了另一条）：
+  - **观察 marker 表**（`conversation_compiler/markers.rs` + `config/markers_zh|en.json`）
+    回答"用户此刻的感受/偏好/打算"，只能产出 preference / goal / emotion / event；
+  - **自述通道**（`self_disclosure.rs`）回答"这个人是谁"——名字/年龄/职业/城市（`Identity`
+    + `attribute`）、家人与宠物（`Relationship` + `target`）、爱好（`Interest`）、习惯（`Habit`）。
+    规则同样确定性、LLM-free：显式线索 + 闭合词表，取不到合格值就不产出事实。
+  两者的产出质量由 `tests/compile_yield.rs` 与 `docs/zh/compile-quality.md` 持续度量。
 
 ## 4. 技术抉择（为什么这么做）
 

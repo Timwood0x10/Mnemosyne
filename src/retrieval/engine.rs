@@ -150,13 +150,19 @@ impl RetrievalEngine {
             ));
         }
         let query_vec = self.embedder.embed(query).await?;
+        // Over-fetch before the memory-type filter: filtering AFTER the
+        // store's top-k LIMIT let excluded rows consume result slots, so a
+        // preference-only query could return zero hits while preference
+        // memories sat just outside the top-`limit`.
+        let fetch = limit.saturating_mul(10).max(limit);
         let mut experiences = self
             .store
-            .search_by_vector(&query_vec, tenant_id, limit)
+            .search_by_vector(&query_vec, tenant_id, fetch)
             .await?;
         if let Some(mt) = memory_type_filter {
             experiences.retain(|e| e.memory_type == mt);
         }
+        experiences.truncate(limit);
         let mut results = Vec::with_capacity(experiences.len());
         for exp in experiences {
             // sqlite-vec reports cosine distance in `[0, 2]`; convert to

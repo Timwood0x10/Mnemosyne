@@ -94,16 +94,23 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
         }
     }
 
-    // Remaining text after the last separator
+    // Remaining text after the last separator (or the whole chunk when it
+    // has no separators). Apply the SAME leading/trailing-whitespace offset
+    // adjustment as the separator branch: without it
+    // `document[start_offset..end_offset] != text` for every tail sentence,
+    // shifting mention offsets computed by `scan_sentences`.
     if iter_start < chunk.text.len() {
-        let remaining = chunk.text[iter_start..].trim();
+        let tail = &chunk.text[iter_start..];
+        let remaining = tail.trim();
         if !remaining.is_empty() {
+            let leading = tail.len() - tail.trim_start().len();
+            let trailing = tail.len() - tail.trim_end().len();
             sentences.push(Sentence {
                 chunk_index: chunk.index,
                 index: sent_index,
                 text: remaining.to_owned(),
-                start_offset: chunk.start_offset + iter_start,
-                end_offset: chunk.start_offset + chunk.text.len(),
+                start_offset: chunk.start_offset + iter_start + leading,
+                end_offset: chunk.start_offset + chunk.text.len() - trailing,
             });
         }
     }
@@ -119,22 +126,39 @@ pub fn split_chunk(chunk: &Chunk) -> Vec<Sentence> {
 /// **Deduplication:** When chunks overlap (the default `chunk::Config` has
 /// `overlap = 200`), sentences in the overlap region appear in BOTH chunks.
 /// Without dedup, `extract::compile` would process them twice, creating
-/// duplicate events and relations. We dedup by `(start_offset, end_offset)` —
-/// two sentences with identical document-level byte ranges are the same
-/// sentence (NEW-C21).
+/// duplicate events and relations. Dedup by `start_offset` alone: a sentence
+/// that crosses a chunk boundary appears as a *truncated tail* in chunk N
+/// (same start, shorter end) and as the full sentence in chunk N+1 — two
+/// distinct `(start, end)` keys, both kept under the old pair-keyed set, so
+/// boundary-crossing sentences were still processed twice (NEW-C21).
 pub fn split_all(chunks: &[Chunk]) -> Vec<Sentence> {
-    let mut all = Vec::new();
-    let mut seen: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let mut all: Vec<Sentence> = Vec::new();
     for chunk in chunks {
         for mut sent in split_chunk(chunk) {
-            let key = (sent.start_offset, sent.end_offset);
-            if seen.insert(key) {
-                // Re-index: the per-chunk `index` is now meaningless in the
-                // flat list, so we assign a sequential id.
-                sent.index = all.len();
-                all.push(sent);
+            // Containment dedup: a sentence that starts BEFORE the overlap
+            // window and ends inside the next chunk appears as a full span
+            // from chunk N and a head-truncated span from chunk N+1 — both
+            // have different start_offsets, so start-only keys kept both.
+            // Skip a new sentence whose range is contained in an existing one;
+            // upgrade an existing head-truncated sentence when the new span is
+            // longer (same start, larger end).
+            let contained = all
+                .iter()
+                .any(|s| s.start_offset <= sent.start_offset && s.end_offset >= sent.end_offset);
+            if contained {
+                continue;
             }
+            // Drop any existing sentence fully contained in the new one.
+            all.retain(|s| {
+                !(sent.start_offset <= s.start_offset && sent.end_offset >= s.end_offset)
+            });
+            sent.index = all.len();
+            all.push(sent);
         }
+    }
+    // Re-index for a stable sequential id.
+    for (i, s) in all.iter_mut().enumerate() {
+        s.index = i;
     }
     all
 }

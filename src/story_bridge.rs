@@ -68,11 +68,23 @@ pub async fn bridge_story_events_to_persona(
 
     // 2. Collect the character's participated_in events, sorted by creation
     //    order (approximating the novel's chronological flow).
+    //
+    // Endpoint direction guard: an inverted edge has the person as
+    // `target_id`; taking `e.target_id` blindly would put the character's own
+    // name into `event_ids` and write an Event fact about themselves
+    // (inspect_entity_query already guards this case).
     let edges = kstore.get_edges_touching(obj.id).await?;
     let mut event_ids: Vec<i64> = edges
         .iter()
         .filter(|e| e.predicate == "participated_in")
-        .map(|e| e.target_id)
+        .map(|e| {
+            if e.source_id == obj.id {
+                e.target_id
+            } else {
+                e.source_id
+            }
+        })
+        .filter(|id| *id != obj.id)
         .collect();
     event_ids.sort_unstable();
     event_ids.dedup();
@@ -81,6 +93,25 @@ pub async fn bridge_story_events_to_persona(
     // 3. Re-express each event's text as persona signals + a raw Event fact.
     let entity_id = fstore.resolve_agent(tenant_id, character_name)?;
     stats.entity_id = Some(entity_id);
+
+    // Idempotent re-run: if this entity already carries bridged facts, skip
+    // so a retry does not double every Event/persona row (and invent spurious
+    // timeline milestones).
+    let existing = fstore.get_facts(entity_id)?;
+    if existing
+        .iter()
+        .any(|f| f.payload.get("source").and_then(|v| v.as_str()) == Some("story_bridge"))
+    {
+        stats.persona_facts = existing
+            .iter()
+            .filter(|f| f.fact_type != FactType::Event)
+            .count();
+        stats.event_facts = existing
+            .iter()
+            .filter(|f| f.fact_type == FactType::Event)
+            .count();
+        return Ok(stats);
+    }
 
     let mut time = 0i32;
     for event_id in event_ids {

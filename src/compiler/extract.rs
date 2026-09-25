@@ -60,12 +60,16 @@ impl Config {
 
 /// Scan sentences for entity mentions, extract events, and populate the context.
 ///
+/// `sentences` is a list of `(text, start_offset, end_offset)` triples —
+/// absolute byte spans into the original document — so every Event can carry
+/// a re-locatable source span instead of a free-text description prefix.
+///
 /// When `resolver` is `Some`, it is used in addition to the dictionary for
 /// mention resolution — the resolver handles alias matching and fuzzy
 /// embedding lookup, while the dictionary provides the fallback.
 pub fn compile(
     ctx: &mut CompileContext,
-    sentences: &[&str],
+    sentences: &[(&str, usize, usize)],
     dict: &EntityDictionary,
     config: &Config,
     resolver: Option<&EntityResolver>,
@@ -80,19 +84,30 @@ pub fn compile(
     // rebuild inside the per-sentence loop). Single-pass scan instead of
     // O(N×V) repeated match_indices calls — orders of magnitude faster when
     // V (verb count) × N (sentence count) is large, especially for English.
+    // Filter empty patterns first: AhoCorasick::new fails on empty strings
+    // (reachable via user-editable LanguageProvider verb lists), not only on
+    // an empty set. After filtering, degrade to no-verb-scan instead of
+    // panicking (mirrors EntityEngine's empty-matcher fallback).
     let all_verbs: Vec<&str> = config
         .strong_verbs
         .iter()
         .chain(config.action_verbs.iter())
         .map(|s| s.as_str())
+        .filter(|s| !s.is_empty())
         .collect();
-    // AhoCorasick::new only fails on an empty pattern set; all_verbs comes
-    // from a validated language config (never empty), so this expect never
-    // fires — the message keeps the panic traceable if it somehow does.
-    let verb_ac = AhoCorasick::new(&all_verbs)
-        .expect("verb automaton builds from a non-empty validated verb set");
+    let verb_ac = if all_verbs.is_empty() {
+        None
+    } else {
+        match AhoCorasick::new(&all_verbs) {
+            Ok(ac) => Some(ac),
+            Err(e) => {
+                tracing::warn!(error = %e, "verb automaton build failed; skipping verb scan");
+                None
+            }
+        }
+    };
 
-    for text in sentences.iter() {
+    for &(text, sent_start, sent_end) in sentences {
         if text.len() < 2 {
             continue;
         }
@@ -145,48 +160,59 @@ pub fn compile(
                         description: text[..pos.min(text.len())].to_string(),
                         participants,
                         importance: 0.5,
+                        // Absolute span of the source sentence — dialogue
+                        // markers are located inside `text`, but the claim is
+                        // the whole sentence (evidence-traceable).
+                        start_offset: Some(sent_start),
+                        end_offset: Some(sent_end),
                     });
                 }
             }
         }
 
-        for m in verb_ac.find_iter(text) {
-            let verb = &all_verbs[m.pattern()];
-            let pos = m.start();
-            let subject = local_mentions.iter().rfind(|mention| {
-                mention.offset.end <= pos && (pos - mention.offset.end) < config.proximity_chars
-            });
+        if let Some(verb_ac) = &verb_ac {
+            for m in verb_ac.find_iter(text) {
+                let verb = &all_verbs[m.pattern()];
+                let pos = m.start();
+                let subject = local_mentions.iter().rfind(|mention| {
+                    mention.offset.end <= pos && (pos - mention.offset.end) < config.proximity_chars
+                });
 
-            let object = local_mentions.iter().find(|mention| {
-                mention.offset.start >= pos + verb.len()
-                    && (mention.offset.start - (pos + verb.len())) < config.proximity_chars
-            });
+                let object = local_mentions.iter().find(|mention| {
+                    mention.offset.start >= pos + verb.len()
+                        && (mention.offset.start - (pos + verb.len())) < config.proximity_chars
+                });
 
-            if let Some(s) = subject {
-                let mut title = format!("{} {}", s.canonical_name, verb);
-                let mut participants = vec![EventParticipant {
-                    entity_name: s.canonical_name.clone(),
-                    role: "subject".into(),
-                }];
-                if let Some(o) = object {
-                    title = format!("{} {} {}", s.canonical_name, verb, o.canonical_name);
-                    participants.push(EventParticipant {
-                        entity_name: o.canonical_name.clone(),
-                        role: "object".into(),
+                if let Some(s) = subject {
+                    let mut title = format!("{} {}", s.canonical_name, verb);
+                    let mut participants = vec![EventParticipant {
+                        entity_name: s.canonical_name.clone(),
+                        role: "subject".into(),
+                    }];
+                    if let Some(o) = object {
+                        title = format!("{} {} {}", s.canonical_name, verb, o.canonical_name);
+                        participants.push(EventParticipant {
+                            entity_name: o.canonical_name.clone(),
+                            role: "object".into(),
+                        });
+                    }
+
+                    ctx.events.push(Event {
+                        effects: vec![],
+                        id: None,
+                        title,
+                        event_type: "action".into(),
+                        timestamp: Some(current_chapter),
+                        location: None,
+                        description: text[..pos.min(text.len())].to_string(),
+                        participants,
+                        importance: 0.6,
+                        // Verb match span within the sentence, promoted to
+                        // absolute document offsets for evidence tracing.
+                        start_offset: Some(sent_start + pos),
+                        end_offset: Some((sent_start + pos + verb.len()).min(sent_end)),
                     });
                 }
-
-                ctx.events.push(Event {
-                    effects: vec![],
-                    id: None,
-                    title,
-                    event_type: "action".into(),
-                    timestamp: Some(current_chapter),
-                    location: None,
-                    description: text[..pos.min(text.len())].to_string(),
-                    participants,
-                    importance: 0.6,
-                });
             }
         }
     }
@@ -212,20 +238,40 @@ fn parse_chapter_number(text: &str) -> Option<i32> {
     let end = after.find("回").or_else(|| after.find("章"))?;
     let num_str = &after[..end];
 
+    // All-numerals validation (mirrors ingest::corpus::is_valid_chapter_numeral):
+    // "第三回合，二马相交" must NOT reset the timeline — the 回 of 回合 is not
+    // a chapter delimiter. Reject non-numeral content and non-positive values.
+    const CN_NUMERALS: &[char] = &[
+        '零', '一', '二', '三', '四', '五', '六', '七', '八', '九', '十', '百', '千', '万',
+    ];
+    if num_str.is_empty()
+        || !num_str
+            .chars()
+            .all(|c| c.is_ascii_digit() || CN_NUMERALS.contains(&c))
+    {
+        return None;
+    }
+
     // Try Arabic numeral first
     if let Ok(n) = num_str.parse::<i32>() {
-        return Some(n);
+        return (n > 0).then_some(n);
     }
 
     // Try Chinese numeral
-    chinese_to_int(num_str)
+    let n = chinese_to_int(num_str)?;
+    (n > 0).then_some(n)
 }
 
 /// Parse an in-book year marker (e.g. "In 1805", "1807,") as the PRIMARY
 /// timeline for novels without chapter headings (English texts like War and
-/// Peace). Returns `None` unless a 4-digit year in a plausible range
-/// (1700–2100) is found; the year must NOT be embedded in a longer number
-/// (e.g. a 5+ digit id) to avoid false positives.
+/// Peace). Returns `None` unless a standalone 4-digit year in a plausible
+/// range (1700–2100) is found; the year must NOT be embedded in a longer
+/// number (e.g. a 5+ digit id) to avoid false positives.
+///
+/// Mid-sentence standalone years remain valid (`"the winter of 1812."`) —
+/// that is the locked contract of `in_book_year_detection`. The carry-forward
+/// risk from body digits is mitigated by requiring a *standalone* 4-digit
+/// run (same as before), not by restricting to sentence-initial position.
 fn parse_in_book_year(text: &str) -> Option<i32> {
     let bytes = text.as_bytes();
     let mut i = 0;
@@ -327,7 +373,19 @@ impl AliasIndex {
         let patterns: Vec<&str> = aliases.iter().map(|(k, _)| k.as_str()).collect();
         let ac = match patterns.is_empty() {
             true => None,
-            false => aho_corasick::AhoCorasick::new(&patterns).ok(),
+            false => {
+                match aho_corasick::AhoCorasick::new(&patterns) {
+                    Ok(ac) => Some(ac),
+                    Err(e) => {
+                        // Empty-string aliases are filtered above, but a
+                        // pathological dict could still fail the builder —
+                        // degrade to the legacy per-call path rather than
+                        // silently dropping all dictionary mentions with .ok().
+                        tracing::warn!(error = %e, "alias automaton build failed; using legacy scan");
+                        None
+                    }
+                }
+            }
         };
         AliasIndex { aliases, ac }
     }
@@ -618,7 +676,7 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        compile(&mut ctx, &["赵云救阿斗。"], &dict, &config, None);
+        compile(&mut ctx, &[("赵云救阿斗。", 0, 12)], &dict, &config, None);
         assert!(!ctx.events.is_empty(), "should create at least one event");
         let has_action = ctx.events.iter().any(|e| e.event_type == "action");
         assert!(has_action, "should have action-type event");
@@ -631,7 +689,7 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        compile(&mut ctx, &["刘备曰：关羽"], &dict, &config, None);
+        compile(&mut ctx, &[("刘备曰：关羽", 0, 15)], &dict, &config, None);
         let has_dialogue = ctx.events.iter().any(|e| e.event_type == "dialogue");
         assert!(has_dialogue, "dialog sentence should create dialogue event");
     }
@@ -644,7 +702,8 @@ mod tests {
         let dict = make_dict();
         let config = Config::default();
         let sentences = ["刘备救关羽。", "刘备救张飞。"];
-        let refs: Vec<&str> = sentences.to_vec();
+        let refs: Vec<(&str, usize, usize)> =
+            sentences.iter().map(|s| (*s, 0usize, s.len())).collect();
         compile(&mut ctx, &refs, &dict, &config, None);
         let has_rel = ctx.relations.iter().any(|r| {
             (r.source == "刘备" && r.target == "关羽") || (r.source == "关羽" && r.target == "刘备")

@@ -182,6 +182,15 @@ pub fn companion_facts_from_extract(
                 "emotion": emotion.label,
                 "zone": emotion.zone,
                 "turn": emotion.turn,
+                // Standard EvidenceRef so anchor_evidence_on writes a real
+                // evidence row — without it provenance answers `null` for
+                // every companion emotion fact.
+                "evidence": {
+                    "doc_id": 0,
+                    "offset": 0,
+                    "length": emotion.quote.chars().count().min(emotion.quote.len()),
+                    "text": emotion.quote,
+                },
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
@@ -203,6 +212,12 @@ pub fn companion_facts_from_extract(
             payload: serde_json::json!({
                 "content": cognition.quote,
                 "turn": cognition.turn,
+                "evidence": {
+                    "doc_id": 0,
+                    "offset": 0,
+                    "length": cognition.quote.len(),
+                    "text": cognition.quote,
+                },
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
@@ -213,6 +228,19 @@ pub fn companion_facts_from_extract(
 
     for theme in &extract.themes {
         let role = theme_role(theme, messages);
+        // Zero-pollution: keep only samples authored by the assigned role so
+        // an assistant echo never lands in the user_facts payload.
+        let samples: Vec<String> = theme
+            .samples
+            .iter()
+            .filter(|s| {
+                messages
+                    .iter()
+                    .any(|m| m.role == role && m.content.as_str() == s.as_str())
+            })
+            .cloned()
+            .collect();
+        let sample_text = samples.first().cloned().unwrap_or_default();
         let fact = Fact {
             id: None,
             entity_id: if role == "user" {
@@ -225,7 +253,13 @@ pub fn companion_facts_from_extract(
             payload: serde_json::json!({
                 "keyword": theme.keyword,
                 "occurrences": theme.occurrences,
-                "samples": theme.samples,
+                "samples": samples,
+                "evidence": {
+                    "doc_id": 0,
+                    "offset": 0,
+                    "length": sample_text.len(),
+                    "text": sample_text,
+                },
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),
@@ -242,6 +276,9 @@ pub fn companion_facts_from_extract(
 /// User-side facts keep the channel free of any attribution marker (the
 /// zero-pollution invariant); assistant-side facts are tagged
 /// `agent_personality` so the persona layer can recognize them.
+/// System/tool/unknown roles are DROPPED: routing them to the agent channel
+/// let a system prompt or tool dump containing "我是…" become a permanent
+/// persona fact.
 fn push_companion_fact(
     mut fact: Fact,
     role: &str,
@@ -250,11 +287,12 @@ fn push_companion_fact(
 ) {
     if role == "user" {
         user_facts.push(fact);
-    } else {
+    } else if role == "assistant" {
         fact.payload["attribution"] =
             serde_json::Value::String(AGENT_PERSONALITY_ATTRIBUTION.to_string());
         agent_facts.push(fact);
     }
+    // system / tool / other: drop (never enter either cognition channel).
 }
 
 /// Resolve the speaker role of a recurring theme from its first sample quote.
@@ -331,39 +369,33 @@ static THEME_STOP_CHARS: LazyLock<std::collections::HashSet<char>> = LazyLock::n
 });
 
 /// Topic keywords clustered across turns (>=2 turns → a "recurring theme").
+///
+/// Counting stays cross-role (a topic both speakers keep returning to IS
+/// recurring for the relationship snapshot). Zero-pollution is enforced when
+/// the theme becomes a fact: [`companion_facts_from_extract`] filters
+/// `samples` down to messages of the assigned role so assistant text never
+/// lands in the user_facts channel.
 #[must_use]
 pub fn extract_repeated_themes(messages: &[Message]) -> Vec<ThemeSignal> {
-    // Count per-keyword distinct turns, keeping up to 3 sample quotes.
     let mut turn_count: HashMap<String, usize> = HashMap::new();
-    let mut seen_turn: HashMap<String, usize> = HashMap::new(); // keyword -> last turn seen
+    let mut seen_turn: HashMap<String, usize> = HashMap::new();
     let mut samples: HashMap<String, Vec<String>> = HashMap::new();
 
     for (turn, msg) in messages.iter().enumerate() {
-        // 2-char CJK n-grams as topic candidates (simple, deterministic).
         let chars: Vec<char> = msg.content.chars().collect();
         let mut candidates: Vec<String> = Vec::new();
         for w in chars.windows(2) {
             if w[0].is_ascii_alphabetic() || w[1].is_ascii_alphabetic() {
                 continue;
             }
-            // Reject bigrams touching any non-alphanumeric char (whitespace,
-            // ASCII or CJK punctuation): "0.", "吧。", "，不" are extraction
-            // fragments, never topics.
             if !w[0].is_alphanumeric() || !w[1].is_alphanumeric() {
                 continue;
             }
-            // Reject bigrams straddling a single-character stop word
-            // ("操的", "我是", "他的") — they fragment around a function word.
             if THEME_STOP_CHARS.contains(&w[0]) || THEME_STOP_CHARS.contains(&w[1]) {
                 continue;
             }
             let kw: String = w.iter().collect();
-            // Defensive: a 2-char window can never be empty, but never emit an
-            // empty keyword even if the candidate source changes.
-            if kw.is_empty() {
-                continue;
-            }
-            if THEME_STOP.contains(&kw.as_str()) {
+            if kw.is_empty() || THEME_STOP.contains(&kw.as_str()) {
                 continue;
             }
             candidates.push(kw);
@@ -385,7 +417,7 @@ pub fn extract_repeated_themes(messages: &[Message]) -> Vec<ThemeSignal> {
 
     let mut out: Vec<ThemeSignal> = turn_count
         .into_iter()
-        .filter(|(_, n)| *n >= 2) // recurring = appears in >=2 distinct turns
+        .filter(|(_, n)| *n >= 2)
         .map(|(keyword, occurrences)| {
             let samples = samples.remove(&keyword).unwrap_or_default();
             ThemeSignal {
@@ -395,8 +427,15 @@ pub fn extract_repeated_themes(messages: &[Message]) -> Vec<ThemeSignal> {
             }
         })
         .collect();
-    out.sort_by_key(|t| std::cmp::Reverse(t.occurrences));
-    out.truncate(20); // cap output size
+    // Deterministic total order: occurrence DESC, then keyword ASC — HashMap
+    // into_iter is process-random, so occurrence-only sort left ties in hash
+    // order and different runs produced different recent_topics.
+    out.sort_by(|a, b| {
+        b.occurrences
+            .cmp(&a.occurrences)
+            .then_with(|| a.keyword.cmp(&b.keyword))
+    });
+    out.truncate(20);
     out
 }
 

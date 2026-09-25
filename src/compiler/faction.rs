@@ -46,7 +46,13 @@ impl FactionTracker {
         let map: HashMap<String, HashMap<String, Vec<String>>> = serde_json::from_str(&content)?;
         let mut baseline = HashMap::new();
         if let Some(factions) = map.get(novel) {
-            for (faction, members) in factions {
+            // Deterministic order: HashMap iteration is process-random, so a
+            // member listed under two factions got whichever faction the hash
+            // seed visited first — same input, different baselines across runs.
+            let mut faction_names: Vec<&String> = factions.keys().collect();
+            faction_names.sort();
+            for faction in faction_names {
+                let members = &factions[faction];
                 for member in members {
                     if !baseline.contains_key(member) {
                         baseline.insert(member.clone(), faction.clone());
@@ -197,6 +203,8 @@ mod tests {
                 },
             ],
             importance: 0.5,
+            start_offset: None,
+            end_offset: None,
         }
     }
 

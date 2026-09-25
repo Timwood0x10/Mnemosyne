@@ -64,7 +64,13 @@ impl SQLiteKnowledgeStore {
         // When no doc is given, match at the SQL layer instead of pulling the
         // first 10_000 objects via search_objects — a large graph with >10k
         // objects silently failed to resolve aliases beyond the cap.
-        // LIKE wildcards in the query are escaped so `%`/`_` match literally.
+        // LIKE wildcards in the PATTERN are escaped so `%`/`_` match literally.
+        // The reverse direction (`query LIKE %stored_name%`) must use the RAW
+        // query as the haystack: passing the escaped form there made the
+        // backslashes part of the searched text, so a query like `foo_bar`
+        // failed to match a stored `oo_ba` even though
+        // `"foo_bar".contains("oo_ba")` is true (the Rust filter below would
+        // have accepted it had SQL returned the row).
         let escaped = name
             .replace('\\', "\\\\")
             .replace('%', "\\%")
@@ -77,10 +83,10 @@ impl SQLiteKnowledgeStore {
                     "SELECT * FROM knowledge_objects \
                      WHERE name != ?1 \
                        AND (name LIKE '%' || ?2 || '%' ESCAPE '\\' \
-                            OR ?3 LIKE '%' || name || '%' ESCAPE '\\') \
+                            OR ?3 LIKE '%' || name || '%') \
                      ORDER BY id ASC",
                 )?;
-                let rows = stmt.query_map(params![name, escaped, escaped], row_to_object)?;
+                let rows = stmt.query_map(params![name, escaped, name], row_to_object)?;
                 let mut out = Vec::new();
                 for r in rows {
                     out.push(r?);

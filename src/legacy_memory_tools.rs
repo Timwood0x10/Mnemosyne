@@ -108,15 +108,20 @@ impl ToolHandler for MemoryStoreTool {
             .get("tenant_id")
             .and_then(Value::as_str)
             .unwrap_or("default");
-        let memory_type = args
-            .get("memory_type")
-            .and_then(Value::as_str)
-            .and_then(|s| s.parse::<MemoryType>().ok())
-            .unwrap_or(MemoryType::Knowledge);
+        // Reject an invalid memory_type instead of silently defaulting to
+        // Knowledge — the same contract `memory_search` already enforces
+        // (a typo'd filter must not be reported as a working filter).
+        let memory_type = match args.get("memory_type").and_then(Value::as_str) {
+            Some(s) => s
+                .parse::<MemoryType>()
+                .map_err(|e| Error::InvalidInput(format!("invalid memory_type `{s}`: {e}")))?,
+            None => MemoryType::Knowledge,
+        };
         let confidence = args
             .get("confidence")
             .and_then(Value::as_f64)
-            .unwrap_or(0.5);
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
 
         let mut exp = Experience::new(tenant_id, memory_type, content, confidence);
         exp.source = "manual".to_string();
@@ -146,12 +151,25 @@ impl ToolHandler for MemoryFeedbackTool {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidInput("missing `memory_id`".into()))?;
         let useful = args.get("useful").and_then(Value::as_bool).unwrap_or(true);
+        // Optional tenant binding: a leaked UUID must not let any client
+        // rewrite another tenant's confidence/votes.
+        let tenant_filter = args
+            .get("tenant_id")
+            .and_then(Value::as_str)
+            .filter(|t| !t.trim().is_empty());
 
         let Some(mut exp) = self.store.get(memory_id).await? else {
             return Ok(ToolCallResult::text(format!(
                 "memory `{memory_id}` not found; feedback not applied"
             )));
         };
+        if let Some(expected) = tenant_filter
+            && exp.tenant_id != expected
+        {
+            return Ok(ToolCallResult::text(format!(
+                "memory `{memory_id}` not found; feedback not applied"
+            )));
+        }
 
         // Apply the vote: adjust importance + tally in metadata (self-evolve).
         let votes = exp.apply_feedback(useful, FEEDBACK_CONFIDENCE_DELTA);

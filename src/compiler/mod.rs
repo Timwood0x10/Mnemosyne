@@ -23,6 +23,7 @@ pub mod pipeline;
 pub mod profile;
 pub mod resolver;
 pub mod sentence;
+pub mod state_slots;
 pub mod story_events;
 pub mod timeline;
 pub mod writer;
@@ -71,12 +72,21 @@ pub struct Entity {
 }
 
 /// A profile attribute attached to an entity.
+///
+/// Carries the source span in the original document so a claim ("courtesy_name
+/// = 玄德") can be re-located without re-searching an ambiguous substring.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntityProfile {
     pub entity_id: Option<i64>,
     pub key: String, // courtesy_name, birthplace, appearance, etc.
     pub value: String,
     pub confidence: f64,
+    /// Byte start of the source line/snippet in the original document.
+    #[serde(default)]
+    pub start_offset: Option<usize>,
+    /// Byte end (exclusive) of the source line/snippet.
+    #[serde(default)]
+    pub end_offset: Option<usize>,
 }
 
 /// A mention of an entity in the text (Pass 2 builds these from Pass 1's index).
@@ -93,6 +103,10 @@ pub struct Mention {
 // ── Event (Pass 2) ──────────────────────────────────────────────────────────
 
 /// An event in the world timeline.
+///
+/// `start_offset`/`end_offset` are byte spans into the original document so
+/// evidence tracing can re-locate the triggering sentence without relying on
+/// a free-text `description` prefix (ambiguous on repeats).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub id: Option<i64>,
@@ -104,6 +118,12 @@ pub struct Event {
     pub participants: Vec<EventParticipant>,
     pub effects: Vec<EventEffect>,
     pub importance: f64,
+    /// Byte start of the source sentence/snippet in the original document.
+    #[serde(default)]
+    pub start_offset: Option<usize>,
+    /// Byte end (exclusive) of the source sentence/snippet.
+    #[serde(default)]
+    pub end_offset: Option<usize>,
 }
 
 /// A participant in an event.

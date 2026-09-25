@@ -22,7 +22,7 @@ use crate::agent_facts::{
 use crate::agent_personality::agent_personality_facts_from_messages;
 use crate::cognition::{Fact, Observation};
 use crate::conversation_compiler::{
-    ConversationCompiler, compile_user_observations, user_facts_from_observations,
+    ConversationCompiler, compile_user_observations, user_facts_from_channels,
 };
 use crate::types::{CompiledConversation, Message};
 
@@ -62,7 +62,10 @@ impl CognitionCompiler {
         logical_time: i32,
     ) -> CognitionCompileResult {
         let observations = compile_user_observations(messages, user_entity_id);
-        let facts = user_facts_from_observations(&observations, logical_time);
+        // Route through the shared channel entry point, never the marker path
+        // alone: the self-disclosure channel reads the raw messages, so a caller
+        // that wires only the observation half loses every identity fact.
+        let facts = user_facts_from_channels(&observations, messages, user_entity_id, logical_time);
         let compatibility = self.compatibility.compile(tenant_id, messages);
 
         CognitionCompileResult {

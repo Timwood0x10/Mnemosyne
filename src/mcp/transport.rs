@@ -61,25 +61,46 @@ enum LineOutcome {
 /// line would otherwise grow the buffer without bound and exhaust memory.
 const MAX_LINE_BYTES: usize = 1_000_000;
 
+/// Extra bytes drained after an oversized line so the next `read_line` starts
+/// at a real message boundary instead of mid-payload.
+const MAX_DRAIN_BYTES: usize = 16 * 1024 * 1024;
+
 /// Read one bounded line from `reader`.
 ///
 /// - EOF → `Ok(None)`.
-/// - A line longer than [`MAX_LINE_BYTES`] → `Err(InvalidData)` (the read is
-///   capped at `MAX_LINE_BYTES + 1`, so a runaway line cannot allocate
-///   unboundedly — it is rejected instead).
-/// - Otherwise → `Ok(Some(line))` (newline stripped by `read_line` semantics
-///   are preserved; `trim` happens later in [`classify`]).
+/// - A line longer than [`MAX_LINE_BYTES`] → the remainder of the line is
+///   drained (up to [`MAX_DRAIN_BYTES`]) and `Err(InvalidData)` is returned
+///   so the caller can surface a parse error without desynchronizing stdin.
+/// - Otherwise → `Ok(Some(line))` (newline preserved; `trim` happens later
+///   in [`classify`]).
 fn read_bounded_line<R: std::io::BufRead>(reader: &mut R) -> std::io::Result<Option<String>> {
     let mut line = String::new();
-    // `Read::take` consumes the reader, so call it fully-qualified on the
-    // reborrowed `&mut R` (which implements `Read`); the resulting
-    // `Take<&mut R>` implements `BufRead`, so `read_line` works. This caps
-    // the allocation for a single line at MAX_LINE_BYTES + 1.
+    // Cap the first read so a runaway line cannot allocate unboundedly.
     let n = std::io::Read::take(&mut *reader, (MAX_LINE_BYTES + 1) as u64).read_line(&mut line)?;
     if n == 0 {
         return Ok(None);
     }
-    if line.len() > MAX_LINE_BYTES {
+    // Strip the trailing newline BEFORE the length check: `line.len()` used
+    // to include `\n`/`\r\n`, so a legitimate message of exactly
+    // MAX_LINE_BYTES content bytes was rejected (off-by-one).
+    let content_len = line.trim_end_matches('\n').trim_end_matches('\r').len();
+    if content_len > MAX_LINE_BYTES {
+        // Drain the rest of this line so the next message is not read from
+        // the middle of the oversized payload.
+        let mut drained = 0usize;
+        let mut chunk = String::new();
+        while drained < MAX_DRAIN_BYTES {
+            chunk.clear();
+            let mut take = std::io::Read::take(&mut *reader, 64 * 1024);
+            let m = take.read_line(&mut chunk)?;
+            if m == 0 {
+                break;
+            }
+            drained += m;
+            if chunk.ends_with('\n') {
+                break;
+            }
+        }
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("line exceeds {MAX_LINE_BYTES} bytes"),
@@ -114,20 +135,25 @@ impl Transport for StdioTransport {
     async fn recv(&mut self) -> Result<Option<JSONRPCMessage>> {
         loop {
             // Read one JSON-RPC line off the worker thread via `spawn_blocking`
-            // so a slow/blocked stdin never stalls the tokio runtime. The read
-            // is bounded to a single line (and to MAX_LINE_BYTES, so a
-            // runaway line cannot exhaust memory) while keeping the async
-            // worker free.
+            // so a slow/blocked stdin never stalls the tokio runtime.
             let raw = tokio::task::spawn_blocking(|| -> std::io::Result<Option<String>> {
                 read_bounded_line(&mut std::io::stdin().lock())
             })
             .await
-            .map_err(|e| Error::Internal(format!("spawn_blocking: {e}")))?
-            .map_err(|e| Error::Internal(format!("read_line: {e}")))?;
-            match classify(raw)? {
-                LineOutcome::Eof => return Ok(None),
-                LineOutcome::Blank => continue,
-                LineOutcome::Message(msg) => return Ok(Some(msg)),
+            .map_err(|e| Error::Internal(format!("spawn_blocking: {e}")))?;
+            match raw {
+                Ok(raw) => match classify(raw)? {
+                    LineOutcome::Eof => return Ok(None),
+                    LineOutcome::Blank => continue,
+                    LineOutcome::Message(msg) => return Ok(Some(msg)),
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    // Oversized line: surface as a parse error so `serve`
+                    // replies -32700 and keeps the connection alive, instead
+                    // of treating it as fatal I/O and tearing everything down.
+                    return Err(Error::JsonRpcParse(e.to_string()));
+                }
+                Err(e) => return Err(Error::Internal(format!("read_line: {e}"))),
             }
         }
     }

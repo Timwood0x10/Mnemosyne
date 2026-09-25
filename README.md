@@ -348,16 +348,49 @@ chmod +x ~/.mnemosyne/mnemosyne
 
 ### Customizing the marker word lists
 
-`markers_zh.json` and `markers_en.json` decide which words in a conversation
-produce facts. Each file maps an action (`feel`, `plan`, `want`, `dislike`,
-`belief`, `stuck`, `life_event`, …) to a list of trigger words. Edit them to:
+The word lists live in `config/`. **The words are yours, the bucket names are
+the engine's.** Put your own table in `config/markers_zh.user.json` (every
+`*.user.json` in `config/` is read):
 
-- add your own vocabulary (modern slang, domain terms, personal quirks);
-- remove words that cause false positives;
-- tune what the engine extracts about the user.
+```json
+{
+  "want": ["想出门", "只想躺"],
+  "feel": ["emo", "麻了"],
+  "_remove": { "feel": ["应酬"] }
+}
+```
 
-No recompile needed — just edit the JSON and restart. If the files are absent
-the binary falls back to built-in defaults.
+Three rules:
+
+1. a **bucket name** must be one of the engine's actions: `喜欢` / `like` /
+   `love` / `prefer` / `dislike` / `hate` / `准备` / `plan` / `want` / `feel` /
+   `belief` / `stuck` / `life_event`. A typo is reported by the self-check with
+   the allowed list (it used to turn those words into Event facts silently);
+2. **`.user.json` words are appended** to the shipped tables; several files merge
+   in file-name order;
+3. **`_remove` deletes words** — the only way to switch off a shipped default
+   that misfires in your domain. A removal that matches nothing is reported too,
+   because the usual cause is a spelling mistake.
+
+The shipped `markers_zh.json` / `markers_en.json` are reference tables:
+**upgrades overwrite them**, so keep your customisation in a `.user.json` file.
+No recompile is needed — edit and restart. A missing `.user.json` changes
+nothing; when neither shipped file can be read the binary falls back to a small
+built-in safety net.
+
+Word lists are resolved from the **resource root**: the current directory or the
+executable's directory by default, or whatever `MNEMOSYNE_HOME` points at.
+
+Check your edits before running:
+
+```bash
+mnemosyne config-check
+```
+
+It prints the resource root, which marker files were read, the effective word
+count per action, every removed / ignored / duplicated entry, and the other
+`config/` files the runtime reads (so a missing one is visible). It exits
+non-zero when the table cannot be trusted, so it works as a pre-deploy gate.
 
 ### Option 3 — Build from source
 

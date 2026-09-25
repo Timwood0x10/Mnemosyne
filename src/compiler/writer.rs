@@ -30,6 +30,11 @@ use crate::error::{Error, Result, StorageError};
 pub struct EvidenceBatch {
     pub doc_id: i64,
     pub chapter_id: i64,
+    /// Byte start of the snippet in the source document (schema column exists;
+    /// omitting it made every batch-written evidence row unlocatable).
+    pub start_offset: Option<i64>,
+    /// Byte end (exclusive) of the snippet in the source document.
+    pub end_offset: Option<i64>,
     pub content: String,
 }
 
@@ -92,11 +97,16 @@ impl EvidenceWriter {
         let written = self.write_inner(conn, records);
         match written {
             Ok(n) => {
-                conn.execute_batch("COMMIT;").map_err(|e| {
-                    Error::Storage(StorageError::Sqlite(format!(
-                        "commit evidence transaction: {e}"
-                    )))
-                })?;
+                if let Err(commit_err) = conn.execute_batch("COMMIT;") {
+                    // A failed COMMIT leaves the connection inside an open
+                    // transaction holding every "written" row — without an
+                    // explicit ROLLBACK those rows silently join later
+                    // statements. Mirror the inner-error path.
+                    let _ = conn.execute_batch("ROLLBACK;");
+                    return Err(Error::Storage(StorageError::Sqlite(format!(
+                        "commit evidence transaction (rolled back): {commit_err}"
+                    ))));
+                }
                 Ok(n)
             }
             Err(e) => {
@@ -120,13 +130,19 @@ impl EvidenceWriter {
             let mut values: Vec<String> = Vec::with_capacity(chunk.len());
             for row in chunk {
                 let escaped = row.content.replace('\'', "''");
+                let start = row
+                    .start_offset
+                    .map_or_else(|| "NULL".to_string(), |v| v.to_string());
+                let end = row
+                    .end_offset
+                    .map_or_else(|| "NULL".to_string(), |v| v.to_string());
                 values.push(format!(
-                    "({}, {}, '{}', strftime('%s','now'))",
-                    row.doc_id, row.chapter_id, escaped
+                    "({}, {}, {}, {}, '{}', strftime('%s','now'))",
+                    row.doc_id, row.chapter_id, start, end, escaped
                 ));
             }
             let sql = format!(
-                "INSERT INTO evidence (doc_id, chapter_id, content, created_at) VALUES {}",
+                "INSERT INTO evidence (doc_id, chapter_id, start_offset, end_offset, content, created_at) VALUES {}",
                 values.join(",")
             );
             conn.execute(&sql, []).map_err(|e| {
@@ -155,6 +171,8 @@ mod tests {
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 doc_id      INTEGER NOT NULL,
                 chapter_id  INTEGER NOT NULL,
+                start_offset INTEGER,
+                end_offset   INTEGER,
                 content     TEXT NOT NULL,
                 created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             );",
@@ -184,16 +202,22 @@ mod tests {
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 1,
+                start_offset: Some(0),
+                end_offset: Some(15),
                 content: "Chapter 1 text.".into(),
             },
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 2,
+                start_offset: Some(16),
+                end_offset: Some(31),
                 content: "Chapter 2 text.".into(),
             },
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 3,
+                start_offset: Some(32),
+                end_offset: Some(47),
                 content: "Chapter 3 text.".into(),
             },
         ];
@@ -218,6 +242,8 @@ mod tests {
         let records = vec![EvidenceBatch {
             doc_id: 1,
             chapter_id: 1,
+            start_offset: Some(0),
+            end_offset: Some(27),
             content: "Prince O'Brien's regiment".into(),
         }];
         let writer = EvidenceWriter::new(10);
@@ -246,6 +272,8 @@ mod tests {
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
                 doc_id      INTEGER NOT NULL,
                 chapter_id  INTEGER NOT NULL,
+                start_offset INTEGER,
+                end_offset   INTEGER,
                 content     TEXT NOT NULL,
                 created_at  INTEGER NOT NULL DEFAULT (strftime('%s','now')),
                 UNIQUE(doc_id, chapter_id, content)
@@ -258,11 +286,15 @@ mod tests {
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 1,
+                start_offset: None,
+                end_offset: None,
                 content: "duplicate".into(),
             },
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 1,
+                start_offset: None,
+                end_offset: None,
                 content: "duplicate".into(),
             },
         ];
@@ -295,16 +327,22 @@ mod tests {
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 1,
+                start_offset: None,
+                end_offset: None,
                 content: "a".into(),
             },
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 2,
+                start_offset: None,
+                end_offset: None,
                 content: "b".into(),
             },
             EvidenceBatch {
                 doc_id: 1,
                 chapter_id: 3,
+                start_offset: None,
+                end_offset: None,
                 content: "c".into(),
             },
         ];

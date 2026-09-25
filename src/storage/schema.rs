@@ -14,6 +14,7 @@
 //! | `events` | World state changes |
 //! | `event_participants` | Who participated in each event |
 //! | `world_relations` | Long-term entity relationships |
+//! | `world_states` | Character-state slots (status/location/...) per event |
 //! | `timeline` | Chronological event index |
 //!
 //! ## Legacy tables (V6 general model, retained for backward compatibility)
@@ -82,6 +83,11 @@ CREATE TABLE IF NOT EXISTS events (
     location    TEXT,
     description TEXT,
     importance  REAL DEFAULT 0.5,
+    -- Source byte span in the original document: dialogue events carry the
+    -- full sentence, action events the verb-match window. NULL for legacy
+    -- rows written before this column existed.
+    start_offset INTEGER,
+    end_offset   INTEGER,
     created_at  INTEGER DEFAULT (strftime('%s','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
@@ -103,15 +109,35 @@ CREATE TABLE IF NOT EXISTS world_relations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id       INTEGER NOT NULL REFERENCES world_entities(id),
     target_id       INTEGER NOT NULL REFERENCES world_entities(id),
-    relation_type   TEXT NOT NULL,               -- brother / enemy / teacher / spouse
-    valid_from      INTEGER,                     -- event id where relation started
-    valid_to        INTEGER,                     -- event id where relation ended (NULL=ongoing)
+    relation_type   TEXT NOT NULL,                 -- brother / enemy / teacher / spouse
+    valid_from      INTEGER,                       -- event id where relation started
+    valid_to        INTEGER,                       -- event id where relation ended (NULL=ongoing)
     confidence      REAL DEFAULT 1.0,
     created_at      INTEGER DEFAULT (strftime('%s','localtime')),
     UNIQUE(source_id, target_id, relation_type)
 );
 CREATE INDEX IF NOT EXISTS idx_world_relations_source ON world_relations(source_id);
 CREATE INDEX IF NOT EXISTS idx_world_relations_target ON world_relations(target_id);
+
+-- ── world_states ────────────────────────────────────────────
+-- Character-state slots (status/location/...) observed at a narrative time.
+-- One row per observation, anchored to the event + source byte span that
+-- produced it — never updated in place (ADD-only: the current state of a
+-- slot is the row with the highest (chapter, id)).
+CREATE TABLE IF NOT EXISTS world_states (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_id     INTEGER NOT NULL REFERENCES world_entities(id),
+    slot          TEXT NOT NULL,                   -- status / location / ...
+    value         TEXT NOT NULL,                   -- deceased / captured / ...
+    chapter       INTEGER,                         -- narrative time (chapter or year)
+    event_id      INTEGER REFERENCES events(id),   -- source event (NULL = manual write)
+    start_offset  INTEGER,                         -- source byte span (nullable)
+    end_offset    INTEGER,
+    confidence    REAL DEFAULT 0.8,
+    created_at    INTEGER DEFAULT (strftime('%s','localtime'))
+);
+CREATE INDEX IF NOT EXISTS idx_world_states_entity ON world_states(entity_id, slot);
+CREATE INDEX IF NOT EXISTS idx_world_states_event ON world_states(event_id);
 ";
 
 /// Legacy V6 DDL (retained for backward compatibility).
@@ -182,10 +208,15 @@ CREATE INDEX IF NOT EXISTS idx_ke_source_target ON knowledge_edges(source_id, ta
 
 -- ── evidence ────────────────────────────────────────────────
 -- Evidence does not know who it serves; the m:n link table below associates it.
+-- `doc_id`/`chapter_id` are NULLABLE so this DDL is compatible with the
+-- fact-store's `evidence` table on the same shared DB file: fact anchors
+-- insert `chapter_id = NULL`, and `CREATE TABLE IF NOT EXISTS` means whichever
+-- store opens first wins — NOT NULL here would make every fact-store insert
+-- with an evidence anchor fail after a migrate-first boot.
 CREATE TABLE IF NOT EXISTS evidence (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_id        INTEGER NOT NULL,
-    chapter_id    INTEGER NOT NULL,
+    doc_id        INTEGER,
+    chapter_id    INTEGER,
     start_offset  INTEGER,
     end_offset    INTEGER,
     content       TEXT,                          -- original-text snippet

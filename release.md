@@ -100,6 +100,11 @@ falls back to built-in defaults and keeps working.
   `state_timeline` intervals never carried an `evidence_ids` entry. The write
   path now registers the anchor (one row per utterance, shared by the facts it
   produced).
+- **Self-disclosure channel** — `compile_user_facts` now runs two complementary
+  extractors: the observation marker table (feelings / wants / dislikes) and
+  `self_disclosure.rs`, which compiles name / age / occupation / city / family /
+  pets / interests / habits. Those types were unreachable before (measured recall
+  0%, now 100%).
 - **Compile-yield measurement** — `tests/compile_yield.rs` runs an annotated
   colloquial corpus through the real compiler and reports recall / phantom /
   over-extraction (baseline: explicit signals 100%, phantoms 0/9, capability gaps
@@ -110,6 +115,11 @@ falls back to built-in defaults and keeps working.
 
 ### Fixed
 
+- **The user-fact pipeline existed in two places**, and the new self-disclosure
+  channel was wired into one of them only: `memory_compile` inlined the marker
+  path, so a self-introduction produced no identity facts over MCP while the
+  corpus test reported 100%. Both callers now share one entry point, covered by
+  the corpus harness *and* an MCP end-to-end test.
 - **A single negation word anywhere in a sentence discarded an affirmative plan**
   ("想学吉他很久了，一直在纠结买不买" lost its goal to the `买不买` cue): negation is
   now resolved per marker inside its own clause, which took explicit-signal recall

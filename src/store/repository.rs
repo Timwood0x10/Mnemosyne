@@ -83,18 +83,30 @@ impl ExperienceRepository for SQLiteVecStore {
                 "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
                 params![exp.id, vec_json],
             )?;
+        } else if self.dim > 0 {
+            // A cleared vector must also drop the stale index row, otherwise
+            // the old embedding keeps matching `search_by_vector` forever
+            // (phantom near-neighbor with an empty `vector` field).
+            tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![exp.id])?;
         }
         tx.commit()?;
         Ok(())
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let affected = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        let mut conn = self.conn.lock().await;
+        // Single transaction + dim guard: keyword-only mode (dim == 0) never
+        // creates `vec_memories`, so the vec delete must be skipped there —
+        // and the two-table delete must land together or not at all.
+        let tx = conn.transaction()?;
+        let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
         if affected == 0 {
             return Err(StorageError::NotFound(id.to_string()).into());
         }
-        let _ = conn.execute("DELETE FROM vec_memories WHERE id = ?1", params![id]);
+        if self.dim > 0 {
+            tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -107,10 +119,17 @@ impl ExperienceRepository for SQLiteVecStore {
         // none is — a mid-batch failure must not leave a half-deleted state
         // while reporting success (the previous per-row `let _ =` swallowed
         // errors and could silently skip rows).
+        //
+        // `vec_memories` only exists when dim > 0; the default keyword-only
+        // config (dim == 0) created FTS tables instead, so the unconditional
+        // vec delete failed with "no such table" and capacity eviction
+        // (phase_enforce_capacity) could never run.
         let tx = conn.transaction()?;
         for id in ids {
             tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-            tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+            if self.dim > 0 {
+                tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -118,13 +137,14 @@ impl ExperienceRepository for SQLiteVecStore {
 
     async fn forget_expired(&self, tenant_id: &str, now: DateTime<Utc>) -> Result<usize> {
         let now_str = now.to_rfc3339();
-        let conn = self.conn.lock().await;
-        // Select expired rows, then delete them from both the main table and
-        // the vec index. FTS5 cleanup is handled by the DELETE trigger on
-        // `memories`. Delete errors propagate so a failed purge never reports
-        // a false success count or leaves the indexes inconsistent.
+        let mut conn = self.conn.lock().await;
+        // One transaction for select+delete: the previous loop ran in
+        // autocommit, so a failed vec delete (keyword-only mode, no
+        // `vec_memories`) left the memories row already gone and returned Err
+        // — a partial purge that never reported a success count.
+        let tx = conn.transaction()?;
         let ids: Vec<String> = {
-            let mut stmt = conn.prepare(
+            let mut stmt = tx.prepare(
                 "SELECT id FROM memories WHERE tenant_id = ?1 AND expires_at <> '' AND expires_at < ?2",
             )?;
             let rows =
@@ -133,12 +153,15 @@ impl ExperienceRepository for SQLiteVecStore {
         };
         let mut count = 0usize;
         for id in &ids {
-            let deleted = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-            conn.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+            let deleted = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+            if self.dim > 0 {
+                tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+            }
             if deleted > 0 {
                 count += 1;
             }
         }
+        tx.commit()?;
         Ok(count)
     }
 
@@ -162,15 +185,21 @@ impl ExperienceRepository for SQLiteVecStore {
         let vec_json = serde_json::to_string(&query_embedding)
             .map_err(|e| StorageError::Schema(format!("serialize query: {e}")))?;
 
+        // Over-fetch before the tenant filter: kNN runs over the WHOLE table,
+        // so a small tenant whose rows rank outside the global top-k would
+        // otherwise get zero results even though matching rows exist. Pull up
+        // to `limit * 16` (capped) nearest neighbors, then filter by tenant
+        // and truncate to `limit`.
+        let overfetch = (limit as i64).saturating_mul(16).max(limit as i64);
         let sql = "SELECT m.*, distance FROM memories m
                    JOIN (SELECT id, distance FROM vec_memories
                          WHERE vector MATCH ?1 AND k = ?2) v ON m.id = v.id
                    WHERE m.tenant_id = ?3
                    ORDER BY v.distance ASC
-                   LIMIT ?2";
+                   LIMIT ?4";
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(
-            params![vec_json, limit as i64, tenant_id],
+            params![vec_json, overfetch, tenant_id, limit as i64],
             row_to_experience,
         )?;
 
@@ -178,7 +207,7 @@ impl ExperienceRepository for SQLiteVecStore {
         for row in rows {
             results.push(row?);
         }
-        // results is already ordered by distance ASC by the SQL.
+        // SQL already ordered by distance ASC and limited to `limit`.
         Ok(results)
     }
 

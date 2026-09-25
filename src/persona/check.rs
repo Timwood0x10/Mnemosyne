@@ -223,13 +223,15 @@ impl PersonaCheckEngine {
             }
         }
 
-        // Same-direction anchoring takes priority over conflict detection.
-        // Under mem0 v3 ADD-only accumulation, a stance flip leaves BOTH the
-        // old and the new fact in store ("我喜欢应酬" then "我讨厌应酬").
-        // A draft that matches the anchored same-direction stance must be
-        // consistent — otherwise every future draft is falsely flagged as a
-        // conflict against the stale, opposite stance.
-        if best_same_negated.is_some_and(|b| b >= self.thresholds.match_) {
+        // Same-direction anchoring may only override a conflict when the
+        // anchor is AT LEAST as strong as the conflict. Anisotropic embedding
+        // spaces routinely give unrelated same-direction Chinese sentences
+        // sim ≥ match_ (0.75 == conflict), so unconditional anchoring let a
+        // real contradiction be certified "clean" by a weaker same-direction
+        // neighbour.
+        if best_same_negated.is_some_and(|b| {
+            b >= self.thresholds.match_ && best_conflict.as_ref().is_none_or(|c| b >= c.similarity)
+        }) {
             result.consistent_count += 1;
         } else if let Some(c) = best_conflict {
             result.conflicts.push(c);
@@ -295,11 +297,17 @@ impl PersonaCheckEngine {
             }
         }
 
-        // Same-direction anchoring wins over conflict, mirroring the semantic
-        // path: after a stance flip both stances coexist in the store, so a
-        // draft aligned with the current stance must not be flagged against
-        // the stale opposite one.
-        if best_same_negated.is_some_and(|b| b > 0) {
+        // Same-direction anchoring may only win when it is at least as strong
+        // as the best conflict: a single shared bigram on ANY same-direction
+        // fact used to silence a high-overlap contradiction (e.g. draft
+        // "我讨厌应酬" anchored by unrelated "我喜欢安稳" before the real
+        // "我喜欢应酬" conflict was reported).
+        if best_same_negated.is_some_and(|b| {
+            b > 0
+                && best_conflict
+                    .as_ref()
+                    .is_none_or(|c| b >= c.similarity as usize)
+        }) {
             result.consistent_count += 1;
         } else if let Some(c) = best_conflict {
             result.conflicts.push(c);

@@ -265,25 +265,43 @@ async fn message_handler(
         return Ok(StatusCode::ACCEPTED.into_response());
     }
 
-    // Wait for the first response whose id matches one of the forwarded
-    // requests. Lagged subscribers simply skip (older messages are stale).
+    // Wait for responses. A single-request POST returns the matching
+    // Response object; a BATCH must collect EVERY expected id and return a
+    // JSON array (JSON-RPC 2.0 §6) — returning only the first match left the
+    // other N−1 responses lost on the channel with no SSE subscriber.
+    //
+    // `is_batch` is derived from the REQUEST SHAPE (a JSON array body), not
+    // from the number of matched ids: a one-element batch `[{id:1}]` must
+    // still get a one-element array reply per §6.
+    let is_batch = bytes.starts_with(b"[");
     let matched = tokio::time::timeout(POST_RESPONSE_TIMEOUT, async {
-        loop {
+        let mut collected: Vec<JSONRPCMessage> = Vec::new();
+        let mut remaining = expected_ids.clone();
+        while !remaining.is_empty() {
             match response_rx.recv().await {
-                Ok(JSONRPCMessage::Response(resp)) if expected_ids.contains(&resp.id) => {
-                    break Some(JSONRPCMessage::Response(resp));
+                Ok(JSONRPCMessage::Response(resp)) if remaining.contains(&resp.id) => {
+                    remaining.retain(|id| id != &resp.id);
+                    collected.push(JSONRPCMessage::Response(resp));
                 }
                 Ok(_) => continue, // another request's response; keep waiting
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break None,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
+        collected
     })
     .await;
 
     match matched {
-        Ok(Some(resp)) => {
-            let json = serde_json::to_string(&resp)
+        Ok(collected) if !collected.is_empty() => {
+            let body_value = if is_batch {
+                serde_json::to_value(&collected)
+            } else {
+                // Single request: preserve the object (not a 1-element array).
+                serde_json::to_value(collected.into_iter().next().expect("non-empty"))
+            }
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
+            let json = serde_json::to_string(&body_value)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")))?;
             Ok(axum::response::Response::builder()
                 .status(StatusCode::OK)

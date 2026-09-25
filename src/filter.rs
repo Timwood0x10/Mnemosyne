@@ -48,11 +48,18 @@ const CHATTER_PHRASES: &[&str] = &[
 /// Boundary-aware prefix match for chatter phrases.
 ///
 /// Returns `true` when `text` starts with `phrase` AND the next character
-/// (if any) is non-alphanumeric. This treats `"hi there"` as chatter but
-/// lets `"hi, how do I parse JSON?"` pass through.
+/// (if any) is non-alphanumeric. A trailing question (`?`/`？`) is NEVER
+/// chatter: the remainder after the prefix is a real question, so
+/// `"hi, how do I parse JSON?"` and `"ok, how do I fix the crash?"` pass
+/// through (the docstring example was previously swallowed by the prefix
+/// rule alone).
 #[must_use]
 fn matches_chatter_prefix(text: &str, phrase: &str) -> bool {
     if !text.starts_with(phrase) {
+        return false;
+    }
+    // A question after the chatter word is substantive content.
+    if text.contains('?') || text.contains('？') {
         return false;
     }
     match text[phrase.len()..].chars().next() {
@@ -85,7 +92,9 @@ impl NoiseFilter {
         if trimmed.is_empty() {
             return true;
         }
-        if trimmed.len() < MIN_MEANINGFUL_LENGTH {
+        // Character count for the MIN gate (char-oriented threshold); byte
+        // length for the MAX payload cap.
+        if trimmed.chars().count() < MIN_MEANINGFUL_LENGTH {
             return true;
         }
         if trimmed.len() > MAX_MESSAGE_LENGTH {

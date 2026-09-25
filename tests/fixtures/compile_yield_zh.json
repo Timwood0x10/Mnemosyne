@@ -14,11 +14,11 @@
       "id": 1,
       "title": "初次见面",
       "lines": [
-        { "text": "你好呀，我叫小林，26 岁，在杭州做后端开发", "tier": "should_catch", "expect": ["identity", "occupation"] },
+        { "text": "你好呀，我叫小林，26 岁，在杭州做后端开发", "tier": "must_catch", "expect": ["identity"] },
         { "text": "我特别喜欢做饭，周末基本都泡在厨房", "tier": "must_catch", "expect": ["preference"] },
         { "text": "不太喜欢人多的地方，容易紧张", "tier": "must_catch", "expect": ["preference", "emotion"] },
-        { "text": "我养了一只猫，叫豆豆", "tier": "should_catch", "expect": ["relationship"] },
-        { "text": "平时会去爬山，算是为数不多的爱好", "tier": "should_catch", "expect": ["interest"] }
+        { "text": "我养了一只猫，叫豆豆", "tier": "must_catch", "expect": ["relationship"] },
+        { "text": "平时会去爬山，算是为数不多的爱好", "tier": "must_catch", "expect": ["interest"] }
       ]
     },
     {
@@ -101,9 +101,20 @@
       "id": 8,
       "title": "习惯与身体状态",
       "lines": [
-        { "text": "每天都要喝两杯咖啡，不喝就头疼", "tier": "must_catch", "expect": ["emotion"] },
+        { "text": "每天都要喝两杯咖啡，不喝就头疼", "tier": "must_catch", "expect": ["emotion", "habit"] },
         { "text": "最近老熬夜，白天困得不行", "tier": "must_catch", "expect": ["emotion"] },
         { "text": "腰疼好几天了，坐久了更难受", "tier": "must_catch", "expect": ["emotion"] }
+      ]
+    },
+    {
+      "id": 9,
+      "title": "自述通道（身份 / 关系 / 爱好 / 习惯）",
+      "lines": [
+        { "text": "我叫阿哲，今年 31 岁", "tier": "must_catch", "expect": ["identity"] },
+        { "text": "我在北京做产品经理，平时挺忙的", "tier": "must_catch", "expect": ["identity"] },
+        { "text": "我有个哥哥在深圳工作", "tier": "must_catch", "expect": ["relationship"] },
+        { "text": "我每周都去打羽毛球", "tier": "must_catch", "expect": ["habit"] },
+        { "text": "我的爱好是拍照，喜欢拍街景", "tier": "must_catch", "expect": ["interest"] }
       ]
     }
   ],

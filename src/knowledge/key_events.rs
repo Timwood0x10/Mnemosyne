@@ -101,7 +101,13 @@ pub async fn extract_key_events(
     let doc_id = match doc_title {
         Some(title) => match store.find_document_by_title(title).await? {
             Some(doc) => Some(doc.id),
-            None => None,
+            // A supplied-but-missing title must NOT silently degrade to a
+            // global search across every document (wrong-doc evidence).
+            None => {
+                return Err(crate::error::Error::NotFound(format!(
+                    "document `{title}` not found"
+                )));
+            }
         },
         None => None,
     };
@@ -117,10 +123,14 @@ pub async fn extract_key_events(
     };
 
     // Full trajectory: every edge touching this entity, time-ordered.
+    // Endpoint direction guard: inverted edges have the person as
+    // `target_id`; treating that as the event would score the person's own
+    // neighbours as participants (same guard as inspect_entity_query).
     let edges = store.get_edges_touching(object.id).await?;
     let participated: Vec<&KnowledgeEdge> = edges
         .iter()
         .filter(|e| e.predicate == "participated_in")
+        .filter(|e| e.source_id == object.id)
         .collect();
     let total_events = participated.len();
 

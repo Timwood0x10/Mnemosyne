@@ -65,9 +65,42 @@ impl ToolHandler for PersonaInjectTool {
             .unwrap_or("default");
         let format = args.get("format").and_then(Value::as_str).unwrap_or("json");
 
-        // Resolve the agent entity and read its accumulated facts, then
-        // aggregate a persona card from the `agent_personality`-tagged ones.
-        let entity_id = self.fact_store.resolve_agent(tenant_id, agent_id)?;
+        // READ-ONLY lookup: find_entity, not resolve_agent (which creates a
+        // row for a typo'd agent_id on a documented read-only tool).
+        let agent_norm = if agent_id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            agent_id.trim().to_string()
+        };
+        let agent_name = if agent_norm == "default" {
+            "Agent".to_string()
+        } else {
+            format!("Agent:{agent_norm}")
+        };
+        let agent_key = format!("agent:{agent_norm}");
+        let entity_id =
+            match self
+                .fact_store
+                .find_entity(tenant_id, Some(&agent_key), &agent_name)?
+            {
+                Some((id, _, _)) => id,
+                None => {
+                    // Unknown agent: empty fact list, no entity is created.
+                    let mut card = build_persona_card_from_facts(tenant_id, agent_id, &[]);
+                    if let Some(entry) = lookup_persona_card(
+                        &load_persona_cards(&self.cards_path)?,
+                        tenant_id,
+                        agent_id,
+                    ) {
+                        card = merge_persona_card_file(card, &entry);
+                    }
+                    let payload = match format {
+                        "text" => render_text(&card),
+                        _ => render_json(tenant_id, agent_id, &card),
+                    };
+                    return Ok(ToolCallResult::text(payload));
+                }
+            };
         let facts = self.fact_store.get_facts(entity_id)?;
         let mut card = build_persona_card_from_facts(tenant_id, agent_id, &facts);
 

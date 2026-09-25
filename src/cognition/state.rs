@@ -141,7 +141,12 @@ impl StateEngine {
         let extensions = self
             .aggregators
             .iter()
-            .map(|aggregator| aggregator.aggregate(facts))
+            // Pass the SORTED copy: order-dependent aggregators (e.g.
+            // EmotionAggregator's last-insert-wins) must see the same
+            // chronological order the built-in projections use. Passing the
+            // caller's raw `facts` made extension trends nondeterministic
+            // when input order was not already chronological.
+            .map(|aggregator| aggregator.aggregate(&chronological))
             .collect();
 
         EntityState {
@@ -204,18 +209,13 @@ impl Default for StateEngine {
 /// folds facts into state intervals, so the current state and the state history
 /// agree on what "the same state" means.
 ///
-/// **Negated facts are skipped**: this projection answers "what does the entity
-/// currently like / want / have?", and the model has no field for an explicitly
-/// rejected state. A negated fact lives in the state *history* instead, where
-/// `StateInterval` folds on `(value, negated)` so the change becomes a
-/// `StanceFlip`. Without this filter, "我不喜欢应酬" would be reported as a
-/// *preference* for 应酬 — the exact opposite of what was said.
+/// **Negation is applied AFTER bucketing**: filter-negated-first left the
+/// stale affirmative fact as "current" after a stance flip (the newer negated
+/// fact was skipped entirely), so `aggregate()` asserted the opposite of the
+/// latest stance while `aggregate_intervals` correctly showed the flip.
 fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> Vec<Fact> {
     let mut latest = std::collections::BTreeMap::new();
-    for fact in facts
-        .iter()
-        .filter(|fact| fact.fact_type == fact_type && !fact.negated())
-    {
+    for fact in facts.iter().filter(|fact| fact.fact_type == fact_type) {
         let semantic_key = keys
             .iter()
             .find_map(|key| fact.payload.get(*key).and_then(|value| value.as_str()))
@@ -223,7 +223,14 @@ fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> 
             .unwrap_or_else(|| {
                 serde_json::to_string(&fact.payload).unwrap_or_else(|_| "{}".to_string())
             });
+        // Newest wins (facts are already chronological).
         latest.insert(semantic_key, fact.clone());
     }
-    latest.into_values().collect()
+    // Drop buckets whose newest fact is negated: the projection answers
+    // "what does the entity currently like / want / have?", and a negated
+    // latest means there is no affirmative current state for that topic.
+    latest
+        .into_values()
+        .filter(|fact| !fact.negated())
+        .collect()
 }

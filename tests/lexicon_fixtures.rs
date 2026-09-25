@@ -48,9 +48,13 @@ fn chinese_fixture_compiles_expected_entities_and_events() {
 
     let chunks = chunk::plan(text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);
-    let sent_texts: Vec<&str> = sentences.iter().map(|s| s.text.as_str()).collect();
+    // Pass absolute byte spans so Events can carry evidence-traceable offsets.
+    let sent_spans: Vec<(&str, usize, usize)> = sentences
+        .iter()
+        .map(|s| (s.text.as_str(), s.start_offset, s.end_offset))
+        .collect();
     let config = extract::Config::from_language(&lang);
-    extract::compile(&mut context, &sent_texts, &dict, &config, Some(&resolver));
+    extract::compile(&mut context, &sent_spans, &dict, &config, Some(&resolver));
 
     let names: Vec<&str> = context.entities.iter().map(|e| e.name.as_str()).collect();
     for expected in ["刘备", "关羽", "张飞", "曹操"] {

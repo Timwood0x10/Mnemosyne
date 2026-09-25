@@ -236,6 +236,10 @@ impl SQLiteVecStore {
         }
         let conn =
             Connection::open(path).map_err(|e| StorageError::Schema(format!("open: {e}")))?;
+        // busy_timeout: several connections share one DB file (vec + fact +
+        // knowledge); without it a concurrent writer gets SQLITE_BUSY
+        // immediately (0 ms default).
+        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             dim,
@@ -250,6 +254,7 @@ impl SQLiteVecStore {
         }
         let conn = Connection::open_in_memory()
             .map_err(|e| StorageError::Schema(format!("open_in_memory: {e}")))?;
+        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             dim,
@@ -318,6 +323,37 @@ impl SQLiteVecStore {
             let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
             conn.execute_batch(&vec_sql)
                 .map_err(|e| StorageError::Schema(format!("init vec: {e}")))?;
+            // Backfill existing rows so a dimension change (or a DB that
+            // already had `memories.vector`) does not silently hide every
+            // memory from vector search. Rows whose stored vector length
+            // differs from `self.dim` are rejected by sqlite-vec; insert them
+            // one by one and skip mismatches so open() still succeeds.
+            let rows: Vec<(String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT id, vector FROM memories WHERE vector IS NOT NULL AND vector != '[]'",
+                )?;
+                let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                mapped.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            for (id, vector_json) in rows {
+                let parsed: Vec<f32> = match serde_json::from_str(&vector_json) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if parsed.len() != self.dim {
+                    tracing::warn!(
+                        %id,
+                        stored_dim = parsed.len(),
+                        expected = self.dim,
+                        "vec backfill skipped: dimension mismatch"
+                    );
+                    continue;
+                }
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
+                    params![id, vector_json],
+                );
+            }
         } else {
             conn.execute_batch(FTS_SCHEMA)
                 .map_err(|e| StorageError::Schema(format!("init fts: {e}")))?;

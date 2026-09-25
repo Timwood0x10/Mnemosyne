@@ -6,11 +6,12 @@
 //! **real** compiler over an annotated corpus of colloquial companion dialogue
 //! (`tests/fixtures/compile_yield_zh.json`) and reports:
 //!
-//! - `must_catch` recall: explicit signals the marker table is designed for.
-//!   This is a regression floor, not an aspiration.
+//! - `must_catch` recall: explicit signals the engine is designed for — the
+//!   observation marker table plus the self-disclosure channel. This is a
+//!   regression floor, not an aspiration.
 //! - `should_catch` recall: what a human would expect the engine to remember but
-//!   the current mechanism may not reach (identity/relationship/interest,
-//!   indirect statements, capitalised English). Measured, not asserted.
+//!   the current mechanisms may not reach (indirect statements such as
+//!   "房东突然要涨租"). Measured, not asserted.
 //! - phantom rate: filler and small talk must produce **zero** facts.
 //! - over-extraction: facts on an annotated line whose type the annotation does
 //!   not accept.
@@ -38,11 +39,13 @@ const CORPUS: &str = concat!(
 /// this test). They exist to catch silent quality regressions when marker tables
 /// or extraction rules change — raise them as the engine improves.
 ///
-/// Baseline 2026-09-23: `must_catch` 30/30 (100%), `should_catch` 2/9 (22%),
+/// Baseline 2026-09-24: `must_catch` 38/38 (100%), `should_catch` 2/6 (33%),
 /// phantoms 0/9. The `must_catch` floor is deliberately at 100%: an explicit
-/// signal ("我特别喜欢吃…") must never silently stop producing a fact.
+/// signal ("我特别喜欢吃…", "我叫小林") must never silently stop producing a fact.
+/// Every remaining `should_catch` gap is an *indirect* statement
+/// ("房东突然说要涨租") that needs an event template, not a marker.
 const MUST_CATCH_RECALL_PCT: usize = 100;
-const SHOULD_CATCH_RECALL_PCT: usize = 22;
+const SHOULD_CATCH_RECALL_PCT: usize = 33;
 
 /// One annotation tier.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -124,18 +127,23 @@ fn lines(document: &Value) -> Vec<Line> {
 }
 
 /// Compile one line and assert the per-fact invariants.
+///
+/// Every fact must be traceable: the evidence anchor carries the source sentence,
+/// and `content` carries a readable value (the whole sentence for observation
+/// facts, the disclosed value — "小林", "杭州" — for self-disclosures).
 fn compile_line(line: &str, time: i32) -> Vec<mnemosyne::cognition::Fact> {
     let facts = compile_user_facts(&[Message::new("user", line)], 7, time);
     for fact in &facts {
         assert_eq!(
-            fact.payload["content"].as_str(),
-            Some(line),
-            "every fact must carry the sentence it came from, got {fact:?}"
-        );
-        assert_eq!(
             fact.payload["evidence"]["text"].as_str(),
             Some(line),
             "every fact must carry a traceable evidence anchor, got {fact:?}"
+        );
+        assert!(
+            fact.payload["content"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty()),
+            "every fact must carry a readable value, got {fact:?}"
         );
     }
     facts

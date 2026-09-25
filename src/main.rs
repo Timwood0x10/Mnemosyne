@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 
 use mnemosyne::character::SQLiteCharacterStore;
 use mnemosyne::config::{CliArgs, Command, EmbeddingProvider};
+use mnemosyne::config_check::config_check;
 use mnemosyne::decay::{DecayConfig, run_decay_loop};
 use mnemosyne::distiller::{DistillationConfig, PipelineDistiller};
 #[cfg(feature = "remote-embed")]
@@ -410,13 +411,19 @@ async fn build_server(
         let decay_config = Arc::new(DecayConfig::load());
         let decay_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         tokio::spawn(async move {
-            let _ = run_decay_loop(
+            // Do NOT swallow the error: `run_decay_loop` returns on the first
+            // storage failure, and a silent `let _ =` left the "decay enabled"
+            // log true while no further pass ever ran.
+            if let Err(e) = run_decay_loop(
                 decay_store.clone(),
                 decay_config,
                 std::time::Duration::from_secs(interval_secs),
                 decay_stop,
             )
-            .await;
+            .await
+            {
+                tracing::error!(error = %e, "background decay loop terminated");
+            }
         });
         tracing::info!("background memory decay enabled: every {interval_secs}s");
     }
@@ -552,9 +559,6 @@ async fn build_server(
             }),
         )
         .await;
-    let fact_store_knowledge = Arc::new(
-        SqliteFactStore::open(&cfg.db_path).context("open fact store for knowledge tools")?,
-    );
     // Shared cross-source entity linker (external-knowledge-plan §D3). Starts
     // empty; `knowledge_attach` (Phase E) rebuilds it after attaching a
     // source. `inspect_entity` reads it to resolve external surface names to
@@ -562,10 +566,14 @@ async fn build_server(
     let entity_linker: Arc<std::sync::RwLock<mnemosyne::knowledge::EntityLinker>> = Arc::new(
         std::sync::RwLock::new(mnemosyne::knowledge::EntityLinker::new()),
     );
+    // Share ONE fact-store connection with the knowledge tools: a second
+    // `SqliteFactStore::open` on the same file created a second write
+    // connection that raced the shared one (busy_timeout now mitigates the
+    // SQLITE_BUSY, but one connection is still the intended design).
     builder = register_knowledge_tools(
         builder,
         kstore.clone(),
-        fact_store_knowledge.clone(),
+        shared_fact_store.clone(),
         Some(entity_linker.clone()),
     )
     .await;
@@ -582,7 +590,7 @@ async fn build_server(
         external_registry,
         entity_linker,
         kstore.clone(),
-        fact_store_knowledge,
+        shared_fact_store.clone(),
     )
     .await;
 
@@ -665,6 +673,18 @@ async fn main() -> AnyhowResult<()> {
     let http_addr = cli.http_addr.clone();
     let http_token = cli.http_token.clone();
     match cli.command {
+        Some(Command::ConfigCheck) => {
+            // Print to stdout (this is the command's whole output) and fail the
+            // process when the marker table cannot be trusted, so the check can
+            // gate a deployment from a script.
+            let check = config_check();
+            for line in &check.lines {
+                println!("{line}");
+            }
+            if check.exit_code != 0 {
+                std::process::exit(check.exit_code);
+            }
+        }
         Some(Command::Serve) | None => {
             let cfg = cli.into_config().context("load configuration")?;
             let (server, _distiller, _engine) = build_server(&cfg).await?;

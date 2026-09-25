@@ -522,6 +522,77 @@ async fn three_state_evolution_chain_carries_its_evidence() {
     );
 }
 
+/// Objective: Verify a self-introduction reaches the state layer over the real
+/// MCP path. The observation marker table can only emit preference/goal/emotion/
+/// event, so "who is this person" used to be invisible; the self-disclosure
+/// channel now types it as `Identity` + `attribute`, which is what the identity
+/// dimension of `state_timeline` reads.
+/// Invariants: the identity dimension exists and carries the disclosed name and
+/// occupation as separate attributes.
+#[tokio::test]
+async fn self_introduction_lands_in_the_identity_dimension() {
+    let store = Arc::new(SqliteFactStore::open_in_memory().expect("open fact store"));
+    let server = ServerBuilder::new(Implementation {
+        name: "mnemosyne-e2e".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    })
+    .tool(
+        memory_compile_definition(),
+        Arc::new(MemoryCompileTool::new(None, store.clone())),
+    )
+    .await
+    .tool(
+        state_timeline_definition(),
+        Arc::new(StateTimelineTool::new(store.clone())),
+    )
+    .await
+    .build();
+
+    let compiled = call_tool(
+        &server,
+        1,
+        "memory_compile",
+        json!({
+            "tenant_id": "tenant-a",
+            "user_id": "erin",
+            "messages": [{"role": "user", "content": "你好，我叫小林，26 岁，在杭州做后端开发"}]
+        }),
+    )
+    .await;
+    let entity_id = compiled["cognition"]["user_entity_id"]
+        .as_i64()
+        .expect("memory_compile must report the resolved user entity id");
+
+    let timeline = call_tool(
+        &server,
+        2,
+        "state_timeline",
+        json!({ "entity_id": entity_id, "dimension": "identity" }),
+    )
+    .await;
+    let dimensions = timeline["dimensions"]
+        .as_array()
+        .expect("state_timeline returns a dimensions array");
+    assert_eq!(
+        dimensions.len(),
+        1,
+        "the self-introduction must produce an identity dimension, got {timeline}"
+    );
+    let intervals = dimensions[0]["intervals"]
+        .as_array()
+        .expect("the identity dimension carries intervals");
+    let attribute = |name: &str| {
+        intervals
+            .iter()
+            .find(|interval| interval["value"]["attribute"] == name)
+            .unwrap_or_else(|| {
+                panic!("missing the `{name}` attribute in the identity dimension: {timeline}")
+            })
+    };
+    assert_eq!(attribute("name")["value"]["content"], "小林");
+    assert_eq!(attribute("occupation")["value"]["content"], "后端开发");
+}
+
 /// Objective: Verify the decision loop CLOSES over the real MCP path: the host
 /// declares what happened to a compiled commitment and the read tools report the
 /// recorded outcome. Before this path existed a decision stayed `open` forever,

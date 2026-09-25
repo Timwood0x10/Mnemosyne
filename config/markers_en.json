@@ -12,7 +12,14 @@
       "life_event": "major life event (moved/quit/breakup/married)",
       "feel": "emotion / body state"
     },
-    "note": "Markers match case-sensitively with `find`; lowercase covers the common case ('I love it', 'she plans to'). Multi-word markers (burned out, heartbroken) avoid single-word false positives."
+    "note": "Markers match case-sensitively with `find`; lowercase covers the common case ('I love it', 'she plans to'). Multi-word markers (burned out, heartbroken) avoid single-word false positives.",
+    "user_tables": {
+      "where": "any *.user.json in this directory (e.g. markers_en.user.json)",
+      "behaviour": "its words are appended to this table; a `_remove` object in the same file deletes existing words (a removal that matches nothing is reported)",
+      "why": "upgrades overwrite this file, so keep customisation in a .user.json file",
+      "check": "run `mnemosyne config-check` to see the effective word counts, every removed/ignored entry and any error",
+      "limits": "a bucket name must be one of the actions the engine defines: the keys above plus a few aliases (prefer/hate/喜欢/准备). An unknown bucket is rejected and reported by the self-check instead of silently becoming an Event fact"
+    }
   },
   "love": ["love", "adore", "cherish", "treasure", "worship", "obsessed with", "crush on", "stan"],
   "like": [
@@ -194,7 +201,6 @@
     "pressure",
     "stress",
     "worry",
-    "afraid",
     "sleepy",
     "vibing",
     "cringe",

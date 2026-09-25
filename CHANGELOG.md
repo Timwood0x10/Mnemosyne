@@ -134,6 +134,14 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `outcome`, so every decision stayed `open` forever. Nothing is inferred from the
   conversation, the first outcome recorded wins, and unknown ids come back as
   `missing` instead of failing the call.
+- **Self-disclosure channel.** `src/self_disclosure.rs` compiles what the user says
+  about *themselves* — name / age / occupation / city (`Identity` + `attribute`),
+  family and pets (`Relationship` + `target`), interests (`Interest`) and habits
+  (`Habit`). The observation marker table can only ever emit preference / goal /
+  emotion / event, so "我叫小林，26 岁，在杭州做后端开发" produced **nothing** before;
+  measured recall on those lines was 0% (now 100%). Rule-driven and LLM-free:
+  explicit cue plus a closed list (family terms, role suffixes), and no fact when
+  the cue yields no usable value — "我是说真的" is not an occupation.
 - **Compile-yield measurement.** `tests/compile_yield.rs` drains an annotated
   corpus of colloquial companion dialogue
   (`tests/fixtures/compile_yield_zh.json`) through the real compiler and reports
@@ -152,6 +160,20 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   by a raw id, which says nothing about ownership. When a caller supplies the
   tenant, the subject must belong to it and a mismatch is reported as not-found —
   never as a permission error, which would confirm that the id exists.
+- **User marker tables (`config/*.user.json`).** Any file ending in
+  `.user.json` in `config/` is merged onto the shipped tables in file-name
+  order, and a `_remove` object inside a file deletes already-merged words —
+  the only way to switch off a shipped default that misfires in a domain. Both
+  facts about the merge are reported rather than assumed: a removal that matches
+  nothing (usually a typo) is listed, and a later file can add a word back.
+- **`mnemosyne config-check`.** Prints the resolved resource root, which marker
+  files were read, what each contributed, the effective word count per action,
+  every removed / ignored / duplicated entry, and the presence of every other
+  `config/` file the runtime reads. Exits non-zero when the marker table cannot
+  be trusted, so it works as a pre-deploy gate. `config/` also gained the two
+  shipped reference tables' `_meta.user_tables` notes, and the resources are
+  documented in `docs/zh/configuration.md` and both READMEs (including
+  `MNEMOSYNE_HOME`, which had never been written down).
 
 ### Fixed
 
@@ -197,6 +219,14 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that plan. Negated goals are now kept as `negated: true`; ELITE_LEXICON_PLAN
   §13.3 (never an *affirmative* goal) is guaranteed by the flag plus the
   affirmative-only current-state projection, not by discarding the fact.
+- **The user-fact pipeline existed twice, and the new channel was wired into only
+  one of them.** `CognitionCompiler::compile_conversation` (the `memory_compile`
+  path) inlined `compile_user_observations` + `user_facts_from_observations`
+  instead of calling `compile_user_facts`, so a self-introduction produced zero
+  identity facts over MCP while the corpus test — which drives the shared entry
+  point — reported 100%. Both callers now go through one
+  `user_facts_from_channels`, which the corpus harness and the MCP end-to-end test
+  each cover.
 - **Cognitive-state transitions were unreachable on production data.**
   `gradual_change` required a `keyword` payload field while the comparison text
   came from `content`, and no compiler emits both — so the plan's own example
@@ -256,6 +286,9 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`conversation_compiler`'s tests moved to a sibling file** (`mod tests;`), so
+  neither `mod.rs` nor `tests.rs` crosses the 1000-line rule while the tests keep
+  private access to the module.
 - **Large modules split to satisfy the one-file-per-1000-lines rule.**
   `fact_store`, `cognition`, `store`, `retrieval`, `conversation_compiler`,
   `character`, `distiller`, `lexicon`, `knowledge/store` and
@@ -354,6 +387,38 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`Config::from_env` validates its result.** It now returns `Result<Self>`
   and runs `validate()`; invalid environment configuration surfaces as an
   error rather than a silently broken server.
+- **A mistyped marker bucket silently produced the wrong fact type.** The
+  loader accepted any bucket name and `verb_to_fact_type` mapped unknown verbs
+  to `Event`, so `"feell": ["emo"]` compiled an *event* where the user asked for
+  an *emotion* — no error, no warning. Bucket names are now checked against
+  `observation_compiler::OBSERVATION_ACTIONS` (the single table that also drives
+  the mapping), an unknown bucket is dropped, and the check reports it with the
+  allowed list. The same table is what makes `belief` / `stuck` / `life_event`
+  explicit instead of accidental: all three are documented as `Event` facts
+  rather than relying on a fallthrough.
+- **The built-in marker fallback had drifted from the tables it claimed to
+  mirror.** The in-code copy held 91 words against the shipped files' 419 and
+  contained none of the `belief` / `stuck` / `life_event` buckets, so a
+  config-less deployment quietly produced a fraction of the facts. The fallback
+  is now a small, documented safety net used only when *no* file can be read,
+  and a test pins it to a subset of the shipped vocabulary and to documented
+  actions.
+- **Marker tables could only ever grow, and only by editing shipped files.**
+  Combined with upgrades overwriting `config/`, a domain-specific false positive
+  could not be switched off. `.user.json` tables and `_remove` fix both halves;
+  a missing marker file is now warned about instead of silently shrinking the
+  vocabulary, and the one exact duplicate the shipped tables carried
+  (`afraid`, twice under `feel`) was removed.
+- **`trace_path` panicked on a broken traversal invariant.** The path
+  reconstruction used `expect("on path")` / `expect("non-source node has an
+  incoming edge")` inside a request handler; a future change to the BFS
+  bookkeeping would have taken the server down for every client instead of
+  failing that one call. Both are now `Error::Internal`.
+- **Two `collapsible_match` warnings.** `persona::inject` collapses its
+  fact-type match arms into guarded patterns (same semantics: a failed guard
+  falls through to the no-op arm), and the relationship merge drops a
+  branch that was already provably dead (`(_, Value::Object(_))` cannot be
+  null).
 
 ### Changed
 
@@ -367,6 +432,10 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   6: `memory_distill`, `memory_compile`, `memory_search`, `memory_store`,
   `memory_feedback`, `memory_stats`).
 - Clarified capacity control caps `Knowledge` memories per tenant.
+- Documented the `config/` resource tree and `MNEMOSYNE_HOME` (the resource-root
+  override was implemented but never written down), including which files are
+  optional and how to customise the marker vocabulary without editing a shipped
+  file.
 
 ## [0.1.0] - 2026-07-xx
 

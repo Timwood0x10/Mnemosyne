@@ -46,6 +46,32 @@ mod fallback;
 
 use fallback::fallback_config;
 
+/// Shared C1/C3/C4 gates (shape, no function words, no noun tail).
+/// Returns `None` when a gate fails; `Some(())` when the soft checks pass.
+fn soft_gates_pass(name: &str) -> Option<()> {
+    let chars: Vec<char> = name.chars().collect();
+    // C1: shape.
+    if !(2..=4).contains(&chars.len()) {
+        return None;
+    }
+    if !chars.iter().all(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
+        return None;
+    }
+    let cfg = &*CONFIG;
+    // C3: function words anywhere.
+    if chars
+        .iter()
+        .any(|c| cfg.function_words.iter().any(|w| w.starts_with(*c)))
+    {
+        return None;
+    }
+    // C4: noun tail.
+    if cfg.noun_tails.iter().any(|t| name.ends_with(t.as_str())) {
+        return None;
+    }
+    Some(())
+}
+
 /// Validate that a heuristically discovered entity name looks like a real
 /// person name. Four gates, conservative by design:
 ///
@@ -58,30 +84,11 @@ use fallback::fallback_config;
 /// built-in fallback keeps the validator functional when the file is absent.
 #[must_use]
 pub fn is_valid_person_name(name: &str) -> bool {
-    let chars: Vec<char> = name.chars().collect();
-    // C1: shape.
-    if !(2..=4).contains(&chars.len()) {
-        return false;
-    }
-    if !chars.iter().all(|c| ('\u{4e00}'..='\u{9fff}').contains(c)) {
+    if soft_gates_pass(name).is_none() {
         return false;
     }
     let cfg = &*CONFIG;
-    // C3: function words anywhere.
-    if chars
-        .iter()
-        .any(|c| cfg.function_words.iter().any(|w| w.starts_with(*c)))
-    {
-        return false;
-    }
-    // C4: noun tail.
-    if cfg
-        .noun_tails
-        .iter()
-        .any(|tail| name.ends_with(tail.as_str()))
-    {
-        return false;
-    }
+    let chars: Vec<char> = name.chars().collect();
     // C2: surname-led (check 2-char compound first, then single char).
     let head2: String = chars[..chars.len().min(2)].iter().collect();
     if cfg.surnames.contains(&head2) {
@@ -89,6 +96,18 @@ pub fn is_valid_person_name(name: &str) -> bool {
     }
     let first = chars[0].to_string();
     cfg.surnames.contains(&first)
+}
+
+/// Soft person-name check for corpus speaker discovery: same C1/C3/C4 gates
+/// as [`is_valid_person_name`] but WITHOUT requiring a known surname.
+///
+/// Literary given names used as dialogue speakers ("流苏说道") often have no
+/// standard surname; requiring C2 rejected the entire cast of 倾城之恋 while
+/// still needed to stop garbage like "感觉". Frequency + NON_NAMES still apply
+/// at the call site.
+#[must_use]
+pub fn is_plausible_person_name(name: &str) -> bool {
+    soft_gates_pass(name).is_some()
 }
 
 #[cfg(test)]
@@ -135,5 +154,28 @@ mod tests {
         assert!(!is_valid_person_name("牛角"), "noun tail rejected");
         assert!(!is_valid_person_name("文明载体"), "phrase tail 体 rejected");
         assert!(!is_valid_person_name("一"), "single char rejected");
+    }
+
+    /// Objective: Verify the soft corpus gate accepts literary given names
+    /// without a surname while still rejecting function-word/noun garbage.
+    /// Invariants: 流苏/感觉-path: 流苏 soft-passes; 的-tail and 角-tail fail.
+    #[test]
+    fn soft_gate_accepts_literary_names() {
+        assert!(
+            is_plausible_person_name("流苏"),
+            "literary given name 流苏 accepted by soft gate"
+        );
+        assert!(
+            is_plausible_person_name("玄德"),
+            "courtesy name 玄德 accepted by soft gate"
+        );
+        assert!(
+            !is_plausible_person_name("涓的秘密"),
+            "function-word tail still rejected"
+        );
+        assert!(
+            !is_plausible_person_name("牛角"),
+            "noun tail still rejected"
+        );
     }
 }

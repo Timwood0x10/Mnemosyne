@@ -66,6 +66,21 @@ impl ToolHandler for MemoryDecayTool {
         // Scope the sweep to the requested tenant: without this, an omitted
         // entity_id made the tool decay facts across EVERY tenant in the
         // database, ignoring the advertised tenant namespace.
+        //
+        // When entity_id IS supplied, `run_decay_pass` previously skipped the
+        // tenant filter entirely (vec![id]) — a cross-tenant write. Enforce
+        // ownership ONLY when the caller explicitly passed `tenant_id`
+        // (legacy callers / tests that send only `entity_id` keep working);
+        // a guessed id under an explicit foreign tenant reports NotFound.
+        if let Some(id) = entity_id
+            && args.get("tenant_id").and_then(Value::as_str).is_some()
+        {
+            crate::mcp::tenant_scope::ensure_entity_tenant(
+                self.fact_store.as_ref(),
+                id,
+                Some(tenant_id),
+            )?;
+        }
         let stats = run_decay_pass(
             self.fact_store.as_ref(),
             &config,

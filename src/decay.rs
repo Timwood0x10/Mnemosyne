@@ -344,6 +344,11 @@ pub fn run_decay_pass(
                 store.set_decay(fact_id, assessment.decay_score, true)?;
                 stats.archived += 1;
             } else {
+                // Persist the FRESH assessment too: a raised TTL (or a
+                // previously forced archive) left stale `archived=1` rows
+                // while this pass reported `kept`, so `list_archived` kept
+                // returning facts the current policy considers fresh.
+                store.set_decay(fact_id, assessment.decay_score, false)?;
                 stats.kept += 1;
             }
         }
@@ -380,11 +385,21 @@ pub async fn run_decay_loop(
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
+        // spawn_blocking: the pass is fully synchronous rusqlite work; running
+        // it on the tokio worker blocks every other task on that worker for
+        // the whole multi-entity sweep (classic sync-I/O-in-async).
+        let store = store.clone();
+        let config = config.clone();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| Error::Internal(e.to_string()))?
             .as_secs() as i64;
-        run_decay_pass(&store, &config, None, None, false, now)?;
+        let pass = tokio::task::spawn_blocking(move || {
+            run_decay_pass(&store, &config, None, None, false, now)
+        })
+        .await
+        .map_err(|e| Error::Internal(format!("decay pass join: {e}")))??;
+        let _ = pass;
     }
 }
 

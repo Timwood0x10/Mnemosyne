@@ -181,6 +181,14 @@ pub fn agent_personality_facts_from_messages(
                 "attribution": AGENT_PERSONALITY_ATTRIBUTION,
                 "content": msg.content,
                 "negated": marker.negated,
+                // Standard EvidenceRef so insert paths create a real evidence
+                // row — persona facts previously always had evidence_id NULL.
+                "evidence": {
+                    "doc_id": 0,
+                    "offset": msg.content.find(marker.marker).unwrap_or(0),
+                    "length": marker.marker.len(),
+                    "text": msg.content,
+                },
             }),
             evidence_id: None,
             created_at: i64::from(logical_time),

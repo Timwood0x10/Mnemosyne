@@ -138,10 +138,11 @@ impl<'a> Migrator<'a> {
         let result = self.migrate_inner(&snapshot).await;
         match &result {
             Ok(_) => {
-                // Best-effort re-enable FKs first (outside the transaction);
-                // if commit then fails we still surface it.
-                let _ = self.knowledge.set_foreign_keys_enabled(true).await;
+                // COMMIT first: `PRAGMA foreign_keys` is a documented no-op
+                // inside an open transaction, so re-enabling BEFORE commit
+                // left FK enforcement OFF for the connection's lifetime.
                 self.knowledge.commit_transaction().await?;
+                let _ = self.knowledge.set_foreign_keys_enabled(true).await;
             }
             Err(_) => {
                 // Discard partial writes, then restore FK enforcement.

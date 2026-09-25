@@ -302,7 +302,11 @@ impl RelationshipStore {
                         if has_negative_emotion(&msg.content) {
                             intimacy -= NEGATIVE_DELTA;
                         }
-                    } else {
+                    } else if msg.is_assistant() {
+                        // Only the ASSISTANT's own speech moves the bond with
+                        // the lighter agent weight. The previous `else` also
+                        // matched system/tool messages, so a system reminder
+                        // containing "谢谢" or "压力" silently shifted intimacy.
                         if has_positive_emotion(&msg.content) {
                             intimacy += AGENT_POSITIVE_DELTA;
                         }
@@ -320,7 +324,14 @@ impl RelationshipStore {
                     intimacy,
                     stage: RelationshipStage::from_intimacy(intimacy),
                     emotion_trend: EmotionTrend::from_delta(intimacy - current.intimacy),
-                    recent_topics: extract_recent_topics(messages),
+                    // UNION with previous topics: replacing discarded every
+                    // earlier recurring theme whenever a new batch had no
+                    // intra-batch recurrence (recurring needs ≥2 turns *in
+                    // the batch*), wiping the snapshot on most updates.
+                    recent_topics: merge_recent_topics(
+                        &current.recent_topics,
+                        extract_recent_topics(messages),
+                    ),
                     updated_at: unix_now(),
                 }
             },
@@ -329,17 +340,41 @@ impl RelationshipStore {
 }
 
 /// Whether a message carries a positive-emotion keyword.
+///
+/// A clause-level negation cue (不/没/别/未/无/非 immediately before the
+/// keyword, with no clause break between) suppresses the hit: "没有压力，
+/// 一点都不烦" is reassuring and must not fire the negative delta.
 fn has_positive_emotion(content: &str) -> bool {
     POSITIVE_EMOTION_KEYWORDS
         .iter()
-        .any(|kw| content.contains(kw))
+        .any(|kw| !negated_before(content, kw) && content.contains(kw))
 }
 
-/// Whether a message carries a negative-emotion keyword.
+/// Whether a message carries a negative-emotion keyword (negation-aware).
 fn has_negative_emotion(content: &str) -> bool {
     NEGATIVE_EMOTION_KEYWORDS
         .iter()
-        .any(|kw| content.contains(kw))
+        .any(|kw| !negated_before(content, kw) && content.contains(kw))
+}
+
+/// True when a single-char Chinese negation cue sits in the same clause
+/// immediately before `kw` (no clause break between them).
+fn negated_before(content: &str, kw: &str) -> bool {
+    const BREAKS: &[char] = &[
+        '，', '。', '！', '？', '；', '、', '：', ',', '.', '!', '?', ';', ':',
+    ];
+    let Some(at) = content.find(kw) else {
+        return false;
+    };
+    let prefix = &content[..at];
+    let clause_start = prefix
+        .rfind(|c: char| BREAKS.contains(&c))
+        .map_or(0, |index| {
+            let ch = prefix[index..].chars().next().unwrap_or(' ');
+            index + ch.len_utf8()
+        });
+    let clause = &prefix[clause_start..];
+    clause.contains('不') || clause.contains("没有") || clause.contains('没')
 }
 
 /// Extract recurring topics (keywords appearing in ≥2 distinct turns), capped.
@@ -349,6 +384,22 @@ fn extract_recent_topics(messages: &[Message]) -> Vec<String> {
         .map(|theme| theme.keyword)
         .take(MAX_RECENT_TOPICS)
         .collect()
+}
+
+/// Union prior topics with new ones, new-first, capped at [`MAX_RECENT_TOPICS`].
+///
+/// New themes from the current batch come first (they are the freshest
+/// signal); prior topics that are still relevant fill the remaining slots so
+/// a quiet batch never erases the relationship's topic memory.
+fn merge_recent_topics(previous: &[String], new_topics: Vec<String>) -> Vec<String> {
+    let mut merged = new_topics;
+    for t in previous {
+        if !merged.contains(t) {
+            merged.push(t.clone());
+        }
+    }
+    merged.truncate(MAX_RECENT_TOPICS);
+    merged
 }
 
 /// Current unix time in seconds.

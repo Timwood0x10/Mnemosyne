@@ -284,16 +284,23 @@ impl DialogNameIndex {
     /// Find the name in `find_dialog_speaker` context.
     fn find_speaker_near(&self, text: &str, pos: usize) -> Option<String> {
         let before = &text[..pos];
-        if let Some(wei) = before.rfind("谓") {
-            if let Some(name) = self.best_name_near(text, wei) {
-                return Some(name);
-            }
+        // Bound the backward search: an unbounded rfind("对"/"谓") once
+        // found a stale marker made EVERY later `X曰` inherit that name
+        // ("玄德曰…孔明对曰…张飞曰" attributed 张飞 to 孔明). Only accept a
+        // marker within LOOKBACK_BYTES of the current position.
+        const LOOKBACK_BYTES: usize = 64;
+        let window_start = floor_char_boundary(before, before.len().saturating_sub(LOOKBACK_BYTES));
+        if let Some(wei) = before.rfind("谓")
+            && wei >= window_start
+            && let Some(name) = self.best_name_near(text, wei)
+        {
+            return Some(name);
         }
-        if let Some(dui) = before.rfind("对") {
-            if let Some(name) = self.best_name_near(text, dui) {
-                return Some(name);
-            }
-            return self.best_name_near(text, dui);
+        if let Some(dui) = before.rfind("对")
+            && dui >= window_start
+            && let Some(name) = self.best_name_near(text, dui)
+        {
+            return Some(name);
         }
         self.best_name_near(text, pos)
     }

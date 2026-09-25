@@ -39,7 +39,13 @@ impl SqliteFactStore {
         if text.is_empty() {
             return Ok(None);
         }
-        if let Some(id) = anchors.get(text) {
+        // Cache key includes the span so two anchors over the same text but at
+        // different offsets (e.g. the same sentence cited twice) do not share
+        // one row and lose the second position.
+        let offset = anchor.get("offset").and_then(serde_json::Value::as_i64);
+        let length = anchor.get("length").and_then(serde_json::Value::as_i64);
+        let cache_key = format!("{text}\u{0}{offset:?}\u{0}{length:?}");
+        if let Some(id) = anchors.get(&cache_key) {
             return Ok(Some(*id));
         }
         // `doc_id: 0` means "not from a corpus document" (the conversation
@@ -49,12 +55,22 @@ impl SqliteFactStore {
             .get("doc_id")
             .and_then(serde_json::Value::as_i64)
             .filter(|id| *id > 0);
+        // Persist the span too: the vision requires every claim to trace back
+        // to an exact original-text position. Previously only `content` was
+        // written and `start_offset`/`end_offset` stayed NULL, so any consumer
+        // reading the evidence ROW (not the fact payload) lost the anchor.
         conn.execute(
-            "INSERT INTO evidence (doc_id, chapter_id, content) VALUES (?1, NULL, ?2)",
-            params![doc_id, text],
+            "INSERT INTO evidence (doc_id, chapter_id, start_offset, end_offset, content)
+             VALUES (?1, NULL, ?2, ?3, ?4)",
+            params![
+                doc_id,
+                offset,
+                length.map(|l| offset.unwrap_or(0) + l),
+                text
+            ],
         )?;
         let id = conn.last_insert_rowid();
-        anchors.insert(text.to_string(), id);
+        anchors.insert(cache_key, id);
         Ok(Some(id))
     }
 

@@ -26,6 +26,7 @@
 | `MEMORY_MAX_PER_DISTILL` | `3` | 每次蒸馏调用产生的最大记忆数 |
 | `MEMORY_DISABLE_CROSS_TURN` | `false` | 禁用跨轮次 4 条消息弧提取 |
 | `MEMORY_SSE_ADDR` | `""` | SSE 监听地址（空 = 使用 stdio 传输） |
+| `MNEMOSYNE_HOME` | — | **资源根目录**：`config/` 与 `lexicon/` 的所在位置（见下节） |
 | `RUST_LOG` | — | 日志级别（例如 `info`、`debug`、`memory_distill=debug`） |
 
 ### 命令行参数
@@ -45,6 +46,40 @@
 | `--max-per-distill <N>` | `MEMORY_MAX_PER_DISTILL` | 每次蒸馏调用的最大记忆数 |
 | `--disable-cross-turn` | `MEMORY_DISABLE_CROSS_TURN` | 禁用跨轮次提取 |
 | `--sse-addr <ADDR>` | `MEMORY_SSE_ADDR` | SSE 监听地址（空 = stdio） |
+
+## 资源文件（`config/`）
+
+除了上面的环境变量与参数，引擎还在**资源根目录**下读取一组 JSON 词表与规则文件。
+根目录按以下顺序解析，先命中者生效：
+
+1. `MNEMOSYNE_HOME`（显式指定，最优先）；
+2. 当前工作目录（若含 `config/` 或 `lexicon/`）；
+3. 可执行文件所在目录（若含 `config/` 或 `lexicon/`）；
+4. 兜底：当前工作目录。
+
+| 文件 | 用途 |
+|---|---|
+| `config/markers_zh.json` / `markers_en.json` | 观察词表（参考样例，**升级会覆盖**） |
+| `config/*.user.json` | **你自己的词表**：追加到随包表上，`_remove` 可删词 |
+| `config/dictionary.json` | 核心词库：lexeme 与功能词（否定/不确定等） |
+| `config/emotion_lexicon.json` | 伴随主题抽取用的情绪词 |
+| `config/relation_rules.json` | 语料 ingest 的有向关系规则 |
+| `config/name_validation.json` | 编译器的人名校验规则 |
+| `config/faction_map.json` | 语料 ingest 的阵营映射 |
+| `config/anchor_seeds.json` | 取值抽取的锚点种子 |
+| `config/persona_prototypes.json` | `persona_check` 用的原型 |
+| `config/persona_cards.json` | `persona_inject` 用的角色卡（可选） |
+| `config/decay_config.json` | 衰减策略（可选，缺失时用内置默认） |
+| `lexicon/packs/` | 词库包目录 |
+
+词表怎么写、`_remove` 怎么用，见 README 的「自定义词表」。改完先自检：
+
+```bash
+mnemosyne config-check
+```
+
+它打印实际使用的资源根目录、加载了哪些词表文件、每个动作最终多少词、被删/被忽略/重复的条目，
+以及上表每个文件是否存在；当词表不可信（非法动作名、文件无法解析）时退出码非 0。
 
 ## 配置模式
 

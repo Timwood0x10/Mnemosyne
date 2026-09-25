@@ -97,9 +97,37 @@ impl ToolHandler for PersonaCheckTool {
             .and_then(Value::as_str)
             .unwrap_or("default");
 
-        // Resolve the agent entity (stable per tenant/agent pair) and read its
-        // accumulated facts. Only `agent_personality`-tagged facts participate.
-        let entity_id = self.fact_store.resolve_agent(tenant_id, agent_id)?;
+        // READ-ONLY lookup: find_entity, not resolve_agent (which creates a
+        // row for a typo'd agent_id on a documented read-only tool).
+        let agent_norm = if agent_id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            agent_id.trim().to_string()
+        };
+        let agent_name = if agent_norm == "default" {
+            "Agent".to_string()
+        } else {
+            format!("Agent:{agent_norm}")
+        };
+        let agent_key = format!("agent:{agent_norm}");
+        let entity_id =
+            match self
+                .fact_store
+                .find_entity(tenant_id, Some(&agent_key), &agent_name)?
+            {
+                Some((id, _, _)) => id,
+                None => {
+                    // Unknown agent: no persona facts to check against — report
+                    // clean rather than materialising an empty entity.
+                    let payload = json!({
+                        "clean": true,
+                        "conflicts": [],
+                        "drift": [],
+                        "stats": { "consistent_count": 0, "total_signals": 0 },
+                    });
+                    return Ok(ToolCallResult::text(payload.to_string()));
+                }
+            };
         let facts = self.fact_store.get_facts(entity_id)?;
         let result = self.engine.check(draft, &facts).await?;
 

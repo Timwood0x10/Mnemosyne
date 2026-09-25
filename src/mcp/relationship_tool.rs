@@ -89,24 +89,61 @@ impl ToolHandler for RelationshipQueryTool {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidInput("missing `user_id`".into()))?;
 
-        let agent_entity_id = self.store.resolve_agent(tenant_id, agent_id)?;
-        let user_entity_id = self.store.resolve_user(tenant_id, user_id)?;
+        // READ-ONLY: use find_entity, not resolve_*. resolve_* creates a row
+        // for an unknown id — a typo'd agent_id on a documented read-only tool
+        // silently polluted the entity table.
+        let agent_norm = if agent_id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            agent_id.trim().to_string()
+        };
+        let user_norm = if user_id.trim().is_empty() {
+            "default".to_string()
+        } else {
+            user_id.trim().to_string()
+        };
+        let agent_name = if agent_norm == "default" {
+            "Agent".to_string()
+        } else {
+            format!("Agent:{agent_norm}")
+        };
+        let user_name = if user_norm == "default" {
+            "User".to_string()
+        } else {
+            format!("User:{user_norm}")
+        };
+        let agent_key = format!("agent:{agent_norm}");
+        let agent_entity_id = self
+            .store
+            .find_entity(tenant_id, Some(&agent_key), &agent_name)?
+            .map(|(id, _, _)| id);
+        let user_entity_id = self
+            .store
+            .find_entity(tenant_id, Some(&user_norm), &user_name)?
+            .map(|(id, _, _)| id);
+
+        let default_payload = json!({
+            "tenant_id": tenant_id,
+            "agent_id": agent_id,
+            "user_id": user_id,
+            "exists": false,
+            "intimacy": 0.0,
+            "stage": "stranger",
+            "emotion_trend": "stable",
+            "recent_topics": [],
+            "updated_at": 0,
+        });
+        let (Some(agent_entity_id), Some(user_entity_id)) = (agent_entity_id, user_entity_id)
+        else {
+            // Unknown pair → default snapshot, no entity is created.
+            return Ok(ToolCallResult::text(default_payload.to_string()));
+        };
         let rel = RelationshipStore::new(self.store.clone());
         let state = rel.get_relationship(tenant_id, agent_entity_id, user_entity_id)?;
 
         let payload = match state {
             Some(s) => serialize_state(&s, agent_id, user_id),
-            None => json!({
-                "tenant_id": tenant_id,
-                "agent_id": agent_id,
-                "user_id": user_id,
-                "exists": false,
-                "intimacy": 0.0,
-                "stage": "stranger",
-                "emotion_trend": "stable",
-                "recent_topics": [],
-                "updated_at": 0,
-            }),
+            None => default_payload,
         };
         Ok(ToolCallResult::text(payload.to_string()))
     }
@@ -132,6 +169,14 @@ impl ToolHandler for PersonaTimelineTool {
             .get("entity_id")
             .and_then(Value::as_i64)
             .ok_or_else(|| Error::InvalidInput("missing `entity_id`".into()))?;
+        // Optional tenant scoping, matching state_timeline / fact_provenance /
+        // decision_trace: a raw entity id carries no ownership, so without
+        // this a guessed id disclosed another tenant's full persona evolution.
+        crate::mcp::tenant_scope::ensure_entity_tenant(
+            &self.store,
+            entity_id,
+            crate::mcp::tenant_scope::tenant_argument(args)?,
+        )?;
         let timeline = build_timeline_for_entity(self.store.as_ref(), entity_id)?;
         let payload = json!({
             "entity_id": entity_id,
@@ -233,7 +278,8 @@ pub fn persona_timeline_definition() -> ToolDefinition {
         input_schema: json!({
             "type": "object",
             "properties": {
-                "entity_id": {"type": "integer", "description": "The entity id whose facts to reconstruct"}
+                "entity_id": {"type": "integer", "description": "The entity id whose facts to reconstruct"},
+                "tenant_id": {"type": "string", "description": "Optional tenant scope; when present the entity must belong to this tenant"}
             },
             "required": ["entity_id"]
         }),

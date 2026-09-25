@@ -89,18 +89,19 @@ impl ToolHandler for MemoryCompileTool {
             .and_then(Value::as_array)
             .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
         let messages = parse_messages(messages_raw)?;
-        // Decision closure: the host declares what happened to earlier
-        // commitments. This is the ONLY outcome write path — the decision MCP
-        // surface is read-only, and nothing is inferred from the conversation,
-        // so a promise is never closed by a guess. Declarations are validated
-        // before the first write, so a malformed one cannot leave a
-        // half-applied call behind.
-        let outcome_reports = self.record_decision_outcomes(args)?;
         let tenant_id = args
             .get("tenant_id")
             .and_then(Value::as_str)
             .unwrap_or("default");
         let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
+
+        // Validate decision_outcome declarations BEFORE any write so a
+        // malformed entry aborts with nothing applied. The actual outcome
+        // writes happen AFTER the compile transaction commits (see below):
+        // writing them first left outcomes recorded even when agent
+        // resolution or insert_compilation failed, contradicting the
+        // one-transaction guarantee.
+        let validated_outcomes = Self::validate_decision_outcomes(args)?;
 
         let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
         let logical_time = chrono::Utc::now().timestamp() as i32;
@@ -126,6 +127,12 @@ impl ToolHandler for MemoryCompileTool {
         let (stored_facts, decisions_recorded) = self
             .fact_store
             .insert_compilation(&compiled.facts, &commitments)?;
+
+        // Outcomes are applied only after the compile transaction commits.
+        // Each declaration is tenant-checked against the decision's subject
+        // (same rule as decision_trace) so a guessed decision id from another
+        // tenant is reported `missing` instead of being closed.
+        let outcome_reports = self.apply_decision_outcomes(validated_outcomes, tenant_id)?;
 
         let builder = PromptBuilder;
         let recent_count = messages.len().min(6);
@@ -174,20 +181,20 @@ impl ToolHandler for MemoryCompileTool {
 }
 
 impl MemoryCompileTool {
-    /// Record the outcomes the caller declared for earlier decisions.
-    ///
-    /// Every declaration is validated before the first write, so a malformed
-    /// entry aborts the call without touching any decision. The report echoes
-    /// the **resulting** state of each decision: an id that does not exist comes
-    /// back as `missing`, and a declaration that lost to an already-recorded
-    /// outcome comes back carrying the original one — the caller always sees
-    /// what the store actually holds instead of a silent success.
+    /// Validate the declarations only — no store write happens here. The
+    /// companion [`Self::apply_decision_outcomes`] runs after the compile
+    /// transaction commits, so a rejected call never leaves outcomes behind.
+    /// The report of the applied outcomes echoes the **resulting** state of
+    /// each decision: an id that does not exist (or belongs to another
+    /// tenant) comes back as `missing`, and a declaration that lost to an
+    /// already-recorded outcome comes back carrying the original one.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidInput`] when a declaration is malformed, and a
-    /// storage error when the update fails.
-    fn record_decision_outcomes(&self, args: &Value) -> Result<Vec<Value>, Error> {
+    /// Returns [`Error::InvalidInput`] when a declaration is malformed.
+    fn validate_decision_outcomes(
+        args: &Value,
+    ) -> Result<Vec<(i64, crate::decision::DecisionOutcome)>, Error> {
         let Some(declared) = args.get("decision_outcomes") else {
             return Ok(Vec::new());
         };
@@ -223,9 +230,49 @@ impl MemoryCompileTool {
             })?;
             validated.push((decision_id, outcome));
         }
+        Ok(validated)
+    }
 
+    /// Apply validated outcome declarations.
+    ///
+    /// Each id is tenant-checked against the decision's subject before the
+    /// write (same rule as `decision_trace`): a guessed id from another
+    /// tenant reports `missing` instead of closing the row. The first
+    /// recorded outcome still wins (`outcome IS NULL` guard in the store).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read or update fails.
+    fn apply_decision_outcomes(
+        &self,
+        validated: Vec<(i64, crate::decision::DecisionOutcome)>,
+        tenant_id: &str,
+    ) -> Result<Vec<Value>, Error> {
         let mut reports = Vec::with_capacity(validated.len());
         for (decision_id, outcome) in validated {
+            let decision = match self.fact_store.get_decision(decision_id)? {
+                Some(d) => d,
+                None => {
+                    reports.push(serde_json::json!({
+                        "decision_id": decision_id,
+                        "missing": true,
+                    }));
+                    continue;
+                }
+            };
+            // Cross-tenant guess → report missing (do not leak existence and
+            // never close another tenant's decision).
+            if let Err(Error::NotFound(_)) = crate::mcp::tenant_scope::ensure_entity_tenant(
+                &self.fact_store,
+                decision.subject,
+                Some(tenant_id),
+            ) {
+                reports.push(serde_json::json!({
+                    "decision_id": decision_id,
+                    "missing": true,
+                }));
+                continue;
+            }
             reports.push(
                 match self.fact_store.set_decision_outcome(decision_id, outcome)? {
                     Some(decision) => serde_json::json!({

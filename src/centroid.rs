@@ -77,11 +77,17 @@ impl CentroidCompressor {
             .filter_map(|group| {
                 let centroid =
                     mean_vector(&group.iter().map(|(_, v)| v.clone()).collect::<Vec<_>>())?;
+                // Keep the NEWEST representatives (group is insertion-
+                // ordered = earliest utterances): after a stance flip the
+                // first three members still quoted the pre-flip wording
+                // while the latest (current) stance was dropped.
                 let mut representatives: Vec<String> = group
                     .iter()
+                    .rev()
                     .take(MAX_REPRESENTATIVES)
                     .map(|(idx, _)| texts[*idx].clone())
                     .collect();
+                representatives.reverse();
                 representatives.truncate(MAX_REPRESENTATIVES);
                 Some(CentroidGroup {
                     centroid,

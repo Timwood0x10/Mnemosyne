@@ -144,6 +144,74 @@ fn rebuild_linker(
     *guard = fresh;
 }
 
+/// Resolve a client-supplied knowledge path inside an allowlisted root.
+///
+/// Policy (mirrors `memory_transfer_tools::resolve_transfer_path` for
+/// relative paths, plus two absolute roots for legitimate tooling/tests):
+///
+/// - Relative paths are joined onto the resource root; `..` escapes are
+///   rejected after normalization.
+/// - Absolute paths are accepted ONLY under the system temp directory
+///   (tests / ephemeral scratch) or under the resource root. `/etc/passwd`
+///   and similar paths are rejected.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when the path escapes every allowlisted
+/// root.
+fn resolve_knowledge_path(path: &str) -> Result<PathBuf, Error> {
+    let p = PathBuf::from(path);
+    let root = crate::config::resolve_resource_path("");
+    let temp = std::env::temp_dir();
+
+    if p.is_absolute() {
+        // Absolute: only temp or resource-root subtrees are allowed.
+        let mut normalized = PathBuf::new();
+        for comp in p.components() {
+            match comp {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    if !normalized.pop() {
+                        return Err(Error::InvalidInput(format!(
+                            "path escapes the allowlisted roots; rejected: {path}"
+                        )));
+                    }
+                }
+                other => normalized.push(other.as_os_str()),
+            }
+        }
+        if normalized.starts_with(&temp) || normalized.starts_with(&root) {
+            return Ok(normalized);
+        }
+        return Err(Error::InvalidInput(format!(
+            "absolute path must live under the resource root or the system temp directory; rejected: {path}"
+        )));
+    }
+
+    // Relative: join onto the resource root and reject `..` escapes.
+    let joined = root.join(&p);
+    let mut normalized = PathBuf::new();
+    for comp in joined.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(Error::InvalidInput(format!(
+                        "path escapes the resource root; rejected: {path}"
+                    )));
+                }
+            }
+            other => normalized.push(other.as_os_str()),
+        }
+    }
+    if !normalized.starts_with(&root) {
+        return Err(Error::InvalidInput(format!(
+            "path escapes the resource root; rejected: {path}"
+        )));
+    }
+    Ok(normalized)
+}
+
 // ── knowledge_attach ────────────────────────────────────────────────────────
 
 /// Handler for the `knowledge_attach` tool.
@@ -189,11 +257,16 @@ impl KnowledgeAttachHandler {
             });
         let links = parse_entity_links(args)?;
 
+        // Path sandbox: reject absolute paths and `..` escapes (mirror of
+        // `memory_transfer_tools::resolve_transfer_path`). Without it a
+        // client could `knowledge_attach {path:"/etc/passwd"}` then
+        // `knowledge_ingest` and read arbitrary host files through `evidence`.
+        let load_path = resolve_knowledge_path(&path)?;
+
         // Load the file through the multi-format loader (PDF/JSON/TXT/MD).
         // File reads (and PDF inflation for large PDFs) are blocking, so the
         // work is moved off the tokio worker thread via `spawn_blocking` —
         // mirroring the project's own async discipline in `transport.rs`.
-        let load_path = PathBuf::from(&path);
         let docs = tokio::task::spawn_blocking(move || format::load_document(&load_path))
             .await
             .map_err(|e| Error::Internal(format!("load document task joined with error: {e}")))??;
@@ -238,11 +311,14 @@ impl KnowledgeAttachHandler {
             });
         let links = parse_entity_links(args)?;
 
+        // Path sandbox: same rule as attach_document (no absolute / no `..`).
+        let db_path = resolve_knowledge_path(&connection)?;
+        let db_path_str = db_path.to_string_lossy().into_owned();
+
         // Load the JSON DB file once and snapshot it into the query closure.
         // The file read is blocking, so it runs on a blocking thread to keep
         // the tokio worker free (consistent with `transport.rs`).
-        let db_path = connection.clone();
-        let rows = tokio::task::spawn_blocking(move || load_json_db(&db_path))
+        let rows = tokio::task::spawn_blocking(move || load_json_db(&db_path_str))
             .await
             .map_err(|e| Error::Internal(format!("load db task joined with error: {e}")))??;
         let row_count = rows.len();
@@ -421,11 +497,7 @@ impl KnowledgeIngestHandler {
         for ext in &docs {
             // Skip if a document with the same title already exists
             // (idempotent re-ingest — dev_guide "不双写" spirit).
-            let existing = self
-                .store
-                .find_document_by_title(&ext.title)
-                .await
-                .unwrap_or(None);
+            let existing = self.store.find_document_by_title(&ext.title).await?;
             let doc_id = if let Some(doc) = existing {
                 doc.id
             } else {

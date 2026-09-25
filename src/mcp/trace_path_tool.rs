@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::knowledge::SQLiteKnowledgeStore;
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::{KnowledgeEdge, KnowledgeObject};
@@ -62,7 +62,7 @@ impl ToolHandler for TracePathTool {
             .get("max_depth")
             .and_then(Value::as_u64)
             .unwrap_or(DEFAULT_MAX_DEPTH as u64)
-            .min(20) as usize;
+            .clamp(1, 20) as usize;
 
         if source.is_empty() || target.is_empty() {
             return json_block(
@@ -142,12 +142,23 @@ impl ToolHandler for TracePathTool {
         }
 
         // Reconstruct source → target: walk `prev` back from target.
+        //
+        // The BFS bookkeeping guarantees both lookups (a node enters `prev`
+        // only when discovered from `src`, always with the edge that discovered
+        // it, and the walk stops before the source's `None` sentinel). It is
+        // still enforced as an error rather than an `expect`: this runs inside
+        // a request handler, so a future break of that invariant must fail the
+        // call, not panic the server for every other client.
         let mut node_ids = vec![tgt.id];
         let mut rels = Vec::new();
         let mut cur = tgt.id;
         while cur != src.id {
-            let (parent, edge) = prev.get(&cur).expect("on path").clone();
-            let edge = edge.expect("non-source node has an incoming edge");
+            let (parent, edge) = prev.get(&cur).cloned().ok_or_else(|| {
+                Error::Internal(format!("path node {cur} is absent from the BFS tree"))
+            })?;
+            let edge = edge.ok_or_else(|| {
+                Error::Internal(format!("path node {cur} has no discovering edge"))
+            })?;
             // The predicate is read off the edge regardless of direction.
             rels.push(edge.predicate.clone());
             node_ids.push(parent);

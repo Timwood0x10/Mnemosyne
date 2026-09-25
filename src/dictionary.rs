@@ -201,10 +201,13 @@ impl Dictionary {
                 .push(lex.clone());
         }
 
-        // Stop names.
+        // Stop names. Normalize English entries to lowercase so the
+        // case-sensitive `binary_search` in `is_english_stop_name` matches
+        // probes like "You"/"My" (callers only pass capitalized words).
         let en_stop_raw = file.stop_names.get("en").cloned().unwrap_or_default();
-        let mut en_stop = en_stop_raw;
+        let mut en_stop: Vec<String> = en_stop_raw.into_iter().map(|s| s.to_lowercase()).collect();
         en_stop.sort();
+        en_stop.dedup();
 
         let zh_stop = file.stop_names.get("zh").cloned().unwrap_or_default();
 
@@ -317,7 +320,7 @@ impl Dictionary {
 
     pub fn is_english_stop_name(&self, word: &str) -> bool {
         self.english_stop_names
-            .binary_search_by(|s| s.as_str().cmp(word))
+            .binary_search_by(|s| s.as_str().cmp(&word.to_lowercase()))
             .is_ok()
     }
 
