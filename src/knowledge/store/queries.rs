@@ -494,7 +494,7 @@ impl SQLiteKnowledgeStore {
         let like = format!("%{escaped}%");
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match doc_title {
             Some(t) => (
-                "SELECT e.content, c.chapter_no, d.title
+                "SELECT e.content, c.chapter_no, d.title, e.start_offset, e.end_offset
                  FROM evidence e
                  JOIN chapters c ON c.id = e.chapter_id
                  JOIN documents d ON d.id = e.doc_id
@@ -508,7 +508,7 @@ impl SQLiteKnowledgeStore {
                 ],
             ),
             None => (
-                "SELECT e.content, c.chapter_no, d.title
+                "SELECT e.content, c.chapter_no, d.title, e.start_offset, e.end_offset
                  FROM evidence e
                  JOIN chapters c ON c.id = e.chapter_id
                  JOIN documents d ON d.id = e.doc_id
@@ -535,6 +535,8 @@ impl SQLiteKnowledgeStore {
                     // Observed text evidence has no separate confidence score;
                     // it is authoritative by construction.
                     confidence: 1.0,
+                    start_offset: row.get(3)?,
+                    end_offset: row.get(4)?,
                 })
             },
         )?;
@@ -543,5 +545,42 @@ impl SQLiteKnowledgeStore {
             out.push(r?);
         }
         Ok(out)
+    }
+
+    /// Find an evidence row with the same identity, or insert one.
+    ///
+    /// Identity is `(doc_id, start_offset, end_offset, content)` — a
+    /// re-compile of the same sentence must reuse the existing row instead of
+    /// multiplying duplicates (zero-pollution). Runs SELECT + conditional
+    /// INSERT inside one lock acquisition, so a single store serializes
+    /// concurrent callers. Returns `(id, created)`.
+    pub(super) async fn ensure_evidence_row(
+        &self,
+        doc_id: i64,
+        chapter_id: i64,
+        start_offset: Option<i64>,
+        end_offset: Option<i64>,
+        content: &str,
+    ) -> Result<(i64, bool)> {
+        let conn = self.conn.lock().await;
+        let existing: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM evidence \
+                 WHERE doc_id = ?1 AND start_offset IS ?2 AND end_offset IS ?3 \
+                   AND content = ?4 \
+                 LIMIT 1",
+                params![doc_id, start_offset, end_offset, content],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok((id, false));
+        }
+        conn.execute(
+            "INSERT INTO evidence (doc_id, chapter_id, start_offset, end_offset, content, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))",
+            params![doc_id, chapter_id, start_offset, end_offset, content],
+        )?;
+        Ok((conn.last_insert_rowid(), true))
     }
 }

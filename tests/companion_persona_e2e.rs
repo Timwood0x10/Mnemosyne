@@ -32,7 +32,7 @@ const USER_ID: &str = "alice";
 
 /// Build a persona fact tagged `agent_personality`; `entity_id` is filled in
 /// after the agent entity is resolved.
-fn persona_fact(fact_type: FactType, time: i32, negated: bool, content: &str) -> Fact {
+fn persona_fact(fact_type: FactType, time: i64, negated: bool, content: &str) -> Fact {
     Fact {
         id: None,
         entity_id: 0,
@@ -44,7 +44,7 @@ fn persona_fact(fact_type: FactType, time: i32, negated: bool, content: &str) ->
             "negated": negated,
         }),
         evidence_id: None,
-        created_at: i64::from(time),
+        created_at: time,
         ..Fact::default()
     }
 }

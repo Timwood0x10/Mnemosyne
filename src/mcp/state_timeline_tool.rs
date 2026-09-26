@@ -192,7 +192,7 @@ mod tests {
         .expect("valid JSON payload")
     }
 
-    fn fact(id: i64, entity_id: i64, fact_type: FactType, time: i32, payload: Value) -> Fact {
+    fn fact(id: i64, entity_id: i64, fact_type: FactType, time: i64, payload: Value) -> Fact {
         Fact {
             id: Some(id),
             entity_id,
@@ -200,7 +200,7 @@ mod tests {
             time,
             payload,
             evidence_id: None,
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         }
     }
@@ -217,7 +217,7 @@ mod tests {
             .resolve_user("tenant-a", "alice")
             .expect("resolve user");
         for (id, time, content) in [
-            (1i64, 2024i32, "喜欢 Python"),
+            (1i64, 2024i64, "喜欢 Python"),
             (2, 2025, "开始喜欢 Rust"),
             (3, 2026, "主要使用 Rust"),
         ] {

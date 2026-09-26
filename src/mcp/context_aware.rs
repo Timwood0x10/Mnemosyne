@@ -151,7 +151,7 @@ impl ToolHandler for ContextCheckTool {
 
         // ── Triggered: compile → persist → distill → profile ────────────
         let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-        let logical_time = chrono::Utc::now().timestamp() as i32;
+        let logical_time = chrono::Utc::now().timestamp();
         let compiled =
             self.compiler
                 .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);

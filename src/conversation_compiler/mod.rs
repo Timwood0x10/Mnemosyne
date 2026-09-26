@@ -439,7 +439,7 @@ fn negation_near(
 /// Whether the statement was negated is decided per marker in its own clause
 /// (`negation_near`), never by a message-wide flag. Uncertain statements are kept
 /// but tagged.
-pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> Vec<Fact> {
+pub fn user_facts_from_observations(observations: &[Observation], time: i64) -> Vec<Fact> {
     let rule = DefaultRule;
     observations
         .iter()
@@ -448,7 +448,7 @@ pub fn user_facts_from_observations(observations: &[Observation], time: i32) -> 
             let mut facts = rule.apply(observation);
             for fact in &mut facts {
                 fact.time = time;
-                fact.created_at = i64::from(time);
+                fact.created_at = time;
                 if let Some(content) = observation
                     .modifiers
                     .iter()
@@ -498,7 +498,7 @@ fn has_modifier(observation: &Observation, key: &str) -> bool {
 /// - [`crate::self_disclosure`] answers "who is this person" (name, age,
 ///   occupation, city, family, pets, interests, habits) — the types the marker
 ///   table can never emit.
-pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i32) -> Vec<Fact> {
+pub fn compile_user_facts(messages: &[Message], user_entity_id: i64, time: i64) -> Vec<Fact> {
     let observations = compile_user_observations(messages, user_entity_id);
     user_facts_from_channels(&observations, messages, user_entity_id, time)
 }
@@ -516,7 +516,7 @@ pub fn user_facts_from_channels(
     observations: &[Observation],
     messages: &[Message],
     user_entity_id: i64,
-    time: i32,
+    time: i64,
 ) -> Vec<Fact> {
     let mut facts = user_facts_from_observations(observations, time);
     facts.extend(crate::self_disclosure::disclosures_from_messages(
@@ -555,7 +555,7 @@ pub fn user_facts_from_memories(memories: &[Memory]) -> Vec<Fact> {
                 id: None,
                 entity_id: 0,
                 fact_type,
-                time: (now - i as i64) as i32,
+                time: now - i as i64,
                 payload: serde_json::json!({
                     "content": m.content,
                     "summary": m.summary,

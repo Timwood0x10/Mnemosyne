@@ -59,7 +59,7 @@ pub fn importance_score(evidence_count: usize, participant_count: usize, turning
 pub struct KeyEvent {
     /// Event timestamp (chapter number in corpus-backed data; wall time for
     /// real memories). Used for ordering, not as a corpus concept.
-    pub time: i32,
+    pub time: i64,
     /// Event title (the event object's name, e.g. "第53回 …").
     pub title: String,
     /// Participants in the event.
@@ -202,7 +202,7 @@ pub async fn extract_key_events(
             None => format!("#{}", edge.target_id),
         };
         key_events.push(KeyEvent {
-            time: edge.valid_from.unwrap_or(0),
+            time: i64::from(edge.valid_from.unwrap_or(0)),
             title,
             participants: participants_by_edge[i].clone(),
             importance_score: score,

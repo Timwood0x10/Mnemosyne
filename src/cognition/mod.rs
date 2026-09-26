@@ -173,7 +173,7 @@ pub struct Fact {
     pub id: Option<i64>,
     pub entity_id: i64,
     pub fact_type: FactType,
-    pub time: i32,
+    pub time: i64,
     pub payload: serde_json::Value,
     pub evidence_id: Option<i64>,
     pub created_at: i64,
@@ -255,15 +255,15 @@ pub trait FactStore: Send + Sync {
 mod tests {
     use super::*;
 
-    fn fact(fact_type: FactType, time: i32, payload: serde_json::Value) -> Fact {
+    fn fact(fact_type: FactType, time: i64, payload: serde_json::Value) -> Fact {
         Fact {
-            id: Some(i64::from(time)),
+            id: Some(time),
             entity_id: 7,
             fact_type,
             time,
             payload,
             evidence_id: None,
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         }
     }
@@ -653,7 +653,7 @@ mod tests {
     /// key-less payloads, and the two emotion states stay separate intervals.
     #[test]
     fn aggregate_intervals_maps_production_shaped_payloads() {
-        let channel_fact = |id: i64, fact_type: FactType, time: i32, content: &str| Fact {
+        let channel_fact = |id: i64, fact_type: FactType, time: i64, content: &str| Fact {
             id: Some(id),
             entity_id: 7,
             fact_type,
@@ -664,7 +664,7 @@ mod tests {
                 "negated": false,
             }),
             evidence_id: None,
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         };
         let facts = vec![

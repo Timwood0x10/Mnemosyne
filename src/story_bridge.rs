@@ -26,7 +26,7 @@ use crate::types::Message;
 /// The stride between consecutive bridged facts' logical `time`. Deliberately
 /// large (>= the timeline's `LARGE_GAP_THRESHOLD`) so distinct story beats show
 /// up as turning points rather than one contiguous blur.
-const TIME_STRIDE: i32 = 2_000_000;
+const TIME_STRIDE: i64 = 2_000_000;
 
 /// Outcome of a bridge run.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -113,7 +113,7 @@ pub async fn bridge_story_events_to_persona(
         return Ok(stats);
     }
 
-    let mut time = 0i32;
+    let mut time = 0i64;
     for event_id in event_ids {
         let Some(event) = kstore.get_object(event_id).await? else {
             continue;
@@ -144,7 +144,7 @@ pub async fn bridge_story_events_to_persona(
                 "character": character_name,
             }),
             evidence_id: None,
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         };
         fstore.insert_fact(&raw)?;
@@ -234,7 +234,7 @@ mod tests {
     }
 
     /// Objective: verify the logical-time accumulation never overflows for a
-    /// protagonist with more story events than fit in i32::MAX / TIME_STRIDE
+    /// protagonist with more story events than fit in i64::MAX / TIME_STRIDE
     /// (~1073). A plain `time += TIME_STRIDE` would panic in debug builds and
     /// wrap negative in release; saturating add must keep times monotonic
     /// non-decreasing instead.
@@ -250,6 +250,7 @@ mod tests {
                 title: "长篇小说".into(),
                 author: None,
                 doc_type: Some("novel".into()),
+                source: String::new(),
                 created_at: 1,
             })
             .await
@@ -314,7 +315,7 @@ mod tests {
 
         let entity_id = bridged.entity_id.expect("bridged entity");
         let facts = fstore.get_facts(entity_id).expect("facts");
-        let times: Vec<i32> = facts
+        let times: Vec<i64> = facts
             .iter()
             .filter(|f| f.fact_type == crate::cognition::FactType::Event)
             .map(|f| f.time)

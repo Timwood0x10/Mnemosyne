@@ -28,13 +28,14 @@ pub mod external;
 pub mod format;
 pub mod key_events;
 pub mod memory_export;
+pub mod memory_export_world;
 pub mod migration;
 pub mod pdf;
 pub mod store;
 
 pub use memory_export::{ExportBundle, ImportStats, export_store, import_bundle};
 pub use migration::{MigrationStats, Migrator};
-pub use store::{KnowledgeStore, SQLiteKnowledgeStore};
+pub use store::{KnowledgeStore, NewWorldEvent, NewWorldState, SQLiteKnowledgeStore};
 
 // Re-export the external-knowledge registry so callers can reach it as
 // `knowledge::ExternalKnowledgeRegistry` without naming the leaf submodule.
@@ -169,6 +170,12 @@ pub struct Document {
     pub title: String,
     pub author: Option<String>,
     pub doc_type: Option<String>,
+    /// Provenance tag of the source this document was compiled from
+    /// (file path, `generalize_compile`, export name, …). Together with
+    /// `title` it forms the write-path identity: two different sources that
+    /// share a title stay separate documents. `""` marks legacy rows created
+    /// before the column existed.
+    pub source: String,
     pub created_at: i64,
 }
 
@@ -367,6 +374,14 @@ pub struct EvidenceHit {
     pub chapter: i32,
     pub doc: String,
     pub confidence: f64,
+    /// Source byte span of the snippet in the original document — the
+    /// re-locatable anchor (None on legacy rows written before spans).
+    /// Additive to the JSON output: older consumers ignore the extra keys.
+    #[serde(default)]
+    pub start_offset: Option<i64>,
+    /// Source byte span end (see `start_offset`).
+    #[serde(default)]
+    pub end_offset: Option<i64>,
 }
 
 #[cfg(test)]

@@ -9,7 +9,8 @@ use rusqlite::{OptionalExtension, params};
 use crate::error::Result;
 
 use super::{
-    SQLiteKnowledgeStore, WorldEntity, WorldEvent, WorldProfile, WorldRelation, WorldState,
+    EventParticipantRef, NewWorldEvent, NewWorldState, SQLiteKnowledgeStore, WorldEntity,
+    WorldEvent, WorldProfile, WorldRelation, WorldState,
 };
 
 impl SQLiteKnowledgeStore {
@@ -167,82 +168,66 @@ impl SQLiteKnowledgeStore {
     ///
     /// The offset pair is part of the identity so the same title at two
     /// different source spans stays two events, while a re-compile of the
-    /// same sentence is a no-op.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn upsert_world_event_row(
-        &self,
-        title: &str,
-        event_type: &str,
-        timestamp: Option<i32>,
-        location: Option<&str>,
-        description: &str,
-        importance: f64,
-        start_offset: Option<i64>,
-        end_offset: Option<i64>,
-    ) -> Result<i64> {
+    /// same sentence is a no-op. The unique expression index (created in
+    /// `init` after `ensure_column`) makes the check-then-insert a single
+    /// atomic statement — two connections compiling the same document can no
+    /// longer double-insert (same P2 fix as `world_entities`).
+    pub(super) async fn upsert_world_event_row(&self, event: NewWorldEvent<'_>) -> Result<i64> {
         let conn = self.conn.lock().await;
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM events \
-                 WHERE title = ?1 AND timestamp IS ?2 AND start_offset IS ?3 \
-                   AND end_offset IS ?4 \
-                 LIMIT 1",
-                params![title, timestamp, start_offset, end_offset],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            return Ok(id);
-        }
-        conn.execute(
+        // DO UPDATE (not DO NOTHING) so RETURNING always yields a row id;
+        // non-identity columns are refreshed from the latest compile.
+        conn.query_row(
             "INSERT INTO events \
              (title, event_type, timestamp, location, description, importance, \
               start_offset, end_offset) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(title, IFNULL(timestamp, -1), IFNULL(start_offset, -1), \
+                         IFNULL(end_offset, -1)) \
+             DO UPDATE SET \
+                 event_type = excluded.event_type, \
+                 location = excluded.location, \
+                 description = excluded.description, \
+                 importance = excluded.importance \
+             RETURNING id",
             params![
-                title,
-                event_type,
-                timestamp,
-                location,
-                description,
-                importance,
-                start_offset,
-                end_offset
+                event.title,
+                event.event_type,
+                event.timestamp,
+                event.location,
+                event.description,
+                event.importance,
+                event.start_offset,
+                event.end_offset
             ],
-        )?;
-        Ok(conn.last_insert_rowid())
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(Into::into)
     }
 
     /// Link an event to a world entity by name (upserting the entity when it
     /// is not yet in `world_entities`). Idempotent via the
     /// `event_participants UNIQUE(event_id, entity_id)` constraint.
+    ///
+    /// The entity upsert uses `RETURNING id` (not `last_insert_rowid`): on the
+    /// `ON CONFLICT DO UPDATE` path `last_insert_rowid` is NOT updated — it
+    /// returns whatever row this connection inserted last, which under a
+    /// cross-store race would link the participant to the WRONG entity.
     pub(super) async fn link_event_participant_row(
         &self,
         event_id: i64,
         entity_name: &str,
         role: &str,
     ) -> Result<()> {
-        let entity_id = {
+        let entity_id: i64 = {
             let conn = self.conn.lock().await;
-            let existing: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM world_entities WHERE name = ?1 LIMIT 1",
-                    params![entity_name],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match existing {
-                Some(id) => id,
-                None => {
-                    conn.execute(
-                        "INSERT INTO world_entities (name, entity_type, importance) \
-                         VALUES (?1, 'person', 0.5) \
-                         ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','localtime')",
-                        params![entity_name],
-                    )?;
-                    conn.last_insert_rowid()
-                }
-            }
+            conn.query_row(
+                "INSERT INTO world_entities (name, entity_type, importance) \
+                 VALUES (?1, 'person', 0.5) \
+                 ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','localtime') \
+                 RETURNING id",
+                params![entity_name],
+                |r| r.get(0),
+            )?
         };
         let conn = self.conn.lock().await;
         conn.execute(
@@ -281,79 +266,84 @@ impl SQLiteKnowledgeStore {
         Ok(out)
     }
 
+    /// Resolve one event's participants to (entity name, role).
+    ///
+    /// The JOIN converts the local `entity_id` FK into the portable name so
+    /// export can carry participants across databases.
+    pub(super) async fn list_event_participants_row(
+        &self,
+        event_id: i64,
+    ) -> Result<Vec<EventParticipantRef>> {
+        let conn = self.conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT we.name, ep.role \
+             FROM event_participants ep \
+             JOIN world_entities we ON we.id = ep.entity_id \
+             WHERE ep.event_id = ?1 \
+             ORDER BY ep.id ASC",
+        )?;
+        let rows = stmt.query_map(params![event_id], |r| {
+            Ok(EventParticipantRef {
+                entity_name: r.get(0)?,
+                role: r.get(1)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
     /// Upsert a character-state slot anchored to its source event.
     ///
-    /// Identity is `(entity_id, slot, event_id)`: re-compiling the same
+    /// Identity is `(entity_id, slot, event_id, chapter)`: re-compiling the same
     /// document reuses the event id (see `upsert_world_event_row`) so the
     /// state row is a no-op, while the same slot from a *different* event
     /// appends a new history row (ADD-only — state is reconstructable).
+    /// Enforced atomically by the unique expression index (see `init`).
     ///
     /// Returns the `world_states.id`.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn upsert_world_state_row(
-        &self,
-        entity_name: &str,
-        slot: &str,
-        value: &str,
-        chapter: Option<i32>,
-        event_id: Option<i64>,
-        start_offset: Option<i64>,
-        end_offset: Option<i64>,
-        confidence: f64,
-    ) -> Result<i64> {
+    pub(super) async fn upsert_world_state_row(&self, state: NewWorldState<'_>) -> Result<i64> {
+        let NewWorldState {
+            entity_name,
+            slot,
+            value,
+            chapter,
+            event_id,
+            start_offset,
+            end_offset,
+            confidence,
+        } = state;
         // Participants must exist in world_states' FK target (world_entities).
-        let entity_id = {
+        // RETURNING id — never `last_insert_rowid`, which is stale on the
+        // ON CONFLICT DO UPDATE path (see link_event_participant_row).
+        let entity_id: i64 = {
             let conn = self.conn.lock().await;
-            let existing: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM world_entities WHERE name = ?1 LIMIT 1",
-                    params![entity_name],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            match existing {
-                Some(id) => id,
-                None => {
-                    conn.execute(
-                        "INSERT INTO world_entities (name, entity_type, importance) \
-                         VALUES (?1, 'person', 0.5) \
-                         ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','localtime')",
-                        params![entity_name],
-                    )?;
-                    conn.last_insert_rowid()
-                }
-            }
+            conn.query_row(
+                "INSERT INTO world_entities (name, entity_type, importance) \
+                 VALUES (?1, 'person', 0.5) \
+                 ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','localtime') \
+                 RETURNING id",
+                params![entity_name],
+                |r| r.get(0),
+            )?
         };
 
         let conn = self.conn.lock().await;
-        // event_id anchors idempotency: NULL event rows (manual writes) fall
-        // back to (entity, slot, chapter, value) identity via IS NOT DISTINCT.
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM world_states \
-                 WHERE entity_id = ?1 AND slot = ?2 AND event_id IS ?3 \
-                   AND chapter IS ?4 \
-                 LIMIT 1",
-                params![entity_id, slot, event_id, chapter],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            // Same identity observed again — refresh value/confidence only
-            // (a re-compile may resolve a better span).
-            conn.execute(
-                "UPDATE world_states SET value = ?2, confidence = ?3, \
-                    start_offset = COALESCE(?4, start_offset), \
-                    end_offset = COALESCE(?5, end_offset) \
-                 WHERE id = ?1",
-                params![id, value, confidence, start_offset, end_offset],
-            )?;
-            return Ok(id);
-        }
-        conn.execute(
+        // DO UPDATE so RETURNING always yields a row id; identical identity
+        // refreshes value/confidence and keeps the wider of the two spans.
+        conn.query_row(
             "INSERT INTO world_states \
              (entity_id, slot, value, chapter, event_id, start_offset, end_offset, confidence) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(entity_id, slot, IFNULL(event_id, -1), IFNULL(chapter, -1)) \
+             DO UPDATE SET \
+                 value = excluded.value, \
+                 confidence = excluded.confidence, \
+                 start_offset = COALESCE(excluded.start_offset, world_states.start_offset), \
+                 end_offset = COALESCE(excluded.end_offset, world_states.end_offset) \
+             RETURNING id",
             params![
                 entity_id,
                 slot,
@@ -364,8 +354,9 @@ impl SQLiteKnowledgeStore {
                 end_offset,
                 confidence
             ],
-        )?;
-        Ok(conn.last_insert_rowid())
+            |r| r.get::<_, i64>(0),
+        )
+        .map_err(Into::into)
     }
 
     /// List world states, optionally filtered by entity name, ordered by

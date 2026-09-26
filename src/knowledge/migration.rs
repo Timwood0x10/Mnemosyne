@@ -223,7 +223,7 @@ impl<'a> Migrator<'a> {
         // 1. Document (idempotent: reuse if this novel was migrated before).
         //    When reusing an existing document, wipe its prior knowledge rows
         //    first so re-migrating doesn't duplicate chapters/objects/edges.
-        let doc_id = match self.knowledge.find_document_by_title(novel).await? {
+        let doc_id = match self.knowledge.find_document(novel, "").await? {
             Some(d) => {
                 self.knowledge.clear_for_document(d.id).await?;
                 d.id
@@ -235,6 +235,10 @@ impl<'a> Migrator<'a> {
                         title: novel.to_string(),
                         author: None,
                         doc_type: Some("novel".into()),
+                        // Corpus migration predates provenance tags and
+                        // historically wrote title-only rows — keep "" so a
+                        // re-run keeps adopting the same legacy row.
+                        source: String::new(),
                         created_at: now_ts(),
                     })
                     .await?
@@ -242,13 +246,13 @@ impl<'a> Migrator<'a> {
         };
         stats.documents += 1;
 
-        // 2. Chapters with cumulative within-document byte offsets.
+        // 2. Chapters with their REAL source byte range: `corpus::Chapter`
+        //    carries `source[start..end] == text` exactly. The previous
+        //    cumulative-length cursor drifted because `ch.text` is trimmed —
+        //    the whitespace between chapters was never counted, so every
+        //    boundary after the first pointed into the wrong place.
         let mut chapter_ids: HashMap<i32, i64> = HashMap::new();
-        let mut cursor: i64 = 0;
         for ch in &chapters {
-            let start = cursor;
-            let end = cursor + ch.text.len() as i64;
-            cursor = end;
             let cid = self
                 .knowledge
                 .create_chapter(&Chapter {
@@ -257,8 +261,8 @@ impl<'a> Migrator<'a> {
                     chapter_no: ch.num,
                     title: None,
                     content: ch.text.clone(),
-                    start_offset: Some(start),
-                    end_offset: Some(end),
+                    start_offset: Some(ch.start_offset as i64),
+                    end_offset: Some(ch.end_offset as i64),
                 })
                 .await?;
             chapter_ids.insert(ch.num, cid);
@@ -492,6 +496,11 @@ impl<'a> Migrator<'a> {
                     Some(id) => *id,
                     None => continue,
                 };
+                // Chapter-local matches are lifted into full-source
+                // coordinates (`ch.start_offset` is content-exact), so every
+                // stored offset satisfies `source[start..end] == content` —
+                // the same invariant the pipeline's evidence rows keep.
+                let base = ch.start_offset as i64;
                 if let Some((alias, start, end)) = first_match(&ch.text, &search_names) {
                     // Slice a ~120-char window around the match, clamped to
                     // char boundaries so multi-byte Chinese never panics.
@@ -507,8 +516,8 @@ impl<'a> Migrator<'a> {
                             id: 0,
                             object_id: person_id,
                             chapter_id,
-                            start_offset: Some(start as i64),
-                            end_offset: Some(end as i64),
+                            start_offset: Some(base + start as i64),
+                            end_offset: Some(base + end as i64),
                             alias_used: Some(alias),
                             confidence: 1.0,
                         })
@@ -521,13 +530,14 @@ impl<'a> Migrator<'a> {
                             id: 0,
                             doc_id,
                             chapter_id,
-                            // Offsets must describe the stored `content` (the
-                            // `lo..hi` snippet window), not the narrower alias
-                            // match range `[start, end]` — otherwise a consumer
-                            // slicing the chapter at these offsets gets just the
-                            // alias (e.g. "赵云") instead of the evidence text.
-                            start_offset: Some(lo as i64),
-                            end_offset: Some(hi as i64),
+                            // Offsets describe the stored `content` (the
+                            // `lo..hi` snippet window) in FULL-SOURCE
+                            // coordinates — not the narrower alias match and
+                            // not chapter-local bytes — so slicing the source
+                            // document at these offsets reproduces the
+                            // snippet exactly.
+                            start_offset: Some(base + lo as i64),
+                            end_offset: Some(base + hi as i64),
                             content: snippet,
                             created_at: now_ts(),
                         })
@@ -742,6 +752,47 @@ mod tests {
             !zhaoyun.mentions.is_empty(),
             "赵云 should be mentioned in the corpus"
         );
+
+        // Chapter ranges are the REAL source bytes (content-exact), not a
+        // cumulative length cursor over trimmed text — the drift this fix
+        // replaced would point into the wrong place after chapter 1.
+        let src = std::fs::read_to_string(tmp.path().join("三国演义.txt")).expect("read source");
+        let expected = corpus::load_novel("三国演义", tmp.path()).expect("load corpus");
+        let doc = knowledge
+            .find_document_by_title("三国演义")
+            .await
+            .expect("query doc")
+            .expect("migrated document");
+        for ch in &expected {
+            let row = knowledge
+                .get_chapter_by_no(doc.id, ch.num)
+                .await
+                .expect("query chapter")
+                .unwrap_or_else(|| panic!("chapter {} must exist", ch.num));
+            let s = row.start_offset.expect("start_offset persisted");
+            let e = row.end_offset.expect("end_offset persisted");
+            assert_eq!(
+                &src[s as usize..e as usize],
+                ch.text,
+                "chapter {} range must slice the source file exactly",
+                ch.num
+            );
+        }
+
+        // Evidence offsets are full-source coordinates: slicing the FILE at
+        // them reproduces the stored snippet (chapter-local offsets before
+        // this fix never matched the file).
+        for ev in &zhaoyun.evidences {
+            let (Some(s), Some(e)) = (ev.start_offset, ev.end_offset) else {
+                continue;
+            };
+            assert_eq!(
+                &src[s as usize..e as usize],
+                ev.content,
+                "evidence `{}` must slice the source file exactly",
+                ev.content
+            );
+        }
 
         // V1 dimensional scoring preserved on the 结义 edge.
         let liubei = knowledge

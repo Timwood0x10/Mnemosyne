@@ -159,6 +159,8 @@ impl ToolHandler for GeneralizeCompileHandler {
                     "objects": stats.objects,
                     "edges": stats.edges,
                     "evidence": stats.evidence,
+                    "events": stats.events,
+                    "states": stats.states,
                 },
             })),
             Err(e) => Ok(err_result(format!("compile failed: {e}"))),
@@ -282,6 +284,34 @@ mod tests {
         assert!(
             text.contains("\"doc_type\": \"text\""),
             "default doc_type is text"
+        );
+    }
+
+    /// Objective: Verify the T6/T7 counters are surfaced in the stats JSON
+    /// (they were persisted by the pipeline but absent from the response).
+    /// Invariants: English single-name prose yields `"events": 1` (death)
+    /// and `"states": 1` (subject slot); both keys present.
+    #[tokio::test]
+    async fn stats_include_events_and_states() {
+        let handler = GeneralizeCompileHandler {
+            store: memory_store().await,
+        };
+        let result = handler
+            .call(&serde_json::json!({
+                "title": "Corvin",
+                "text": "Corvin died at dawn."
+            }))
+            .await
+            .expect("handler returns");
+        assert!(!result.is_error, "compile must succeed");
+        let text = result.content[0].text.clone().unwrap_or_default();
+        assert!(
+            text.contains("\"events\": 1"),
+            "stats must surface the death event, got: {text}"
+        );
+        assert!(
+            text.contains("\"states\": 1"),
+            "stats must surface the subject state slot, got: {text}"
         );
     }
 

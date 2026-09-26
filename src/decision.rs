@@ -97,7 +97,7 @@ pub struct Decision {
     /// What the decision was about.
     pub object: String,
     /// When the decision was made (state validity time).
-    pub made_at: i32,
+    pub made_at: i64,
     /// Facts that supported the decision. **Supporting evidence, not
     /// causality.**
     pub because: Vec<i64>,

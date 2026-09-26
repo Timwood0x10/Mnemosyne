@@ -115,8 +115,18 @@ pub fn extract_personality_markers(
 
     // Pass 2: scan the raw text (catches narrative descriptions not in events)
     if let Some(text) = corpus_text {
+        // Raw lines carry no chapter of their own — advance a cursor from
+        // the heading lines so markers below a heading report the REAL
+        // chapter instead of hardcoded 0 (which sorted them before 第一回
+        // and scrambled every arc).
+        let mut current_chapter = 0i32;
         for line in text.lines() {
             let line = line.trim();
+            // Parse BEFORE the length gate: a bare "第三回" heading is
+            // shorter than 10 bytes and must still advance the cursor.
+            if let Some(n) = crate::compiler::extract::parse_chapter_number(line) {
+                current_chapter = n;
+            }
             if line.len() < 10 {
                 continue;
             }
@@ -131,7 +141,7 @@ pub fn extract_personality_markers(
                             line,
                             entity,
                             kw.as_str(),
-                            0,
+                            current_chapter,
                             line.chars().take(120).collect::<String>().as_str(),
                             &mut markers,
                         );
@@ -555,6 +565,28 @@ mod tests {
             rels.len(),
             1,
             "one event with two participants must yield exactly one relation, got {rels:?}"
+        );
+    }
+
+    /// Objective: Verify raw-text personality markers carry the chapter from
+    /// the nearest preceding heading instead of the old hardcoded 0 (which
+    /// sorted them before 第一回 and scrambled every arc).
+    /// Invariants: markers report chapters [1, 2] in source order; a bare
+    /// heading shorter than the 10-byte line gate still advances the cursor.
+    #[test]
+    fn raw_text_markers_take_chapter_from_headings() {
+        let text = "第一回 开篇\n某人性情宽厚，待人以诚，人皆敬之。\n第二回\n某人性情暴躁，动辄发怒，人皆畏之。\n";
+        let markers = extract_personality_markers(
+            &[],
+            Some(text),
+            &["某人".to_string()],
+            &["性情".to_string()],
+        );
+        let chapters: Vec<i32> = markers.iter().map(|m| m.chapter).collect();
+        assert_eq!(
+            chapters,
+            vec![1, 2],
+            "markers must carry their heading chapter, got {markers:?}"
         );
     }
 }

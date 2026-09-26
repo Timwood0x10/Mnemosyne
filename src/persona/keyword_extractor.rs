@@ -132,9 +132,11 @@ const KEYWORD_MARKERS: &[KeywordMarker] = &[
 /// Keyword-based persona extractor — the offline fallback.
 ///
 /// Construct with [`KeywordPersonaExtractor::new`]. The extractor holds no
-/// state and is cheap to clone. It scans the utterance for the longest
-/// matching keyword marker and emits a single [`PersonaSignal`] with
-/// `confidence = 1.0`.
+/// state and is cheap to clone. It scans the utterance for every matching
+/// keyword marker, drops markers contained in a longer match (so "我不喜欢"
+/// absorbs "我喜欢"), and emits one [`PersonaSignal`] per remaining marker
+/// with `confidence = 1.0` — a sentence carrying two categories yields two
+/// signals.
 pub struct KeywordPersonaExtractor;
 
 impl KeywordPersonaExtractor {
@@ -159,28 +161,42 @@ impl PersonaSignalExtractor for KeywordPersonaExtractor {
             return Ok(Vec::new());
         }
 
-        // Longest-marker-wins: prefer the more specific stance-against phrase
-        // over the shorter affirmative it contains (e.g. "我不喜欢" beats
-        // "我喜欢"). This is a simple argmax by marker length.
-        let mut matched: Option<&KeywordMarker> = None;
-        for marker in KEYWORD_MARKERS {
-            if trimmed.contains(marker.marker)
-                && matched.is_none_or(|m| marker.marker.len() > m.marker.len())
-            {
-                matched = Some(marker);
-            }
+        let matched: Vec<&KeywordMarker> = KEYWORD_MARKERS
+            .iter()
+            .filter(|m| trimmed.contains(m.marker))
+            .collect();
+
+        // Containment rule (kept from the old longest-marker-wins argmax):
+        // a marker contained in a longer matched marker loses — "我不喜欢"
+        // absorbs "我喜欢" so one stance is not reported twice.
+        //
+        // MULTI-SIGNAL fix: DISTINCT matches are all real signals. The old
+        // global argmax kept exactly one marker for the whole utterance, so
+        // a sentence carrying two categories ("我不要钱，我喜欢猫") silently
+        // dropped one of them and the persona check never saw it.
+        let kept: Vec<&KeywordMarker> = matched
+            .iter()
+            .copied()
+            .filter(|m| {
+                !matched
+                    .iter()
+                    .any(|o| o.marker.len() > m.marker.len() && o.marker.contains(m.marker))
+            })
+            .collect();
+
+        if kept.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let Some(marker) = matched else {
-            return Ok(Vec::new());
-        };
-
-        Ok(vec![PersonaSignal {
-            text: trimmed.to_string(),
-            fact_type: marker.fact_type,
-            negated: marker.negated,
-            confidence: 1.0,
-        }])
+        Ok(kept
+            .into_iter()
+            .map(|marker| PersonaSignal {
+                text: trimmed.to_string(),
+                fact_type: marker.fact_type,
+                negated: marker.negated,
+                confidence: 1.0,
+            })
+            .collect())
     }
 
     fn is_semantic(&self) -> bool {
@@ -257,6 +273,44 @@ mod tests {
         let sig = &signals[0];
         assert_eq!(sig.fact_type, FactType::Emotion, "classified as Emotion");
         assert!(!sig.negated, "affirmative emotion not negated");
+    }
+
+    /// Objective: Verify DISTINCT matched markers across categories ALL
+    /// become signals — the old global longest-marker-wins argmax kept one
+    /// marker per utterance and silently dropped the other category (the
+    /// persona multi-signal extractor gap).
+    /// Invariants: "我不要钱，我喜欢猫" → Goal(negated) + Preference signals;
+    /// the containment rule still collapses 我不喜欢/我喜欢 to one.
+    #[tokio::test]
+    async fn distinct_categories_all_produce_signals() {
+        let extractor = KeywordPersonaExtractor::new();
+        let signals = extractor
+            .extract("我不要钱，我喜欢猫。")
+            .await
+            .expect("extract");
+        assert_eq!(
+            signals.len(),
+            2,
+            "both categories must surface, got {signals:?}"
+        );
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.fact_type == FactType::Goal && s.negated),
+            "negated goal present"
+        );
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.fact_type == FactType::Preference && !s.negated),
+            "affirmative preference present"
+        );
+
+        // Containment rule unchanged: the longer stance phrase absorbs the
+        // shorter affirmative it contains.
+        let negated = extractor.extract("我不喜欢猫。").await.expect("extract");
+        assert_eq!(negated.len(), 1, "contained marker still collapses");
+        assert!(negated[0].negated, "stance-against wins the containment");
     }
 
     /// Objective: Verify that an utterance with no matching keyword markers

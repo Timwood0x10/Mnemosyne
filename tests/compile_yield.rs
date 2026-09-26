@@ -131,7 +131,7 @@ fn lines(document: &Value) -> Vec<Line> {
 /// Every fact must be traceable: the evidence anchor carries the source sentence,
 /// and `content` carries a readable value (the whole sentence for observation
 /// facts, the disclosed value — "小林", "杭州" — for self-disclosures).
-fn compile_line(line: &str, time: i32) -> Vec<mnemosyne::cognition::Fact> {
+fn compile_line(line: &str, time: i64) -> Vec<mnemosyne::cognition::Fact> {
     let facts = compile_user_facts(&[Message::new("user", line)], 7, time);
     for fact in &facts {
         assert_eq!(
@@ -179,7 +179,7 @@ fn compile_yield_matches_the_annotated_corpus() {
 
     for (index, line) in annotated.iter().enumerate() {
         // One logical time per line keeps the corpus deterministic.
-        let time = 2026 + index as i32;
+        let time = 2026 + index as i64;
         let facts = compile_line(&line.text, time);
         let produced: BTreeSet<&str> = facts.iter().map(|fact| fact.fact_type.as_str()).collect();
 

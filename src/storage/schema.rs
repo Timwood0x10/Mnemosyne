@@ -10,12 +10,12 @@
 //! | Table | Purpose |
 //! |-------|---------|
 //! | `world_entities` | World entity nodes (person/place/org) |
+//! | `world_entity_aliases` | Entity alias index (courtesy/title/nickname) |
 //! | `world_entity_profiles` | Entity attributes (字, 籍贯, 外貌, ...) |
 //! | `events` | World state changes |
 //! | `event_participants` | Who participated in each event |
 //! | `world_relations` | Long-term entity relationships |
 //! | `world_states` | Character-state slots (status/location/...) per event |
-//! | `timeline` | Chronological event index |
 //!
 //! ## Legacy tables (V6 general model, retained for backward compatibility)
 //!
@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS documents (
     title       TEXT NOT NULL,
     author      TEXT,
     doc_type    TEXT,
+    source      TEXT NOT NULL DEFAULT '',
     created_at  INTEGER DEFAULT (strftime('%s','localtime'))
 );
 CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);

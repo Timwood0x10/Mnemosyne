@@ -34,7 +34,7 @@ async fn utterance_to_fact(
     utterance: &str,
     speaker: Speaker,
     entity_id: i64,
-    logical_time: i32,
+    logical_time: i64,
 ) -> Option<Fact> {
     let extractor = KeywordPersonaExtractor::new();
     let signals = extractor

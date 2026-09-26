@@ -56,6 +56,21 @@ impl Config {
             proximity_chars: 50,
         }
     }
+
+    /// Config for the language-agnostic production pipeline: the Chinese
+    /// defaults (lexicon zh verbs + zh dialog markers) merged with the
+    /// English provider's verb tables. `Config::default()` alone is
+    /// Chinese-only, so English prose compiled through `compile_source`
+    /// yielded zero action events. Dialog markers stay zh-only — English
+    /// dialogue detection is not implemented in extract (`from_language`
+    /// provides no markers either).
+    pub fn bilingual() -> Self {
+        let mut cfg = Config::default();
+        let en = Config::from_language(&crate::language::EnglishLanguageProvider::new());
+        cfg.strong_verbs.extend(en.strong_verbs);
+        cfg.action_verbs.extend(en.action_verbs);
+        cfg
+    }
 }
 
 /// Scan sentences for entity mentions, extract events, and populate the context.
@@ -224,7 +239,10 @@ pub fn compile(
 ///
 /// Supports both Arabic numerals ("第1回") and Chinese numerals
 /// ("第一百二十回"). Returns `None` if no chapter heading is found.
-fn parse_chapter_number(text: &str) -> Option<i32> {
+///
+/// `pub(crate)` for the timeline raw-text cursor, which advances its
+/// chapter tracker on the same heading lines.
+pub(crate) fn parse_chapter_number(text: &str) -> Option<i32> {
     // Only treat the sentence as a chapter heading when "第" appears at the
     // START (after trimming leading whitespace). This prevents false-positive
     // chapter resets on narrative text that merely contains "第X回" somewhere
@@ -680,6 +698,56 @@ mod tests {
         assert!(!ctx.events.is_empty(), "should create at least one event");
         let has_action = ctx.events.iter().any(|e| e.event_type == "action");
         assert!(has_action, "should have action-type event");
+    }
+
+    /// Objective: Verify `Config::bilingual()` covers BOTH languages — the
+    /// zh-only default yields zero action events for English prose (the
+    /// pipeline regression), while the bilingual config extracts them.
+    /// Invariants: default → no action events on English text; bilingual →
+    /// an action event whose span is non-empty; zh dialog markers survive.
+    #[test]
+    fn bilingual_config_extracts_english_actions() {
+        let mut dict = EntityDictionary::default();
+        dict.register_discovered("Prince John", &[]);
+        let text = "Prince John killed Count Dracula in the hallway.";
+        let sentences = [(text, 0usize, text.len())];
+
+        let mut zh_ctx = CompileContext::default();
+        compile(&mut zh_ctx, &sentences, &dict, &Config::default(), None);
+        assert!(
+            !zh_ctx.events.iter().any(|e| e.event_type == "action"),
+            "zh-only default must not match English verbs, got {:?}",
+            zh_ctx.events
+        );
+
+        let mut bi_ctx = CompileContext::default();
+        compile(&mut bi_ctx, &sentences, &dict, &Config::bilingual(), None);
+        let ev = bi_ctx
+            .events
+            .iter()
+            .find(|e| e.event_type == "action")
+            .unwrap_or_else(|| panic!("bilingual config must yield an action event"));
+        assert!(
+            ev.title.contains("Prince John"),
+            "subject resolved from the dict, got title {}",
+            ev.title
+        );
+        let (Some(s), Some(e)) = (ev.start_offset, ev.end_offset) else {
+            panic!("action event must carry a verb span");
+        };
+        assert!(s < e, "verb span must be non-empty, got {s}..{e}");
+
+        // Dialog markers stay Chinese-only (extract has no en markers by
+        // design) — merging must not drop the zh defaults.
+        let cfg = Config::bilingual();
+        assert!(
+            cfg.dialog_markers.contains(&"曰：".to_string()),
+            "zh dialog markers must survive the merge"
+        );
+        assert!(
+            cfg.strong_verbs.iter().any(|v| v == "kill"),
+            "en strong verbs must be merged"
+        );
     }
 
     /// Objective: Verify that a dialog sentence creates a Dialogue event.

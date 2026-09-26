@@ -60,7 +60,7 @@ pub struct FuseContext {
     /// Entity id the user's cognition is attributed to.
     pub user_entity_id: i64,
     /// Logical timestamp for the compiled facts.
-    pub logical_time: i32,
+    pub logical_time: i64,
 }
 
 /// Run the fused pipeline: anchor filter → compile → raw retention.

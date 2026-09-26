@@ -26,7 +26,7 @@ use crate::persona::check::is_persona_fact;
 /// so the previous logical-unit threshold of 1_000_000 flagged a mere ~11.6-day
 /// silence as a turning point and drowned StanceFlip/NewTheme in LargeGap noise.
 /// 90 days of epoch seconds matches the companion TTL horizon.
-const LARGE_GAP_THRESHOLD: i32 = 90 * 24 * 3600;
+const LARGE_GAP_THRESHOLD: i64 = 90 * 24 * 3600;
 
 /// Minimum number of shared character-bigrams required for two same-type
 /// facts to count as the "same topic" in stance-flip detection. Without this,
@@ -144,7 +144,7 @@ fn find_milestones(facts: &[Fact]) -> Vec<Milestone> {
     // string never fired.
     let mut stance_history: HashMap<FactType, Vec<(bool, String)>> = HashMap::new();
     let mut seen_types: HashSet<FactType> = HashSet::new();
-    let mut prev_time: Option<i32> = None;
+    let mut prev_time: Option<i64> = None;
 
     for fact in facts {
         if let Some(negated) = fact
@@ -208,7 +208,7 @@ mod tests {
     use super::*;
     use crate::fact_store::SqliteFactStore;
 
-    fn fact(id: i64, fact_type: FactType, time: i32, negated: Option<bool>, content: &str) -> Fact {
+    fn fact(id: i64, fact_type: FactType, time: i64, negated: Option<bool>, content: &str) -> Fact {
         let mut payload = serde_json::json!({ "content": content });
         if let Some(neg) = negated {
             payload["negated"] = serde_json::Value::from(neg);
@@ -221,7 +221,7 @@ mod tests {
             time,
             payload,
             evidence_id: None,
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         }
     }
@@ -333,7 +333,7 @@ mod tests {
             Some(2026),
             "current is the latest persona fact"
         );
-        let times: Vec<i32> = timeline.trajectory.iter().map(|f| f.time).collect();
+        let times: Vec<i64> = timeline.trajectory.iter().map(|f| f.time).collect();
         assert_eq!(times, vec![2020, 2024, 2026], "trajectory is time-ordered");
     }
 

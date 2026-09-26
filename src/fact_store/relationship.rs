@@ -53,8 +53,14 @@ impl SqliteFactStore {
 
 /// Upsert a relationship row on an already-locked connection (no lock
 /// acquisition — callers hold it).
+///
+/// Returns the row's stable id via `RETURNING id`. A plain
+/// `last_insert_rowid()` would be STALE on the conflict path: SQLite does
+/// not update it for `ON CONFLICT DO UPDATE`, so any INSERT between two
+/// saves of the same pair would hand back the interloper's id (the same
+/// defect class as the T8 `world_io` Fix#3 audit).
 fn save_relationship_unlocked(conn: &Connection, rs: &RelationshipState) -> Result<i64> {
-    conn.execute(
+    let id: i64 = conn.query_row(
         "INSERT INTO relationship_state
              (tenant_id, agent_entity_id, user_entity_id, intimacy, stage, emotion_trend, recent_topics, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
@@ -63,7 +69,8 @@ fn save_relationship_unlocked(conn: &Connection, rs: &RelationshipState) -> Resu
              stage         = excluded.stage,
              emotion_trend = excluded.emotion_trend,
              recent_topics = excluded.recent_topics,
-             updated_at    = excluded.updated_at",
+             updated_at    = excluded.updated_at
+         RETURNING id",
         params![
             rs.tenant_id,
             rs.agent_entity_id,
@@ -74,8 +81,9 @@ fn save_relationship_unlocked(conn: &Connection, rs: &RelationshipState) -> Resu
             serde_json::to_string(&rs.recent_topics)?,
             rs.updated_at,
         ],
+        |row| row.get(0),
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok(id)
 }
 
 /// Load a relationship row on an already-locked connection.
@@ -145,4 +153,48 @@ fn load_relationship_unlocked(
         recent_topics,
         updated_at,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state(tenant: &str, agent: i64, user: i64, intimacy: f64) -> RelationshipState {
+        RelationshipState {
+            tenant_id: tenant.into(),
+            agent_entity_id: agent,
+            user_entity_id: user,
+            intimacy,
+            stage: RelationshipStage::Stranger,
+            emotion_trend: EmotionTrend::Stable,
+            recent_topics: Vec::new(),
+            updated_at: 0,
+        }
+    }
+
+    /// Objective: Verify an upsert returns the row's id on BOTH paths.
+    /// `ON CONFLICT DO UPDATE` does not refresh `last_insert_rowid()`, so
+    /// an interloper INSERT between two saves of the same pair used to leak
+    /// its id (T8 last_insert_rowid audit — the relationship.rs hit).
+    /// Invariants: first save → new id; distinct pair → distinct id;
+    /// re-saving the first pair returns the FIRST id, not the interloper's.
+    #[test]
+    fn save_relationship_returns_stable_id_on_updates() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let conn = store.lock_conn().expect("lock conn");
+
+        let first = state("t", 1, 2, 0.1);
+        let id1 = save_relationship_unlocked(&conn, &first).expect("insert");
+
+        let interloper = state("t", 1, 3, 0.2);
+        let id2 = save_relationship_unlocked(&conn, &interloper).expect("insert");
+        assert_ne!(id1, id2, "distinct identity triples get distinct rows");
+
+        let updated = state("t", 1, 2, 0.9);
+        let id3 = save_relationship_unlocked(&conn, &updated).expect("update");
+        assert_eq!(
+            id3, id1,
+            "the conflict path must return the EXISTING row id, not the last insert's"
+        );
+    }
 }

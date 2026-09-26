@@ -242,6 +242,7 @@ mod tests {
                 title: "关系图".into(),
                 author: None,
                 doc_type: Some("text".into()),
+                source: String::new(),
             }],
             objects: vec![
                 ExportObject {
@@ -302,6 +303,8 @@ mod tests {
             world_entities: vec![],
             world_profiles: vec![],
             world_relations: vec![],
+            world_events: vec![],
+            world_states: vec![],
         };
         import_bundle(store.as_ref(), &bundle).await.expect("seed");
         store

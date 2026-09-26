@@ -104,7 +104,7 @@ impl ToolHandler for MemoryCompileTool {
         let validated_outcomes = Self::validate_decision_outcomes(args)?;
 
         let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-        let logical_time = chrono::Utc::now().timestamp() as i32;
+        let logical_time = chrono::Utc::now().timestamp();
         let compiled =
             self.compiler
                 .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);
@@ -303,7 +303,7 @@ impl MemoryCompileTool {
         tenant_id: &str,
         messages: &[Message],
         user_entity_id: i64,
-        logical_time: i32,
+        logical_time: i64,
     ) -> Result<Vec<(crate::cognition::Fact, crate::decision::Decision)>, Error> {
         let mut commitments = Vec::new();
         for (role, subject) in self.commitment_speakers(args, tenant_id, user_entity_id)? {

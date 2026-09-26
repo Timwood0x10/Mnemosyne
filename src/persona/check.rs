@@ -131,16 +131,32 @@ impl PersonaCheckEngine {
         Ok(result)
     }
 
-    /// Extract persona signals from the draft, preferring the semantic path.
+    /// Extract persona signals from the draft — MULTI-SIGNAL.
+    ///
+    /// The semantic path (when a prototype cache exists) runs first and the
+    /// keyword path always supplements it, so an explicit marker the
+    /// embeddings miss (below `match_` threshold, or a category no prototype
+    /// covers) is still checked. Identical `(fact_type, negated)` signals are
+    /// deduplicated — the semantic instance wins. Previously only ONE path
+    /// ever ran, so a draft like "我害怕独处" (explicit Emotion marker, no
+    /// matching prototype) produced zero signals and skipped the check.
     async fn extract_signals(&self, draft: &str) -> Result<Vec<PersonaSignal>> {
+        let mut signals = Vec::new();
         if let Some(cache) = &self.cache {
             let extractor =
                 EmbeddingPersonaExtractor::new(cache, self.embedder.as_ref(), self.thresholds);
-            extractor.extract(draft).await
-        } else {
-            let extractor = KeywordPersonaExtractor::new();
-            extractor.extract(draft).await
+            signals.extend(extractor.extract(draft).await?);
         }
+        let keyword = KeywordPersonaExtractor::new();
+        for sig in keyword.extract(draft).await? {
+            if !signals
+                .iter()
+                .any(|s| s.fact_type == sig.fact_type && s.negated == sig.negated)
+            {
+                signals.push(sig);
+            }
+        }
+        Ok(signals)
     }
 
     /// Check a single signal against the same-type persona facts.
@@ -539,6 +555,46 @@ mod tests {
             .expect("check");
         assert!(result.conflicts.is_empty(), "no conflict for unanchored");
         assert_eq!(result.drift.len(), 1, "unanchored identity → drift");
+    }
+
+    /// Objective: Verify `extract_signals` is MULTI-SIGNAL — with a
+    /// prototype cache the keyword path still supplements the semantic one,
+    /// so an explicit Emotion marker no matching prototype covers is not
+    /// silently dropped (the persona multi-signal extractor gap).
+    /// Invariants: "我害怕独处" yields an Emotion signal on a cache-Some
+    /// engine; identical (fact_type, negated) hits from both paths dedup to
+    /// one signal.
+    #[tokio::test]
+    async fn extract_signals_unions_keyword_and_semantic() {
+        let engine = engine().await;
+
+        // Explicit marker with no matching prototype: the semantic path
+        // cannot produce Emotion (prototypes are Preference/Identity only),
+        // so this signal can only come from the keyword supplement.
+        let signals = engine
+            .extract_signals("我害怕独处。")
+            .await
+            .expect("extract");
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.fact_type == FactType::Emotion && !s.negated),
+            "keyword Emotion marker must surface alongside the semantic path, got {signals:?}"
+        );
+
+        // Both paths hit the SAME signal → deduplicated to one.
+        let signals = engine
+            .extract_signals("我喜欢安稳踏实。")
+            .await
+            .expect("extract");
+        assert_eq!(
+            signals
+                .iter()
+                .filter(|s| s.fact_type == FactType::Preference && !s.negated)
+                .count(),
+            1,
+            "identical (fact_type, negated) from both paths must dedup, got {signals:?}"
+        );
     }
 
     /// Objective: Verify a draft with no persona signal yields an empty result.

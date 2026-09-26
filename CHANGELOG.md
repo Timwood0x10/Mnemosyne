@@ -286,6 +286,27 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **`upsert_world_event` / `upsert_world_state` take a parameter object.** Each
+  took eight positional arguments — five of them optional spans or numbers — and
+  the trait plus its implementation needed `#[allow(clippy::too_many_arguments)]`
+  to compile, so the lint was suppressed in four places. They now take
+  `NewWorldEvent` / `NewWorldState`, mirroring `WorldEvent` / `WorldState`
+  without the assigned `id`. Both implement `Default` **mirroring their table's
+  DDL** (`event_type 'event'`, `importance 0.5`, `confidence 0.8`), so a call
+  site may omit a field without writing a different number than the schema
+  would have; a test pins that contract. Breaking signature change for library
+  callers.
+- **`compiler/pipeline.rs` and `knowledge/store/mod.rs` came off the 1000-line
+  edge.** Both sat at 999 lines — one addition away from breaking the rule. The
+  pipeline's `#[cfg(test)] mod tests` (~470 lines) moved to
+  `tests/pipeline_compile.rs`, which also runs them the way a consumer does
+  (public API only, rule 4.2); the cases are unchanged, so their names lose the
+  `compiler::pipeline::tests::` prefix and become `pipeline_compile::<case>`.
+  The `impl KnowledgeStore for SQLiteKnowledgeStore` block (~620 lines) moved to
+  `knowledge/store/trait_impl.rs`; the two private helpers it owned are now
+  `pub(super)`, because their only caller (`queries.rs`) is a sibling module and
+  module privacy would otherwise hide them. `pipeline.rs` is down to 523 lines,
+  `store/mod.rs` to 380; the largest source file in the tree is now 978.
 - **`conversation_compiler`'s tests moved to a sibling file** (`mod tests;`), so
   neither `mod.rs` nor `tests.rs` crosses the 1000-line rule while the tests keep
   private access to the module.

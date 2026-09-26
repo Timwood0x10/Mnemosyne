@@ -495,9 +495,9 @@ impl KnowledgeIngestHandler {
         let mut chapter_count = 0usize;
         let mut evidence_count = 0usize;
         for ext in &docs {
-            // Skip if a document with the same title already exists
+            // Skip if the same (title, source) document already exists
             // (idempotent re-ingest — dev_guide "不双写" spirit).
-            let existing = self.store.find_document_by_title(&ext.title).await?;
+            let existing = self.store.find_document(&ext.title, &ext.source).await?;
             let doc_id = if let Some(doc) = existing {
                 doc.id
             } else {
@@ -506,6 +506,7 @@ impl KnowledgeIngestHandler {
                     title: ext.title.clone(),
                     author: ext.author.clone(),
                     doc_type: Some(ext.doc_type.clone()),
+                    source: ext.source.clone(),
                     created_at: chrono::Utc::now().timestamp(),
                 };
                 let did = self.store.create_document(&doc).await?;
@@ -610,7 +611,7 @@ impl ToolHandler for AgentFactCompileHandler {
 
         // Logical time: use the current epoch second so facts are chronologically
         // orderable alongside compiler-emitted facts.
-        let logical_time = chrono::Utc::now().timestamp() as i32;
+        let logical_time = chrono::Utc::now().timestamp();
 
         let compiler = CognitionCompiler::new();
         let facts = compiler.compile_conversation_facts(

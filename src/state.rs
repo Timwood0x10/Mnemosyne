@@ -50,9 +50,9 @@ const TOPIC_KEYS: &[&str] = &["keyword", "topic", "preference", "action"];
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StateInterval {
     /// When this state became valid.
-    pub from: i32,
+    pub from: i64,
     /// When this state ceased to be valid (`None` = still current).
-    pub to: Option<i32>,
+    pub to: Option<i64>,
     /// The state value (a representative fact's payload).
     pub value: serde_json::Value,
     /// The dimension's state value (`payload[value_key]`) used for folding:
@@ -90,7 +90,7 @@ pub struct StateTransition {
     /// Index into `StateEvolution::intervals` of the later state.
     pub to_index: usize,
     /// When the change happened (state validity time).
-    pub at: i32,
+    pub at: i64,
     /// The kind of change.
     pub transition_type: TransitionType,
     /// Evidence anchors backing the change.
@@ -487,7 +487,7 @@ mod tests {
     fn fact(
         id: i64,
         fact_type: FactType,
-        time: i32,
+        time: i64,
         key: &str,
         value: &str,
         content: &str,
@@ -507,7 +507,7 @@ mod tests {
             time,
             payload,
             evidence_id: None,
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         }
     }
@@ -670,7 +670,7 @@ mod tests {
     /// intervals (ADD-only: neither state is folded away).
     #[test]
     fn production_shaped_payloads_map_to_their_dimension() {
-        let emotion = |id: i64, time: i32, content: &str| Fact {
+        let emotion = |id: i64, time: i64, content: &str| Fact {
             id: Some(id),
             entity_id: 7,
             fact_type: FactType::Emotion,
@@ -680,7 +680,7 @@ mod tests {
                 "content": content,
                 "negated": false,
             }),
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         };
         let facts = vec![
@@ -718,7 +718,7 @@ mod tests {
     /// fold into ONE interval carrying both fact ids.
     #[test]
     fn companion_theme_facts_fold_on_their_keyword() {
-        let theme = |id: i64, time: i32, occurrences: i64| Fact {
+        let theme = |id: i64, time: i64, occurrences: i64| Fact {
             id: Some(id),
             entity_id: 7,
             fact_type: FactType::Preference,
@@ -728,7 +728,7 @@ mod tests {
                 "occurrences": occurrences,
                 "samples": ["周末去露营"],
             }),
-            created_at: i64::from(time),
+            created_at: time,
             ..Fact::default()
         };
         let evolution = intervals_for_dimension(

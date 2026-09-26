@@ -328,7 +328,14 @@ pub fn register_discovered_entities(dict: &mut EntityDictionary, ctx: &CompileCo
 
 /// Find the first known entity (by canonical name or alias) in the text.
 fn find_entity_in_text(text: &str, dict: &EntityDictionary) -> Option<(String, Option<i64>)> {
-    let mut candidates: Vec<&String> = dict.alias_to_canonical.keys().collect();
+    let mut candidates: Vec<&String> = dict
+        .alias_to_canonical
+        .keys()
+        // Same rule as `AliasIndex::build`: a single-char alias has no
+        // context safety on a whole-text scan — "云" must never resolve
+        // inside "浮云". Longest-first keeps longer aliases preferred.
+        .filter(|k| k.chars().count() >= 2)
+        .collect();
     // Sort by length DESCENDING (longest match first), then alphabetically as a
     // deterministic tie-breaker. Without the secondary key, same-length aliases
     // (e.g. "刘备" and "玄德", both 2 chars) would resolve in HashMap iteration
@@ -865,11 +872,11 @@ mod tests {
         );
     }
 
-    /// Objective: Verify `find_entity_in_text` is deterministic for same-length
-    /// aliases (NEW-H25 regression lock) — HashMap iteration order must not
-    /// leak into resolution.
-    /// Invariants: Repeated resolution of text containing two same-length
-    /// aliases yields the same entity every time.
+    /// Objective: Verify `find_entity_in_text` is deterministic for
+    /// same-length aliases (NEW-H25) and excludes single-char aliases (the
+    /// `AliasIndex::build` rule — no context safety on a whole-text scan,
+    /// so "云" must never resolve inside "浮云"). Invariants: one stable
+    /// entity; 浮云蔽日 → None with a single-char alias present.
     #[test]
     fn same_length_alias_resolution_is_deterministic() {
         let dict = make_dict();
@@ -882,6 +889,20 @@ mod tests {
             results.len(),
             1,
             "same-length alias resolution must be stable across runs, got {results:?}"
+        );
+
+        // Single-char exclusion (AliasIndex::build rule).
+        let mut dict = make_dict();
+        dict.alias_to_canonical.insert("云".into(), "赵云".into());
+        dict.alias_to_canonical.insert("赵云".into(), "赵云".into());
+        assert!(
+            find_entity_in_text("浮云蔽日", &dict).is_none(),
+            "single-char 云 must not resolve inside 浮云"
+        );
+        assert_eq!(
+            find_entity_in_text("赵云观阵", &dict).map(|(n, _)| n),
+            Some("赵云".to_string()),
+            "multi-char alias still resolves"
         );
     }
 

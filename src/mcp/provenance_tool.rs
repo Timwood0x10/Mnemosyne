@@ -123,9 +123,11 @@ impl ToolHandler for FactProvenanceTool {
             tenant_scope::tenant_argument(args)?,
         )?;
 
-        // Fetch the original-text evidence anchor, if any.
+        // Fetch the original-text evidence anchor, if any — content AND the
+        // source byte span, so the audit answer says WHERE the quote sits
+        // (content-only reads broke re-locatability at this surface).
         let evidence = match fact.evidence_id {
-            Some(evidence_id) => self.store.get_evidence_content(evidence_id)?,
+            Some(evidence_id) => self.store.get_evidence_anchor(evidence_id)?,
             None => None,
         };
 
@@ -138,7 +140,9 @@ impl ToolHandler for FactProvenanceTool {
             "payload": fact.payload,
             "confidence": fact.confidence,
             "status": fact.status.as_str(),
-            "evidence": evidence,
+            "evidence": evidence.as_ref().and_then(|a| a.content.clone()),
+            "evidence_start": evidence.as_ref().and_then(|a| a.start_offset),
+            "evidence_end": evidence.as_ref().and_then(|a| a.end_offset),
             "derived_from": derived_from,
         });
 
@@ -293,6 +297,13 @@ mod tests {
         assert!(
             evidence.contains("喜欢 Rust"),
             "evidence carries original text, got {evidence}"
+        );
+        // Span keys ride alongside the content (additive); this row was
+        // inserted without a span so the values are null, but the KEYS must
+        // always be present for consumers.
+        assert!(
+            body.get("evidence_start").is_some() && body.get("evidence_end").is_some(),
+            "provenance payload must expose the evidence span keys, got {body}"
         );
         let chain = body["derived_from"].as_array().expect("chain is an array");
         assert_eq!(chain.len(), 2, "chain expands both source facts");

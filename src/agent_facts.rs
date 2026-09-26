@@ -124,7 +124,7 @@ const COMPLETION_MARKERS: &[&str] = &[
 pub fn agent_facts_from_messages(
     messages: &[Message],
     agent_entity_id: i64,
-    logical_time: i32,
+    logical_time: i64,
 ) -> Vec<Fact> {
     let mut facts = Vec::new();
     for (idx, msg) in messages.iter().enumerate() {
@@ -165,7 +165,7 @@ pub fn agent_facts_from_messages(
                 time: logical_time,
                 payload,
                 evidence_id: None,
-                created_at: i64::from(logical_time),
+                created_at: logical_time,
                 ..Fact::default()
             });
             continue;
@@ -194,7 +194,7 @@ pub fn agent_facts_from_messages(
                     },
                 }),
                 evidence_id: None,
-                created_at: i64::from(logical_time),
+                created_at: logical_time,
                 ..Fact::default()
             });
         }
@@ -326,7 +326,7 @@ const RESTATEMENT_PATTERNS: &[RestatementPattern] = &[
 pub fn derived_facts_from_messages(
     messages: &[Message],
     user_entity_id: i64,
-    logical_time: i32,
+    logical_time: i64,
 ) -> Vec<Fact> {
     let mut facts = Vec::new();
     for (idx, msg) in messages.iter().enumerate() {
@@ -381,7 +381,7 @@ pub fn derived_facts_from_messages(
                     "evidence": evidence,
                 }),
                 evidence_id: None,
-                created_at: i64::from(logical_time),
+                created_at: logical_time,
                 ..Fact::default()
             });
         }

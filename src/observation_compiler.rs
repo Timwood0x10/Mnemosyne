@@ -190,7 +190,7 @@ impl Rule for DefaultRule {
             id: None,
             entity_id: subject_id,
             fact_type,
-            time: observation.timestamp.unwrap_or(0),
+            time: i64::from(observation.timestamp.unwrap_or(0)),
             payload,
             evidence_id: None,
             created_at: 0,

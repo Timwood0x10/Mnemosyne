@@ -59,7 +59,7 @@ impl CognitionCompiler {
         tenant_id: &str,
         messages: &[Message],
         user_entity_id: i64,
-        logical_time: i32,
+        logical_time: i64,
     ) -> CognitionCompileResult {
         let observations = compile_user_observations(messages, user_entity_id);
         // Route through the shared channel entry point, never the marker path
@@ -97,7 +97,7 @@ impl CognitionCompiler {
         messages: &[Message],
         user_entity_id: i64,
         agent_entity_id: i64,
-        logical_time: i32,
+        logical_time: i64,
     ) -> ConversationFacts {
         let mut user_facts = crate::conversation_compiler::compile_user_facts(
             messages,

@@ -10,7 +10,12 @@ use super::*;
 pub trait KnowledgeStore: Send + Sync {
     // ── documents / chapters ───────────────────────────────────
     async fn create_document(&self, d: &Document) -> Result<i64>;
+    /// Title-only lookup (any source). Kept for read paths that only know a
+    /// title — write paths that carry provenance must use [`Self::find_document`].
     async fn find_document_by_title(&self, title: &str) -> Result<Option<Document>>;
+    /// Exact `(title, source)` lookup — the write-path identity: two
+    /// different sources sharing a title stay separate documents.
+    async fn find_document(&self, title: &str, source: &str) -> Result<Option<Document>>;
     async fn create_chapter(&self, c: &Chapter) -> Result<i64>;
     async fn get_chapter_by_no(&self, doc_id: i64, chapter_no: i32) -> Result<Option<Chapter>>;
 
@@ -62,6 +67,20 @@ pub trait KnowledgeStore: Send + Sync {
 
     // ── evidence + links ──────────────────────────────────────
     async fn create_evidence(&self, e: &Evidence) -> Result<i64>;
+    /// Find an evidence row with the same identity, or create it.
+    ///
+    /// Identity is `(doc_id, start_offset, end_offset, content)` so
+    /// re-compiling the same document reuses rows instead of multiplying
+    /// duplicates (zero-pollution). Returns `(id, created)` — `created` is
+    /// `false` when an identical row already existed.
+    async fn ensure_evidence(
+        &self,
+        doc_id: i64,
+        chapter_id: i64,
+        start_offset: Option<i64>,
+        end_offset: Option<i64>,
+        content: &str,
+    ) -> Result<(i64, bool)>;
     /// Idempotent: inserting a duplicate (source, evidence) pair is a no-op.
     async fn link_evidence(
         &self,
@@ -157,18 +176,7 @@ pub trait KnowledgeStore: Send + Sync {
     /// The offset pair is part of the identity so the same title at two
     /// different source spans stays two events, while a re-compile of the
     /// same sentence is a no-op.
-    #[allow(clippy::too_many_arguments)]
-    async fn upsert_world_event(
-        &self,
-        title: &str,
-        event_type: &str,
-        timestamp: Option<i32>,
-        location: Option<&str>,
-        description: &str,
-        importance: f64,
-        start_offset: Option<i64>,
-        end_offset: Option<i64>,
-    ) -> Result<i64>;
+    async fn upsert_world_event(&self, event: NewWorldEvent<'_>) -> Result<i64>;
     /// Link an event to a world entity by name (upserting the entity when it
     /// is not yet in `world_entities`). Idempotent via the
     /// `event_participants UNIQUE(event_id, entity_id)` constraint.
@@ -180,27 +188,20 @@ pub trait KnowledgeStore: Send + Sync {
     ) -> Result<()>;
     /// List all V7 world events (ordered by id), for export and tests.
     async fn list_world_events(&self) -> Result<Vec<WorldEvent>>;
+    /// List an event's participants as (entity name, role), ordered by row
+    /// id — the portable form for export (`event_participants` numeric ids
+    /// are local to each database).
+    async fn list_event_participants(&self, event_id: i64) -> Result<Vec<EventParticipantRef>>;
     /// Upsert a character-state slot (`world_states`) anchored to its source
     /// event. Identity is `(entity_id, slot, event_id, chapter)` so a
     /// re-compile of the same document is a no-op while a *new* event at a
     /// later chapter appends history (ADD-only — state stays reconstructable).
     ///
-    /// `entity_name` is upserted into `world_entities` when unseen (same
+    /// `event.entity_name` is upserted into `world_entities` when unseen (same
     /// contract as `link_event_participant`).
     ///
     /// Returns the `world_states.id`.
-    #[allow(clippy::too_many_arguments)]
-    async fn upsert_world_state(
-        &self,
-        entity_name: &str,
-        slot: &str,
-        value: &str,
-        chapter: Option<i32>,
-        event_id: Option<i64>,
-        start_offset: Option<i64>,
-        end_offset: Option<i64>,
-        confidence: f64,
-    ) -> Result<i64>;
+    async fn upsert_world_state(&self, state: NewWorldState<'_>) -> Result<i64>;
     /// List world states ordered by (chapter, id), optionally filtered by
     /// entity name. `None` returns every entity's history.
     async fn list_world_states(&self, entity_name: Option<&str>) -> Result<Vec<WorldState>>;

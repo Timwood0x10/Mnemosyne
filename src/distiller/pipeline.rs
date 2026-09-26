@@ -218,6 +218,14 @@ impl PipelineDistiller {
                     if exp.memory_type != mem.memory_type {
                         continue;
                     }
+                    // Conflict candidates must belong to the SAME user: the
+                    // vector search is tenant-wide, but another conversation's
+                    // near-identical memory is not replaceable — deleting it
+                    // (ReplaceOld below) would silently destroy that user's
+                    // history (T15 cross-user conflict bug).
+                    if exp.user_id != mem.user_id {
+                        continue;
+                    }
                     // Rehydrate the existing record into a Memory, then load
                     // its REAL stored embedding so the cosine comparison runs
                     // against genuine data. The raw `search_by_vector` results
@@ -233,6 +241,7 @@ impl PipelineDistiller {
                         exp.confidence,
                     );
                     existing_mem.id = exp.id.clone();
+                    existing_mem.user_id = exp.user_id.clone();
                     // Rehydrate the REAL stored vector. Propagate read
                     // failures: silently defaulting to an empty vector made a
                     // storage error look like "no embedding", so cosine
@@ -278,7 +287,17 @@ impl PipelineDistiller {
             // importance (replace old), duplicate with lower-or-equal
             // importance (drop candidate).
             let duplicate = existing.iter().find(|exp| {
-                content_hash(&exp.content) == new_hash && exp.memory_type == mem.memory_type
+                content_hash(&exp.content) == new_hash
+                    && exp.memory_type == mem.memory_type
+                    // Same-user scope (T15): an identical content hash from
+                    // ANOTHER user's conversation is not a duplicate of this
+                    // candidate — deleting or dropping on it destroys one of
+                    // the two histories.
+                    && exp.user_id == mem.user_id
+                // Same-user scope (T15): an identical content hash from
+                // ANOTHER user's conversation is not a duplicate of this
+                // candidate — deleting or dropping on it destroys one of
+                // the two histories.
             });
             match duplicate {
                 Some(exp) if mem.importance > exp.confidence => {

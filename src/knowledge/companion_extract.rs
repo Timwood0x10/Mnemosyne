@@ -162,7 +162,7 @@ pub fn companion_facts_from_extract(
     messages: &[Message],
     user_entity_id: i64,
     agent_entity_id: i64,
-    logical_time: i32,
+    logical_time: i64,
 ) -> (Vec<Fact>, Vec<Fact>) {
     let mut user_facts = Vec::new();
     let mut agent_facts = Vec::new();
@@ -193,7 +193,7 @@ pub fn companion_facts_from_extract(
                 },
             }),
             evidence_id: None,
-            created_at: i64::from(logical_time),
+            created_at: logical_time,
             ..Fact::default()
         };
         push_companion_fact(fact, &emotion.role, &mut user_facts, &mut agent_facts);
@@ -220,7 +220,7 @@ pub fn companion_facts_from_extract(
                 },
             }),
             evidence_id: None,
-            created_at: i64::from(logical_time),
+            created_at: logical_time,
             ..Fact::default()
         };
         push_companion_fact(fact, &cognition.role, &mut user_facts, &mut agent_facts);
@@ -262,7 +262,7 @@ pub fn companion_facts_from_extract(
                 },
             }),
             evidence_id: None,
-            created_at: i64::from(logical_time),
+            created_at: logical_time,
             ..Fact::default()
         };
         push_companion_fact(fact, role, &mut user_facts, &mut agent_facts);

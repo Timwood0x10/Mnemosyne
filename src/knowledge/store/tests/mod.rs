@@ -105,6 +105,7 @@ async fn seed_doc(store: &SQLiteKnowledgeStore, title: &str) -> i64 {
             title: title.to_string(),
             author: None,
             doc_type: Some("novel".into()),
+            source: String::new(),
             created_at: now_ts(),
         })
         .await
@@ -160,6 +161,57 @@ async fn document_and_chapter_round_trip() {
         .expect("chapter exists");
     assert_eq!(got.id, cid);
     assert_eq!(got.chapter_no, 3);
+}
+
+/// Objective: Verify `search_evidence` exposes the source byte span at the
+/// API surface (`EvidenceHit.start_offset`/`end_offset`) — the explore-5
+/// "evidence span exposure" gap: rows carried the anchor but the `evidence`
+/// tool output dropped it.
+/// Invariants: the hit returns the exact stored span; a legacy NULL span
+/// deserializes to `None`.
+#[tokio::test]
+async fn search_evidence_exposes_source_span() {
+    let store = fresh().await;
+    let doc_id = seed_doc(&store, "三国演义").await;
+    let chapter_id = seed_chapter(&store, doc_id, 1).await;
+    let (evidence_id, created) = store
+        .ensure_evidence(doc_id, chapter_id, Some(10), Some(20), "孔宣兵阻援兵")
+        .await
+        .expect("ensure evidence");
+    assert!(created, "first ensure creates the row");
+    assert!(evidence_id > 0, "row id assigned");
+
+    let hits = store
+        .search_evidence("孔宣兵阻", None, 5)
+        .await
+        .expect("search");
+    assert!(!hits.is_empty(), "hit must be found");
+    assert_eq!(
+        hits[0].start_offset,
+        Some(10),
+        "hit must expose the source span start"
+    );
+    assert_eq!(hits[0].end_offset, Some(20), "hit must expose the span end");
+
+    // Legacy rows (NULL span) surface as None, not a panic.
+    store
+        .create_evidence(&crate::knowledge::Evidence {
+            id: 0,
+            doc_id,
+            chapter_id,
+            start_offset: None,
+            end_offset: None,
+            content: "旧证据没有 span".to_string(),
+            created_at: now_ts(),
+        })
+        .await
+        .expect("legacy evidence");
+    let hits = store
+        .search_evidence("旧证据", None, 5)
+        .await
+        .expect("search legacy");
+    assert_eq!(hits.len(), 1, "legacy row found");
+    assert_eq!(hits[0].start_offset, None, "legacy span is None");
 }
 
 /// Objective: Verify an explicit transaction COMMIT persists all writes
@@ -700,46 +752,46 @@ async fn evidence_link_is_idempotent() {
 async fn world_event_offsets_round_trip_and_upsert_is_idempotent() {
     let store = fresh().await;
     let id1 = store
-        .upsert_world_event(
-            "刘备曰",
-            "dialogue",
-            Some(3),
-            None,
-            "刘备曰：进攻",
-            0.5,
-            Some(100),
-            Some(120),
-        )
+        .upsert_world_event(NewWorldEvent {
+            title: "刘备曰",
+            event_type: "dialogue",
+            timestamp: Some(3),
+            description: "刘备曰：进攻",
+            importance: 0.5,
+            start_offset: Some(100),
+            end_offset: Some(120),
+            ..NewWorldEvent::default()
+        })
         .await
         .expect("insert event");
     // Same identity → same id (re-compile must not duplicate).
     let id1_again = store
-        .upsert_world_event(
-            "刘备曰",
-            "dialogue",
-            Some(3),
-            None,
-            "刘备曰：进攻",
-            0.5,
-            Some(100),
-            Some(120),
-        )
+        .upsert_world_event(NewWorldEvent {
+            title: "刘备曰",
+            event_type: "dialogue",
+            timestamp: Some(3),
+            description: "刘备曰：进攻",
+            importance: 0.5,
+            start_offset: Some(100),
+            end_offset: Some(120),
+            ..NewWorldEvent::default()
+        })
         .await
         .expect("re-insert");
     assert_eq!(id1, id1_again, "identical (title, ts, span) reuses the row");
 
     // Same title at a different span is a distinct event.
     let id2 = store
-        .upsert_world_event(
-            "刘备曰",
-            "dialogue",
-            Some(3),
-            None,
-            "刘备曰：撤退",
-            0.5,
-            Some(500),
-            Some(520),
-        )
+        .upsert_world_event(NewWorldEvent {
+            title: "刘备曰",
+            event_type: "dialogue",
+            timestamp: Some(3),
+            description: "刘备曰：撤退",
+            importance: 0.5,
+            start_offset: Some(500),
+            end_offset: Some(520),
+            ..NewWorldEvent::default()
+        })
         .await
         .expect("insert second");
     assert_ne!(id1, id2, "different span must not merge events");
@@ -778,44 +830,44 @@ async fn world_event_offsets_round_trip_and_upsert_is_idempotent() {
 async fn world_state_slots_round_trip_and_append_history() {
     let store = fresh().await;
     let event_id = store
-        .upsert_world_event(
-            "吕布 杀 董卓",
-            "action",
-            Some(3),
-            None,
-            "吕布杀董卓",
-            0.6,
-            Some(100),
-            Some(112),
-        )
+        .upsert_world_event(NewWorldEvent {
+            title: "吕布 杀 董卓",
+            event_type: "action",
+            timestamp: Some(3),
+            description: "吕布杀董卓",
+            importance: 0.6,
+            start_offset: Some(100),
+            end_offset: Some(112),
+            ..NewWorldEvent::default()
+        })
         .await
         .expect("event");
 
     let id1 = store
-        .upsert_world_state(
-            "董卓",
-            "status",
-            "deceased",
-            Some(3),
-            Some(event_id),
-            Some(100),
-            Some(112),
-            0.75,
-        )
+        .upsert_world_state(NewWorldState {
+            entity_name: "董卓",
+            slot: "status",
+            value: "deceased",
+            chapter: Some(3),
+            event_id: Some(event_id),
+            start_offset: Some(100),
+            end_offset: Some(112),
+            confidence: 0.75,
+        })
         .await
         .expect("state 1");
     // Same (entity, slot, event, chapter) → same row (re-compile no-op).
     let id1_again = store
-        .upsert_world_state(
-            "董卓",
-            "status",
-            "deceased",
-            Some(3),
-            Some(event_id),
-            Some(100),
-            Some(112),
-            0.75,
-        )
+        .upsert_world_state(NewWorldState {
+            entity_name: "董卓",
+            slot: "status",
+            value: "deceased",
+            chapter: Some(3),
+            event_id: Some(event_id),
+            start_offset: Some(100),
+            end_offset: Some(112),
+            confidence: 0.75,
+        })
         .await
         .expect("state re-upsert");
     assert_eq!(id1, id1_again, "identical observation must reuse the row");
@@ -836,29 +888,29 @@ async fn world_state_slots_round_trip_and_append_history() {
 
     // A later chapter (different event) appends history — ADD-only.
     let event2 = store
-        .upsert_world_event(
-            "华雄 斩 某",
-            "action",
-            Some(5),
-            None,
-            "华雄斩某",
-            0.6,
-            Some(200),
-            Some(210),
-        )
+        .upsert_world_event(NewWorldEvent {
+            title: "华雄 斩 某",
+            event_type: "action",
+            timestamp: Some(5),
+            description: "华雄斩某",
+            importance: 0.6,
+            start_offset: Some(200),
+            end_offset: Some(210),
+            ..NewWorldEvent::default()
+        })
         .await
         .expect("event 2");
     store
-        .upsert_world_state(
-            "华雄",
-            "status",
-            "deceased",
-            Some(5),
-            Some(event2),
-            Some(200),
-            Some(210),
-            0.7,
-        )
+        .upsert_world_state(NewWorldState {
+            entity_name: "华雄",
+            slot: "status",
+            value: "deceased",
+            chapter: Some(5),
+            event_id: Some(event2),
+            start_offset: Some(200),
+            end_offset: Some(210),
+            confidence: 0.7,
+        })
         .await
         .expect("state 2");
 
@@ -872,6 +924,48 @@ async fn world_state_slots_round_trip_and_append_history() {
     let one = store.list_world_states(Some("董卓")).await.expect("filter");
     assert_eq!(one.len(), 1, "filter by entity name");
     assert_eq!(one[0].entity_name, "董卓");
+}
+
+/// Objective: Verify the world-write parameter objects default to the values
+/// their tables would have written, so a call site may omit a field without
+/// silently storing a different number (the columns are always bound
+/// explicitly, so the DDL default can never apply on its own).
+/// Invariants: `NewWorldEvent` mirrors the `events` DDL (`event_type 'event'`,
+/// `importance 0.5`); `NewWorldState` mirrors `world_states`
+/// (`confidence 0.8`); every omitted span stays `None` instead of being guessed.
+#[test]
+fn new_world_rows_default_to_the_schema_values() {
+    let event = NewWorldEvent::default();
+    assert_eq!(
+        event.event_type, "event",
+        "events.event_type defaults to 'event'"
+    );
+    assert_eq!(event.importance, 0.5, "events.importance defaults to 0.5");
+    assert_eq!(
+        event.timestamp, None,
+        "an omitted chapter must stay unknown"
+    );
+    assert_eq!(event.location, None);
+    assert_eq!(event.start_offset, None);
+    assert_eq!(event.end_offset, None);
+    assert!(
+        event.title.is_empty() && event.description.is_empty(),
+        "text fields default to empty, never to a placeholder"
+    );
+
+    let state = NewWorldState::default();
+    assert_eq!(
+        state.confidence, 0.8,
+        "world_states.confidence defaults to 0.8"
+    );
+    assert_eq!(state.chapter, None);
+    assert_eq!(state.event_id, None, "no event anchor is invented");
+    assert_eq!(state.start_offset, None);
+    assert_eq!(state.end_offset, None);
+    assert!(
+        state.entity_name.is_empty() && state.slot.is_empty() && state.value.is_empty(),
+        "text fields default to empty, never to a placeholder"
+    );
 }
 
 mod views;

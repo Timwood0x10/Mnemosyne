@@ -6,6 +6,15 @@ use std::path::Path;
 pub struct Chapter {
     pub num: i32,
     pub text: String,
+    /// Byte range of `text` inside the source handed to
+    /// [`split_into_chapters`]: `source[start_offset .. end_offset] == text`
+    /// exactly, so a chapter-local offset plus `start_offset` maps into the
+    /// full-source coordinate space (the invariant evidence rows rely on to
+    /// stay re-locatable). Coordinates are into the source AS PASSED — a
+    /// leading BOM, when present, stays inside the coordinate space instead
+    /// of shifting every range by 3 bytes.
+    pub start_offset: usize,
+    pub end_offset: usize,
 }
 
 /// Known corpus file names.
@@ -97,7 +106,6 @@ fn is_valid_chapter_numeral(s: &str) -> bool {
 /// Looks for patterns like "第一回", "第一百二十回" etc. Only accepts
 /// markers where the text between "第" and "回" consists solely of numerals.
 pub fn split_into_chapters(text: &str) -> Vec<Chapter> {
-    let text = text.trim_start_matches('\u{feff}');
     let mut chapters = Vec::new();
 
     let mut pos = 0;
@@ -168,11 +176,19 @@ pub fn split_into_chapters(text: &str) -> Vec<Chapter> {
             }
         };
 
-        // Content starts after "回" (3-byte char)
-        let content = text[end + '回'.len_utf8()..next_start].trim().to_string();
+        // Content starts after "回" (3-byte char). Record the trimmed
+        // body's EXACT range in the source: a heading-to-heading range would
+        // not slice back to `content`, and a cumulative length cursor drifts
+        // because `trim()` drops the whitespace between chapters.
+        let raw = &text[end + '回'.len_utf8()..next_start];
+        let leading = raw.len() - raw.trim_start().len();
+        let content = raw.trim();
+        let content_start = end + '回'.len_utf8() + leading;
         chapters.push(Chapter {
             num: ch_num,
-            text: content,
+            text: content.to_string(),
+            start_offset: content_start,
+            end_offset: content_start + content.len(),
         });
 
         pos = next_start;
@@ -282,6 +298,72 @@ mod tests {
         assert_eq!(chapters.len(), 2);
         assert_eq!(chapters[0].num, 1);
         assert_eq!(chapters[1].num, 2);
+    }
+
+    /// Objective: Verify each chapter carries its EXACT source byte range —
+    /// `source[start_offset..end_offset] == text` (content-exact after trim,
+    /// never a heading-to-heading or cumulative-length approximation).
+    /// Invariants: slice equality per chapter; ranges strictly ordered and
+    /// non-overlapping; leading in-chapter whitespace excluded.
+    #[test]
+    fn split_chapters_carries_source_byte_ranges() {
+        let text = "序言。\n第一回 开篇\n  正文一。\n第二回 发展\n正文二。\n";
+        let chapters = split_into_chapters(text);
+        assert_eq!(chapters.len(), 2, "two chapters");
+        for ch in &chapters {
+            assert_eq!(
+                &text[ch.start_offset..ch.end_offset],
+                ch.text,
+                "chapter {} range must slice the source exactly",
+                ch.num
+            );
+        }
+        assert!(
+            chapters[0].start_offset < chapters[1].start_offset,
+            "ranges follow source order"
+        );
+        assert!(
+            chapters[0].end_offset <= chapters[1].start_offset,
+            "ranges must not overlap (the next heading separates them)"
+        );
+        assert_eq!(
+            chapters[0].text, "开篇\n  正文一。",
+            "content runs from just after the heading marker, leading blank trimmed"
+        );
+        assert!(
+            !chapters[0].text.starts_with(char::is_whitespace),
+            "range starts at the first non-blank byte"
+        );
+    }
+
+    /// Objective: Verify a leading BOM does NOT shift the byte ranges —
+    /// coordinates are into the source as passed, so `raw[start..end] == text`
+    /// even when the file starts with U+FEFF (the previous BOM strip made
+    /// every range 3 bytes short of the raw file).
+    /// Invariants: slice equality against the RAW input; range starts after
+    /// the BOM; content excludes the BOM.
+    #[test]
+    fn split_chapters_bom_keeps_raw_source_coordinates() {
+        let raw = "\u{feff}第一回 开篇\n正文一。\n第二回 发展\n正文二。\n";
+        let chapters = split_into_chapters(raw);
+        assert_eq!(chapters.len(), 2, "BOM must not break marker detection");
+        for ch in &chapters {
+            assert_eq!(
+                &raw[ch.start_offset..ch.end_offset],
+                ch.text,
+                "chapter {} range must slice the RAW source (BOM included)",
+                ch.num
+            );
+        }
+        assert!(
+            chapters[0].start_offset >= '\u{feff}'.len_utf8(),
+            "range starts past the BOM, got {}",
+            chapters[0].start_offset
+        );
+        assert!(
+            !chapters[0].text.starts_with('\u{feff}'),
+            "content never contains the BOM"
+        );
     }
 
     #[test]

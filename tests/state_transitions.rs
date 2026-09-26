@@ -16,7 +16,7 @@ use mnemosyne::state::{TransitionType, dimension_value_keys, intervals_for_dimen
 fn fact(
     id: i64,
     fact_type: FactType,
-    time: i32,
+    time: i64,
     key: &str,
     value: &str,
     content: &str,
@@ -36,14 +36,14 @@ fn fact(
         time,
         payload,
         evidence_id: None,
-        created_at: i64::from(time),
+        created_at: time,
         ..Fact::default()
     }
 }
 
 /// Build a user-channel observation exactly as `conversation_compiler` emits it:
 /// `{action, subject, object, content}` with no `keyword`.
-fn observation(id: i64, time: i32, action: &str, content: &str) -> Fact {
+fn observation(id: i64, time: i64, action: &str, content: &str) -> Fact {
     Fact {
         id: Some(id),
         entity_id: 7,
@@ -55,7 +55,7 @@ fn observation(id: i64, time: i32, action: &str, content: &str) -> Fact {
             "object": null,
             "content": content,
         }),
-        created_at: i64::from(time),
+        created_at: time,
         ..Fact::default()
     }
 }

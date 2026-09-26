@@ -667,6 +667,7 @@ mod tests {
                 title: "crm-export".into(),
                 author: None,
                 doc_type: Some("novel".into()),
+                source: String::new(),
                 created_at: now_ts(),
             })
             .await
@@ -760,6 +761,7 @@ mod tests {
                 title: "三国演义".into(),
                 author: None,
                 doc_type: Some("novel".into()),
+                source: String::new(),
                 created_at: now_ts(),
             })
             .await

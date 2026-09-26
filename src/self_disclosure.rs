@@ -147,7 +147,7 @@ const MAX_VALUE_CHARS: usize = 16;
 
 /// Extract self-disclosure facts from the user's messages.
 #[must_use]
-pub fn disclosures_from_messages(messages: &[Message], entity_id: i64, time: i32) -> Vec<Fact> {
+pub fn disclosures_from_messages(messages: &[Message], entity_id: i64, time: i64) -> Vec<Fact> {
     if entity_id <= 0 {
         return Vec::new();
     }
@@ -195,7 +195,7 @@ fn clauses(message: &str) -> Vec<Clause<'_>> {
 }
 
 /// Apply every disclosure rule to one clause.
-fn collect(clause: &Clause<'_>, message: &str, entity_id: i64, time: i32, facts: &mut Vec<Fact>) {
+fn collect(clause: &Clause<'_>, message: &str, entity_id: i64, time: i64, facts: &mut Vec<Fact>) {
     let text = clause.text;
 
     if let Some((value, at)) = after_cue(text, NAME_CUES) {
@@ -448,7 +448,7 @@ fn push_identity(
     anchor: &Anchor,
     message: &str,
     entity_id: i64,
-    time: i32,
+    time: i64,
 ) {
     push(
         facts,
@@ -469,7 +469,7 @@ fn push_relationship(
     anchor: &Anchor,
     message: &str,
     entity_id: i64,
-    time: i32,
+    time: i64,
 ) {
     push(
         facts,
@@ -490,7 +490,7 @@ fn push_plain(
     anchor: &Anchor,
     message: &str,
     entity_id: i64,
-    time: i32,
+    time: i64,
 ) {
     push(
         facts,
@@ -512,7 +512,7 @@ fn push(
     anchor: &Anchor,
     message: &str,
     entity_id: i64,
-    time: i32,
+    time: i64,
 ) {
     payload["kind"] = serde_json::Value::from("self_disclosure");
     payload["evidence"] = serde_json::json!({
@@ -528,7 +528,7 @@ fn push(
         time,
         payload,
         evidence_id: None,
-        created_at: i64::from(time),
+        created_at: time,
         ..Fact::default()
     });
 }

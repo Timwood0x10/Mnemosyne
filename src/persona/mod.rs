@@ -134,7 +134,7 @@ pub trait PersonaSignalExtractor: Send + Sync {
 pub fn signal_to_fact(
     signal: &PersonaSignal,
     attribution: &SignalAttribution,
-    logical_time: i32,
+    logical_time: i64,
 ) -> Fact {
     Fact {
         id: None,
@@ -153,7 +153,7 @@ pub fn signal_to_fact(
             "confidence": signal.confidence,
         }),
         evidence_id: None,
-        created_at: i64::from(logical_time),
+        created_at: logical_time,
         ..Fact::default()
     }
 }

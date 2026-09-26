@@ -71,7 +71,7 @@ pub fn commitments_from_messages(
     messages: &[Message],
     role: &str,
     subject: i64,
-    made_at: i32,
+    made_at: i64,
 ) -> Vec<Decision> {
     if subject <= 0 {
         return Vec::new();
@@ -87,7 +87,7 @@ pub fn commitments_from_messages(
 ///
 /// The **earliest** marker in the text decides the verb, and a negated
 /// commitment is rejected outright (see [`negated_commitment`]).
-fn commitment_from_message(message: &Message, subject: i64, made_at: i32) -> Option<Decision> {
+fn commitment_from_message(message: &Message, subject: i64, made_at: i64) -> Option<Decision> {
     let lowered = message.content.to_lowercase();
     let (verb, at, marker_len) = COMMITMENT_MARKERS
         .iter()
@@ -187,7 +187,7 @@ fn contains_negation_cue(text: &str) -> bool {
 /// nothing to trace back to. Storing the utterance as an Event fact first makes
 /// `Decision::because` a concrete evidence link.
 #[must_use]
-pub fn anchor_fact(decision: &Decision, made_at: i32) -> Fact {
+pub fn anchor_fact(decision: &Decision, made_at: i64) -> Fact {
     Fact {
         id: None,
         entity_id: decision.subject,
@@ -199,7 +199,7 @@ pub fn anchor_fact(decision: &Decision, made_at: i32) -> Fact {
             "verb": decision.verb,
         }),
         evidence_id: None,
-        created_at: i64::from(made_at),
+        created_at: made_at,
         ..Fact::default()
     }
 }

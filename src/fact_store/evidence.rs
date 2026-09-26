@@ -8,6 +8,18 @@
 
 use super::*;
 
+/// One evidence row as the provenance API reads it: the anchor text plus
+/// the source byte span it was recorded with.
+#[derive(Debug, Clone)]
+pub struct EvidenceAnchor {
+    /// Anchor text (`None` only for a legacy row with NULL content).
+    pub content: Option<String>,
+    /// Source byte span start, when the anchor recorded one.
+    pub start_offset: Option<i64>,
+    /// Source byte span end, when the anchor recorded one.
+    pub end_offset: Option<i64>,
+}
+
 impl SqliteFactStore {
     /// Register the original-text anchor a compiled fact carries in
     /// `payload["evidence"]` and return its row id.
@@ -93,6 +105,34 @@ impl SqliteFactStore {
         Ok(content.flatten())
     }
 
+    /// Read an evidence row's content AND its source byte span.
+    ///
+    /// `get_evidence_content` returns the text only, which broke the
+    /// re-locatability contract at the API surface: `fact_provenance` could
+    /// quote the anchor but not say WHERE in the original text it sits.
+    /// Returns `Ok(None)` when no row with that id exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the read fails.
+    pub fn get_evidence_anchor(&self, evidence_id: i64) -> Result<Option<EvidenceAnchor>> {
+        let conn = self.lock_conn()?;
+        let row = conn
+            .query_row(
+                "SELECT content, start_offset, end_offset FROM evidence WHERE id = ?1",
+                params![evidence_id],
+                |row| {
+                    Ok(EvidenceAnchor {
+                        content: row.get(0)?,
+                        start_offset: row.get(1)?,
+                        end_offset: row.get(2)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(row)
+    }
+
     /// Insert an original-text evidence row and return its id.
     ///
     /// Facts reference evidence via `evidence_id`; this is the explicit write
@@ -134,6 +174,51 @@ mod tests {
             created_at: 2026,
             ..Fact::default()
         }
+    }
+
+    /// Objective: Verify `get_evidence_anchor` reads back the SPAN written by
+    /// `anchor_evidence_on` — content-only reads (`get_evidence_content`)
+    /// broke re-locatability at the `fact_provenance` API surface.
+    /// Invariants: content matches; start == offset; end == offset + length;
+    /// an unknown id yields None.
+    #[test]
+    fn evidence_anchor_round_trips_the_source_span() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let payload = serde_json::json!({
+            "evidence": {
+                "doc_id": 0,
+                "offset": 12,
+                "length": 8,
+                "text": "我从去年开始喜欢 Rust"
+            }
+        });
+        let mut anchors = std::collections::HashMap::new();
+        let id = {
+            let conn = store.lock_conn().expect("lock conn");
+            SqliteFactStore::anchor_evidence_on(&conn, &payload, &mut anchors)
+                .expect("anchor")
+                .expect("anchor row created")
+        };
+
+        let anchor = store
+            .get_evidence_anchor(id)
+            .expect("read anchor")
+            .expect("row exists");
+        assert_eq!(
+            anchor.content.as_deref(),
+            Some("我从去年开始喜欢 Rust"),
+            "content round-trips"
+        );
+        assert_eq!(anchor.start_offset, Some(12), "span start round-trips");
+        assert_eq!(anchor.end_offset, Some(20), "span end is offset + length");
+
+        assert!(
+            store
+                .get_evidence_anchor(999_999)
+                .expect("missing id is not an error")
+                .is_none(),
+            "unknown id yields None"
+        );
     }
 
     /// Objective: Verify a compiled fact's payload anchor becomes a real

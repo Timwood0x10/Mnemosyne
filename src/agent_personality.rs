@@ -151,7 +151,7 @@ const PERSONALITY_MARKERS: &[PersonalityMarker] = &[
 pub fn agent_personality_facts_from_messages(
     messages: &[Message],
     agent_entity_id: i64,
-    logical_time: i32,
+    logical_time: i64,
 ) -> Vec<Fact> {
     let mut facts = Vec::new();
     for msg in messages {
@@ -191,7 +191,7 @@ pub fn agent_personality_facts_from_messages(
                 },
             }),
             evidence_id: None,
-            created_at: i64::from(logical_time),
+            created_at: logical_time,
             ..Fact::default()
         });
     }
