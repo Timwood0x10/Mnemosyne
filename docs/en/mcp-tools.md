@@ -16,7 +16,6 @@ Each tool is a registered handler with an input schema validated at the JSON-RPC
 
 | Tool | Description | Required Arguments |
 |---|---|---|
-| `memory_distill` | Run the 8-stage distillation pipeline | `conversation_id`, `messages[]` |
 | `memory_compile` | Build session state (optionally distill) | `messages[]` |
 | `memory_search` | Search stored memories | `query` |
 | `memory_store` | Manually write a memory | `content`, `memory_type` |
@@ -33,93 +32,13 @@ Each tool is a registered handler with an input schema validated at the JSON-RPC
 
 ---
 
-## 1. `memory_distill`
+## 1. `memory_distill` (removed)
 
-The primary tool — runs the full 8-stage pipeline to extract, classify, score, filter, compress, embed, resolve, and persist memories from a conversation.
-
-### Input Schema
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "conversation_id": {
-      "type": "string",
-      "description": "Unique identifier for the conversation session"
-    },
-    "messages": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "role": {
-            "type": "string",
-            "enum": ["user", "assistant", "system"]
-          },
-          "content": {
-            "type": "string",
-            "description": "Message content (plain text)"
-          },
-          "tool_call_id": {
-            "type": "string",
-            "description": "Tool call identifier for tool result messages"
-          },
-          "turn_id": {
-            "type": "string",
-            "description": "Turn identifier for grouping messages"
-          }
-        },
-        "required": ["role", "content"]
-      },
-      "description": "Array of conversation messages in chronological order"
-    },
-    "tenant_id": {
-      "type": "string",
-      "description": "Optional tenant identifier (overrides default)"
-    },
-    "user_id": {
-      "type": "string",
-      "description": "Optional user identifier"
-    }
-  },
-  "required": ["conversation_id", "messages"]
-}
-```
-
-### Example Request
-
-```json
-{
-  "conversation_id": "session-42",
-  "messages": [
-    {"role": "user", "content": "How can I improve query performance in SQLite?"},
-    {"role": "assistant", "content": "Add indexes on columns used in WHERE clauses, use EXPLAIN QUERY PLAN to check, and consider WAL mode for concurrent reads."}
-  ]
-}
-```
-
-### Example Response
-
-```json
-{
-  "content": [
-    {
-      "type": "text",
-      "text": "{\"extracted\":2,\"classified\":2,\"scored\":2,\"filtered\":0,\"compressed\":2,\"embedded\":0,\"conflicts_detected\":0,\"conflicts_replaced\":0,\"stored\":2,\"rejected_low_importance\":0,\"errors\":0}"
-    }
-  ],
-  "is_error": false
-}
-```
-
-### Behavior
-
-- Empty `messages[]` returns zero metrics, no error
-- All messages must have non-empty `content`
-- Messages that fail the noise/security filters are silently skipped
-- Returns a JSON object with per-stage counts
-
----
+> **This tool is no longer in the registry** — calling it returns an
+> unknown-tool error. Its 8-stage distillation pipeline now lives inside
+> `memory_compile` (§2): pass `"distill": true` (which makes
+> `conversation_id` required) to distill while compiling. The standalone
+> tool's former input/output schema is in earlier doc revisions.
 
 ## 2. `memory_compile`
 
@@ -662,6 +581,7 @@ do, because the write path registers their original utterance.
  "payload":{"content":"prefers Rust"},
  "confidence":0.85,"status":"active",
  "evidence":"2026-08-15: \"I started liking Rust last year\"",
+ "evidence_start":300,"evidence_end":310,
  "derived_from":[{"fact_id":11,"fact_type":"Preference","time":2024,"content":"likes Python","status":"active"}]}
 ```
 
@@ -674,6 +594,9 @@ do, because the write path registers their original utterance.
 - Chain expansion is depth/breadth capped; a dangling id is reported as
   `{"fact_id":N,"missing":true}` instead of failing the whole call.
 - `evidence: null` means the fact has no original-text anchor.
+- `evidence_start` / `evidence_end` are the anchor's byte span in the original
+  text (`null` for legacy rows without one) — the quote can be re-located
+  precisely instead of only quoted.
 - Read-only: never writes.
 
 ---

@@ -13,7 +13,7 @@ memory_distill/
 │   ├── compiler.rs         # ConversationCompiler — 会话状态构建器
 │   ├── config.rs           # Config — 命令行参数、环境变量、验证
 │   ├── detector.rs         # QuestionDetector — is_problem 启发式
-│   ├── distiller.rs        # PipelineDistiller — 8 阶段编排器
+│   ├── distiller/           # PipelineDistiller — 8 阶段编排器（pipeline.rs，文本工具 text.rs）
 │   ├── embed.rs            # EmbeddingService trait + NullEmbedder + RemoteEmbedder
 │   ├── error.rs            # Error — 统一错误类型
 │   ├── extractor.rs        # ExperienceExtractor — 问题-解决方案对
@@ -41,7 +41,7 @@ memory_distill/
 ```bash
 make check      # 运行：cargo clippy --all-targets --all-features + cargo check
 make test       # 运行：cargo test（142 个单元测试 + 3 个文档测试）
-make run        # 运行：cargo run --bin memory-mcp -- ...
+make run        # 运行：cargo run --bin mnemosyne -- ...
 make build      # 运行：cargo build --release
 ```
 
@@ -67,7 +67,7 @@ cargo build --release
 
 | 模块 | 测试内容 |
 |---|---|
-| `distiller.rs` | 完整流水线、压缩、中文文本、容量控制 |
+| `distiller/` | 完整流水线（`pipeline.rs`）、压缩（`text.rs`）、容量控制 |
 | `store.rs` | CRUD、FTS5 搜索、向量搜索、租户隔离、批量操作 |
 | `retrieval.rs` | BM25 评分、分词、混合排序、租户过滤 |
 | `classifier.rs` | 所有 MemoryType 分类、大小写不敏感、回退 |
@@ -111,7 +111,7 @@ cargo build --release
 
 ### 添加流水线阶段
 
-1. 在 `src/distiller.rs` 中向 `PipelineDistiller` 添加阶段函数
+1. 在 `src/distiller/pipeline.rs` 中向 `PipelineDistiller` 添加阶段函数
 2. 在 `distill()` 方法的正确位置插入
 3. 向 `DistillationMetrics` 添加相关计数器
 4. 为新阶段行为编写测试
@@ -138,8 +138,8 @@ cargo build --release
 设置 `RUST_LOG` 获取详细输出：
 
 ```bash
-RUST_LOG=debug cargo run --bin memory-mcp -- --db-path /tmp/debug.db
-RUST_LOG=memory_distill=debug,rusqlite=info cargo run --bin memory-mcp
+RUST_LOG=debug cargo run --bin mnemosyne -- --db-path /tmp/debug.db
+RUST_LOG=mnemosyne=debug,rusqlite=info cargo run --bin mnemosyne
 ```
 
 ### 内存数据库

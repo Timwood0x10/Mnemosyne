@@ -20,7 +20,7 @@ flowchart LR
     MSG --> EX --> CL --> SC --> FI --> CO --> EM --> RE --> CA --> PE
 ```
 
-The pipeline is orchestrated by `PipelineDistiller` in `src/distiller.rs`.
+The pipeline is orchestrated by `PipelineDistiller` in `src/distiller/pipeline.rs`.
 
 ## Stage 1: Extract
 
@@ -143,7 +143,7 @@ Detects sensitive content using regex patterns for:
 
 ## Stage 5: Compress
 
-**File**: `src/distiller.rs` (function `compress_pair`)
+**File**: `src/distiller/text.rs` (function `compress_pair`)
 
 Compresses the problem-solution pair into a standardized string format:
 
@@ -197,12 +197,12 @@ Detects and resolves semantic conflicts between new and existing memories using 
 
 ### Algorithm
 
-1. For each incoming memory, compare its vector against all existing memories of the same `MemoryType` and `tenant_id`
-2. If `cosine_similarity(a, b) >= threshold` (default: 0.92), it's a conflict
+1. For each incoming memory, take the up-to-5 nearest vector neighbours in the same `tenant_id`, then compare only against those that also share the same `user_id` and `MemoryType` (other-user or other-type neighbours are never candidates and are never deleted)
+2. If `cosine_similarity(a, b) >= threshold` (default: 0.85, matching the configuration table), it's a conflict
 3. **Resolution**:
    - If the new memory has higher importance → **replace** the old one
    - If the new memory has lower or equal importance → **keep both** (semantic diversity is preserved)
-4. Memories without vectors (keyword mode) skip conflict detection — both are stored
+4. Memories without vectors (keyword mode) fall back to exact content-hash dedup within the same tenant and memory type — on a hash match the more important memory wins (the new one replaces the old, or the new candidate is dropped)
 
 ### Cosine Similarity
 
@@ -214,14 +214,14 @@ Returns `None` if dimensions differ or either vector is zero-magnitude.
 
 ## Stage 8: Capacity
 
-**File**: `src/distiller.rs` (`phase_enforce_capacity`)
+**File**: `src/distiller/pipeline.rs` (`phase_enforce_capacity`)
 
-Enforces per-tenant, per-type capacity limits using LRU eviction.
+Enforces a per-tenant capacity cap on **`Knowledge` memories only**; when over the cap, the lowest-confidence rows are evicted first.
 
 | Parameter | Default | Description |
 |---|---|---|
-| `max_memories_per_type` | 5000 | Max memories of each `MemoryType` per tenant |
-| Eviction policy | LRU | Least recently updated memories are evicted first |
+| `max_solutions_per_tenant` | 5000 | Cap on `Knowledge` memories per tenant |
+| Eviction policy | Confidence ascending | Lowest-confidence memories are evicted first |
 
 **Tenant isolation**: Each tenant's capacity is tracked independently, so one tenant cannot crowd out another.
 
@@ -274,7 +274,7 @@ flowchart TB
         P7["7. phase_final_top_n(memories)"]
         R7["keep top 100"]
         P8["8. phase_enforce_capacity(tenant_id)"]
-        R8["LRU eviction"]
+        R8["evict lowest-confidence"]
         P9["9. phase_sync_to_store(memories)"]
         R9["persist to SQLite"]
 

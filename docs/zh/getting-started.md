@@ -16,12 +16,12 @@ cd memory_distill
 cargo build --release
 ```
 
-编译后的二进制文件位于 `target/release/memory-mcp`。
+编译后的二进制文件位于 `target/release/mnemosyne`。
 
 ### 通过 Cargo 安装（发布后可用）
 
 ```bash
-cargo install memory_distill
+cargo install mnemosyne
 ```
 
 ## 快速启动：零配置模式
@@ -29,7 +29,7 @@ cargo install memory_distill
 无需任何外部依赖即可运行服务器——只需要 SQLite：
 
 ```bash
-cargo run --bin memory-mcp -- \
+cargo run --bin mnemosyne -- \
   --embedding-provider none \
   --retrieval-mode keyword \
   --db-path ./my-memories.db
@@ -51,7 +51,7 @@ echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | nc -w1 localhost 5609
 
 ```bash
 # 在后台启动服务器，捕获输出
-cargo run --bin memory-mcp -- --db-path /tmp/test.db > /tmp/mcp-out &
+cargo run --bin mnemosyne -- --db-path /tmp/test.db > /tmp/mcp-out &
 MCP_PID=$!
 
 # 发送 tools/list 请求
@@ -60,11 +60,12 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' > /dev/stdin
 
 ## 蒸馏你的第一条记忆
 
-连接一个 MCP 客户端并调用 `memory_distill` 工具：
+连接一个 MCP 客户端并调用 `memory_compile` 工具（本例同时运行蒸馏）：
 
 ```json
 {
   "conversation_id": "session-1",
+  "distill": true,
   "messages": [
     {"role": "user", "content": "如何在 Rust 中解析 JSON？"},
     {"role": "assistant", "content": "使用 serde_json::from_str 配合类型化结构体。"}
@@ -72,7 +73,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' > /dev/stdin
 }
 ```
 
-服务器返回指标：提取了多少条经验、分类了多少、存储了多少，以及是否有任何冲突被解决。
+对话被编译为结构化记忆；由于 `distill` 为 true，编译同时运行 8 阶段蒸馏流水线（蒸馏指标见该工具的响应）。
 
 ## 搜索你的记忆
 
@@ -90,7 +91,7 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' > /dev/stdin
 ### 使用 OpenAI
 
 ```bash
-MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin mnemosyne -- \
   --embedding-provider openai \
   --vector-dim 768 \
   --retrieval-mode hybrid

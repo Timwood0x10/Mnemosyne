@@ -15,7 +15,6 @@
 
 | 工具 | 描述 | 必需参数 |
 |---|---|---|
-| `memory_distill` | 运行 8 阶段蒸馏流水线 | `conversation_id`, `messages[]` |
 | `memory_compile` | 构建会话状态（可选蒸馏） | `messages[]` |
 | `memory_search` | 搜索已存储的记忆 | `query` |
 | `memory_store` | 手动写入一条记忆 | `content`, `memory_type` |
@@ -32,93 +31,12 @@
 
 ---
 
-## 1. `memory_distill`
+## 1. `memory_distill`（已移除）
 
-主要工具——运行完整的 8 阶段流水线，从对话中提取、分类、评分、过滤、压缩、嵌入、解决冲突并持久化记忆。
-
-### 输入模式
-
-```json
-{
-  "type": "object",
-  "properties": {
-    "conversation_id": {
-      "type": "string",
-      "description": "对话会话的唯一标识符"
-    },
-    "messages": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "role": {
-            "type": "string",
-            "enum": ["user", "assistant", "system"]
-          },
-          "content": {
-            "type": "string",
-            "description": "消息内容（纯文本）"
-          },
-          "tool_call_id": {
-            "type": "string",
-            "description": "工具调用标识符（用于工具结果消息）"
-          },
-          "turn_id": {
-            "type": "string",
-            "description": "轮次标识符（用于分组消息）"
-          }
-        },
-        "required": ["role", "content"]
-      },
-      "description": "按时间顺序排列的对话消息数组"
-    },
-    "tenant_id": {
-      "type": "string",
-      "description": "可选的租户标识符（覆盖默认值）"
-    },
-    "user_id": {
-      "type": "string",
-      "description": "可选的用户标识符"
-    }
-  },
-  "required": ["conversation_id", "messages"]
-}
-```
-
-### 示例请求
-
-```json
-{
-  "conversation_id": "session-42",
-  "messages": [
-    {"role": "user", "content": "如何在 Rust 中解析 JSON？"},
-    {"role": "assistant", "content": "使用 serde_json::from_str 配合类型化结构体。"}
-  ]
-}
-```
-
-### 示例响应
-
-```json
-{
-  "content": [
-    {
-      "type": "text",
-      "text": "{\"extracted\":2,\"classified\":2,\"scored\":2,\"filtered\":0,\"compressed\":2,\"embedded\":0,\"conflicts_detected\":0,\"conflicts_replaced\":0,\"stored\":2,\"rejected_low_importance\":0,\"errors\":0}"
-    }
-  ],
-  "is_error": false
-}
-```
-
-### 行为
-
-- 空 `messages[]` 返回零指标，不报错
-- 所有消息必须有非空 `content`
-- 未通过噪音/安全过滤器的消息被静默跳过
-- 返回一个包含各阶段计数的 JSON 对象
-
----
+> **该工具已不在工具注册表中** —— 调用会返回 unknown tool。原 8 阶段蒸馏
+> 流水线已并入 `memory_compile`（§2）：传 `"distill": true`（此时
+> `conversation_id` 必填）即可在编译对话的同时运行蒸馏。独立工具时代的
+> 输入/输出描述见历史版本文档。
 
 ## 2. `memory_compile`
 
@@ -647,6 +565,7 @@
  "payload":{"content":"喜欢 Rust"},
  "confidence":0.85,"status":"active",
  "evidence":"2026-08-15: “我从去年开始喜欢 Rust”",
+ "evidence_start":300,"evidence_end":310,
  "derived_from":[{"fact_id":11,"fact_type":"Preference","time":2024,"content":"喜欢 Python","status":"active"}]}
 ```
 
@@ -657,6 +576,8 @@
 - 链式展开有深度/广度上限；损坏的链以 `{"fact_id":N,"missing":true}` 报告，而不是整体失败。
 - `evidence` 为 `null` 表示该事实没有原文证据锚点。编译产生的事实现在都带锚点
   （写入时自动登记 `evidence` 行），所以这个字段对真实数据是**有值**的。
+- `evidence_start` / `evidence_end` 是锚点在原文中的 byte span（无 span 的旧行为
+  `null`）—— 有了它引用才能被精确定位回原文位置，而不只是引用文本本身。
 - 只读工具，永不写入。
 
 ---

@@ -25,9 +25,12 @@
 | `MEMORY_MAX_SOLUTIONS` | `5000` | 每租户最大 `Knowledge` 记忆数量 |
 | `MEMORY_MAX_PER_DISTILL` | `3` | 每次蒸馏调用产生的最大记忆数 |
 | `MEMORY_DISABLE_CROSS_TURN` | `false` | 禁用跨轮次 4 条消息弧提取 |
-| `MEMORY_SSE_ADDR` | `""` | SSE 监听地址（空 = 使用 stdio 传输） |
+| `MEMORY_TRANSPORT` | `stdio` | 传输方式：`stdio`（行分隔 JSON）或 `http`（Streamable HTTP/SSE） |
+| `MEMORY_HTTP_ADDR` | `127.0.0.1:5609` | `--transport http` 的监听地址 |
+| `MEMORY_HTTP_TOKEN` | — | HTTP 鉴权 Bearer 令牌（不设则免鉴权，仅限本地信任环境） |
+| `RUST_LOG` | `warn`（未设置时） | 日志级别（如 `info`、`mnemosyne=debug`） |
 | `MNEMOSYNE_HOME` | — | **资源根目录**：`config/` 与 `lexicon/` 的所在位置（见下节） |
-| `RUST_LOG` | — | 日志级别（例如 `info`、`debug`、`memory_distill=debug`） |
+| `RUST_LOG` | — | 日志级别（例如 `info`、`debug`、`mnemosyne=debug`） |
 
 ### 命令行参数
 
@@ -45,7 +48,9 @@
 | `--max-solutions <N>` | `MEMORY_MAX_SOLUTIONS` | 每租户最大 Knowledge 记忆数 |
 | `--max-per-distill <N>` | `MEMORY_MAX_PER_DISTILL` | 每次蒸馏调用的最大记忆数 |
 | `--disable-cross-turn` | `MEMORY_DISABLE_CROSS_TURN` | 禁用跨轮次提取 |
-| `--sse-addr <ADDR>` | `MEMORY_SSE_ADDR` | SSE 监听地址（空 = stdio） |
+| `--transport <MODE>` | `MEMORY_TRANSPORT` | 传输方式（`stdio` / `http`） |
+| `--http-addr <ADDR>` | `MEMORY_HTTP_ADDR` | HTTP 监听地址 |
+| `--http-token <TOKEN>` | `MEMORY_HTTP_TOKEN` | HTTP 鉴权令牌（可选） |
 
 ## 资源文件（`config/`）
 
@@ -86,7 +91,7 @@ mnemosyne config-check
 ### 1. 纯关键词模式（零 API 成本）
 
 ```bash
-cargo run --bin memory-mcp -- \
+cargo run --bin mnemosyne -- \
   --embedding-provider none \
   --retrieval-mode keyword \
   --db-path ./memory.db
@@ -104,7 +109,7 @@ cargo run --bin memory-mcp -- \
 ### 2. 混合模式（关键词 + 向量）
 
 ```bash
-MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin mnemosyne -- \
   --embedding-provider openai \
   --vector-dim 768 \
   --retrieval-mode hybrid
@@ -122,7 +127,7 @@ MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
 ### 3. 纯向量模式
 
 ```bash
-MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin mnemosyne -- \
   --embedding-provider openai \
   --vector-dim 768 \
   --retrieval-mode vector
@@ -131,7 +136,7 @@ MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
 ### 4. Ollama（本地嵌入）
 
 ```bash
-cargo run --bin memory-mcp -- \
+cargo run --bin mnemosyne -- \
   --embedding-provider ollama \
   --embedding-url http://localhost:11434 \
   --embedding-model nomic-embed-text \
@@ -155,9 +160,9 @@ cargo run --bin memory-mcp -- \
 服务器使用 `tracing` crate 和 `tracing-subscriber`。用 `RUST_LOG` 控制日志详细程度：
 
 ```bash
-RUST_LOG=info cargo run --bin memory-mcp
-RUST_LOG=debug cargo run --bin memory-mcp
-RUST_LOG=memory_distill=debug cargo run --bin memory-mcp
+RUST_LOG=info cargo run --bin mnemosyne
+RUST_LOG=debug cargo run --bin mnemosyne
+RUST_LOG=mnemosyne=debug cargo run --bin mnemosyne
 ```
 
 ## 示例：生产配置
@@ -172,5 +177,5 @@ export MEMORY_MIN_IMPORTANCE=0.6
 export MEMORY_MAX_SOLUTIONS=10000
 export RUST_LOG=info
 
-cargo run --bin memory-mcp
+cargo run --bin mnemosyne
 ```

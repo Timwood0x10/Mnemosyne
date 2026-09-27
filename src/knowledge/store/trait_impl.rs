@@ -23,7 +23,10 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
 
     async fn find_document_by_title(&self, title: &str) -> Result<Option<Document>> {
         let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare("SELECT * FROM documents WHERE title = ?1")?;
+        // ORDER BY id: same-titled rows (different sources) make the row
+        // order significant — without it SQLite makes no order guarantee
+        // and the documented "first created row" contract would be luck.
+        let mut stmt = conn.prepare("SELECT * FROM documents WHERE title = ?1 ORDER BY id ASC")?;
         let mut rows = stmt.query_map(params![title], row_to_document)?;
         match rows.next() {
             Some(Ok(d)) => Ok(Some(d)),

@@ -145,7 +145,7 @@ flowchart TB
     A["messages[] (role/content)"] --> B["conversation_compiler.rs<br/>会话状态编译"]
     B --> C["cognition_compiler.rs<br/>观察 → 事实 (Fact)"]
     C --> D["fact_store.rs<br/>SqliteFactStore 持久化"]
-    C --> E["distiller.rs<br/>长时记忆蒸馏"]
+    C --> E["distiller/<br/>长时记忆蒸馏"]
     E --> F["prompt.rs<br/>PromptBuilder 投影"]
 
     D --> G["检索 (retrieval)"]

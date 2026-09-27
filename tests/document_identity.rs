@@ -18,7 +18,8 @@ async fn fresh() -> SQLiteKnowledgeStore {
 /// the title-only read path still resolves.
 /// Invariants: two rows created; `find_document` hits exactly one per
 /// (title, source) and misses on an unseen source; `source` round-trips;
-/// `find_document_by_title` still finds the title.
+/// `find_document_by_title` returns the FIRST-created titled row
+/// (`ORDER BY id` — the documented contract).
 #[tokio::test]
 async fn document_identity_is_title_and_source() {
     let store = fresh().await;
@@ -69,9 +70,9 @@ async fn document_identity_is_title_and_source() {
         .await
         .expect("title query")
         .expect("title-only read path still works");
-    assert!(
-        by_title.id == a || by_title.id == b,
-        "title lookup returns one of the titled rows"
+    assert_eq!(
+        by_title.id, a,
+        "title lookup returns the FIRST-created row (ORDER BY id — the documented contract)"
     );
 }
 

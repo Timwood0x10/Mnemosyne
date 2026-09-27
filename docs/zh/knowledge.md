@@ -114,7 +114,15 @@ erDiagram
 ### 4.4 为什么提供快照导出/导入（memory_export）？
 
 **抉择**（`memory_export.rs`）：`ExportBundle` 序列化整个知识图谱，
-`memory_export` / `memory_import` 工具对应备份与还原。
+`memory_export` / `memory_import` 工具对应备份与还原。导出面覆盖
+documents/objects/edges/evidence（含 byte span）、**两类 evidence 链接
+（object 与 edge，v3 起显式带类型、旧包字段缺省兼容）**，以及 V7 世界
+模型（entities / profiles / relations / **events（含参与者）与
+world_states**，快照格式 v3）；`chapters` 正文不导出 —— 有正文的章节
+只由 `migrate()` 产生，重跑一次即可从语料重建；`compile_source` 路径的
+章节行本来就是空壳（仅为 evidence 外键存在），无正文可丢。已知限制：
+objects/edges/evidence/链接子包只按 `doc_title` 关联 —— 同名多源文档的
+子行会挂到第一篇同名文档上。
 
 **为什么**：记忆"永不丢失"的保证——可跨机器迁移、备份、共享还原
 （companion persona 的长期记忆可整体搬迁）。

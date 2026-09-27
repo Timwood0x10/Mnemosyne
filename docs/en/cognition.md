@@ -2,7 +2,7 @@
 
 > This document faithfully describes the cognition modules: `cognition.rs`,
 > `conversation_compiler.rs`, `cognition_compiler.rs`, `fact_store.rs`,
-> `distiller.rs`, `prompt.rs`. What they do, how they work, and **why they are
+> `distiller/`, `prompt.rs`. What they do, how they work, and **why they are
 > designed this way** (technical decisions). All diagrams are mermaid.
 
 ## 1. Overview
@@ -32,7 +32,7 @@ flowchart LR
     end
 
     subgraph distill
-        DI["distiller.rs<br/>PipelineDistiller"]
+        DI["distiller/pipeline.rs<br/>PipelineDistiller"]
         PR["prompt.rs<br/>PromptBuilder projection"]
     end
 
@@ -129,8 +129,10 @@ sequenceDiagram
 `cognition_compiler.rs` assembles facts).
 
 **Why**:
-- **Traceable**: every `Fact` carries an `EvidenceRef` to source text — "where
-  did this knowledge come from" is always answerable; an LLM cannot.
+- **Traceable**: facts compiled from a conversation carry an `EvidenceRef`
+  to source text — "where did this knowledge come from" is answerable for
+  them; a fact inserted without an anchor reports `evidence: null` instead
+  of an invented provenance.
 - **Reproducible**: the same conversation compiles identically every time —
   tests lock behavior.
 - **Immutable**: once persisted, facts are never edited (only decayed/archived),
@@ -186,7 +188,7 @@ it on via configuration.
 - Fact CRUD + `set_decay` / `list_archived` / `get_decay` (decay support).
 - `open` / `open_in_memory`: file and in-memory stores (tests).
 
-### 5.2 `PipelineDistiller` (distiller.rs)
+### 5.2 `PipelineDistiller` (`distiller/pipeline.rs`)
 
 8-stage pipeline (extract → classify → score → filter → compress → embed →
 resolve → persist); `DistillationConfig` controls stages; `compress_pair`

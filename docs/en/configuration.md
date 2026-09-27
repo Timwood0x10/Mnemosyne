@@ -25,8 +25,11 @@ CLI flags > Environment variables > Defaults
 | `MEMORY_MAX_SOLUTIONS` | `5000` | Maximum `Knowledge` memories retained per tenant |
 | `MEMORY_MAX_PER_DISTILL` | `3` | Maximum memories produced per distillation call |
 | `MEMORY_DISABLE_CROSS_TURN` | `false` | Disable cross-turn 4-message arc extraction |
-| `MEMORY_SSE_ADDR` | `""` | SSE listen address (empty = use stdio transport) |
-| `RUST_LOG` | — | Logging level (e.g., `info`, `debug`, `memory_distill=debug`) |
+| `MEMORY_TRANSPORT` | `stdio` | Transport: `stdio` (line-delimited JSON) or `http` (Streamable HTTP/SSE) |
+| `MEMORY_HTTP_ADDR` | `127.0.0.1:5609` | Listen address for `--transport http` |
+| `MEMORY_HTTP_TOKEN` | — | HTTP bearer token (unset = no auth, local trust only) |
+| `MNEMOSYNE_HOME` | — | **Resource root**: where `config/` and `lexicon/` live |
+| `RUST_LOG` | — | Logging level (e.g., `info`, `debug`, `mnemosyne=debug`) |
 
 ### CLI Flags
 
@@ -44,14 +47,16 @@ CLI flags > Environment variables > Defaults
 | `--max-solutions <N>` | `MEMORY_MAX_SOLUTIONS` | Max Knowledge memories per tenant |
 | `--max-per-distill <N>` | `MEMORY_MAX_PER_DISTILL` | Max memories per distillation call |
 | `--disable-cross-turn` | `MEMORY_DISABLE_CROSS_TURN` | Disable cross-turn extraction |
-| `--sse-addr <ADDR>` | `MEMORY_SSE_ADDR` | SSE listen address (empty = stdio) |
+| `--transport <MODE>` | `MEMORY_TRANSPORT` | Transport (`stdio` / `http`) |
+| `--http-addr <ADDR>` | `MEMORY_HTTP_ADDR` | HTTP listen address |
+| `--http-token <TOKEN>` | `MEMORY_HTTP_TOKEN` | HTTP auth token (optional) |
 
 ## Configuration Modes
 
 ### 1. Keyword-Only Mode (Zero API Cost)
 
 ```bash
-cargo run --bin memory-mcp -- \
+cargo run --bin mnemosyne -- \
   --embedding-provider none \
   --retrieval-mode keyword \
   --db-path ./memory.db
@@ -69,7 +74,7 @@ Best for: local development, privacy-sensitive environments, cost-conscious depl
 ### 2. Hybrid Mode (Keyword + Vector)
 
 ```bash
-MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin mnemosyne -- \
   --embedding-provider openai \
   --vector-dim 768 \
   --retrieval-mode hybrid
@@ -87,7 +92,7 @@ Best for: production deployments where retrieval quality matters.
 ### 3. Vector-Only Mode
 
 ```bash
-MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin mnemosyne -- \
   --embedding-provider openai \
   --vector-dim 768 \
   --retrieval-mode vector
@@ -96,7 +101,7 @@ MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
 ### 4. Ollama (Local Embeddings)
 
 ```bash
-cargo run --bin memory-mcp -- \
+cargo run --bin mnemosyne -- \
   --embedding-provider ollama \
   --embedding-url http://localhost:11434 \
   --embedding-model nomic-embed-text \
@@ -120,9 +125,9 @@ The configuration is validated at startup. Common errors:
 The server uses the `tracing` crate with `tracing-subscriber`. Control log verbosity with `RUST_LOG`:
 
 ```bash
-RUST_LOG=info cargo run --bin memory-mcp
-RUST_LOG=debug cargo run --bin memory-mcp
-RUST_LOG=memory_distill=debug cargo run --bin memory-mcp
+RUST_LOG=info cargo run --bin mnemosyne
+RUST_LOG=debug cargo run --bin mnemosyne
+RUST_LOG=mnemosyne=debug cargo run --bin mnemosyne
 ```
 
 ## Example: Production Configuration
@@ -137,5 +142,5 @@ export MEMORY_MIN_IMPORTANCE=0.6
 export MEMORY_MAX_SOLUTIONS=10000
 export RUST_LOG=info
 
-cargo run --bin memory-mcp
+cargo run --bin mnemosyne
 ```

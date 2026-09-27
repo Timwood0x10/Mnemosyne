@@ -24,8 +24,8 @@ Mnemosyne 是一个 **不依赖 LLM 的知识蒸馏引擎**。它将叙事文本
 
 | 原则                        | 说明                                             |
 | ------------------------- | ---------------------------------------------- |
-| **无 LLM 依赖**              | 全部由规则 + 统计 + Trie 完成；LLM 仅作可选后置增强              |
-| **通用知识模型**                | 不绑定"小说"或"人物"，所有知识用 Object + Edge + Evidence 表达 |
+| **无 LLM 依赖**              | 全部由规则 + 统计 + Trie 完成（代码中无任何 LLM 调用）            |
+| **通用知识模型**                | 不绑定"小说"或"人物"：核心知识用 Object + Edge + Evidence 表达，叙事事件与角色状态时间线由 V7 `world_*` 表承载 |
 | **证据可追溯**                 | 每条知识必须可回溯到原文位置                                 |
 | **Observed / Derived 分离** | 知识分两种：原文明确的（observed）和规则推导的（derived）           |
 | **SQLite 为主存**            | V1 SQLite + petgraph，暂不引入图数据库                  |
@@ -95,9 +95,14 @@ CREATE TABLE documents (
     title TEXT NOT NULL,
     author TEXT,
     doc_type TEXT,
+    source TEXT NOT NULL DEFAULT '',
     created_at INTEGER DEFAULT (strftime('%s','localtime'))
 );
 ```
+
+> `source` 是来源标签（文件路径 / `generalize_compile` / 导出名…）：写路径的身份是
+> `(title, source)` —— 不同来源的同名文档保持两行；`''` 表示列引入前的旧数据。
+> 只知道标题的读路径仍可用 `find_document_by_title`（返回按创建序的第一行）。
 
 ### 3.3 chapters
 

@@ -157,7 +157,7 @@ All retrieval modes support:
 |---|---|
 | `tenant_id` | Results are always scoped to a tenant |
 | `memory_type` | Optional — restrict to a single memory type |
-| `limit` | Max results (default: configured `retrieval_limit`, usually 10) |
+| `limit` | Max results (default 5 — the `memory_search` `limit` argument default) |
 
 ### Tenant Isolation
 

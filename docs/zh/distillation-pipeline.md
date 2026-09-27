@@ -20,7 +20,7 @@ flowchart LR
     MSG --> EX --> CL --> SC --> FI --> CO --> EM --> RE --> CA --> PE
 ```
 
-流水线由 `src/distiller.rs` 中的 `PipelineDistiller` 编排。
+流水线由 `src/distiller/pipeline.rs` 中的 `PipelineDistiller` 编排。
 
 ## 阶段 1：提取
 
@@ -143,7 +143,7 @@ result = clamp(score, 0.0, 1.0)
 
 ## 阶段 5：压缩
 
-**文件**: `src/distiller.rs`（`compress_pair` 函数）
+**文件**: `src/distiller/text.rs`（`compress_pair` 函数）
 
 将问题-解决方案对压缩为标准化的字符串格式：
 
@@ -197,12 +197,12 @@ pub trait EmbeddingService: Send + Sync {
 
 ### 算法
 
-1. 对于每条新记忆，将其向量与相同 `MemoryType` 和 `tenant_id` 的所有现有记忆进行比较
-2. 如果 `cosine_similarity(a, b) >= threshold`（默认值：0.92），则视为冲突
+1. 对于每条新记忆，先取同 `tenant_id` 下向量检索的**至多 5 条**最近邻，再只与其中同一 `user_id`、同一 `MemoryType` 的既有记忆比较（跨用户/跨类型的邻居不是候选，更不会被删除）
+2. 如果 `cosine_similarity(a, b) >= threshold`（默认值：0.85，与配置表一致），则视为冲突
 3. **解决**：
    - 如果新记忆的重要性更高 → **替换**旧记忆
    - 如果新记忆的重要性更低或相等 → **两者都保留**（保留语义多样性）
-4. 没有向量的记忆（关键词模式）跳过冲突检测——两者都存储
+4. 没有向量的记忆（关键词模式）回退到内容哈希去重：同租户同类型下哈希相同即视为重复——新记忆更重要则替换旧记忆，否则丢弃新候选
 
 ### 余弦相似度
 
@@ -214,14 +214,14 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Option<f64>
 
 ## 阶段 8：容量控制
 
-**文件**: `src/distiller.rs`（`phase_enforce_capacity`）
+**文件**: `src/distiller/pipeline.rs`（`phase_enforce_capacity`）
 
-使用 LRU 淘汰执行按租户、按类型的容量限制。
+对每个租户按类型执行容量上限：**仅 `Knowledge` 类型参与封顶**，超出时按置信度升序淘汰最低分记忆。
 
 | 参数 | 默认值 | 描述 |
 |---|---|---|
-| `max_memories_per_type` | 5000 | 每个租户每种 `MemoryType` 的最大记忆数 |
-| 淘汰策略 | LRU | 最近最少更新的记忆优先被淘汰 |
+| `max_solutions_per_tenant` | 5000 | 每租户 `Knowledge` 类型的记忆上限 |
+| 淘汰策略 | 置信度升序 | 最低置信度的记忆优先被淘汰 |
 
 **租户隔离**：每个租户的容量独立跟踪，因此一个租户不会挤占另一个租户。
 
@@ -264,7 +264,7 @@ flowchart TB
         P7["7. phase_final_top_n(memories)"]
         R7["保留前 100 条"]
         P8["8. phase_enforce_capacity(tenant_id)"]
-        R8["LRU 淘汰"]
+        R8["淘汰最低置信度"]
         P9["9. phase_sync_to_store(memories)"]
         R9["持久化到 SQLite"]
 

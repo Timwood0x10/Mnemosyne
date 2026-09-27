@@ -455,7 +455,7 @@ pub struct CliArgs {
     pub openai_api_key: Option<String>,
 
     /// Serve transport: `stdio` (default, line-delimited JSON on stdio) or
-    /// `http` (MCP Streamable HTTP over SSE on `--addr`).
+    /// `http` (MCP Streamable HTTP over SSE on `--http-addr`).
     #[arg(long, env = "MEMORY_TRANSPORT", default_value = "stdio")]
     pub transport: String,
 

@@ -1,7 +1,7 @@
 # 模块：认知层（对话 → 事实 → 蒸馏）
 
 > 本文档实事求是地描述认知相关模块：`cognition.rs`、`conversation_compiler.rs`、
-> `cognition_compiler.rs`、`fact_store.rs`、`distiller.rs`、`prompt.rs`。
+> `cognition_compiler.rs`、`fact_store.rs`、`distiller/`、`prompt.rs`。
 > 它做什么、怎么实现、以及**为什么这么设计**（技术抉择）。图均为 mermaid。
 
 ## 1. 概述
@@ -29,7 +29,7 @@ flowchart LR
     end
 
     subgraph 蒸馏与投影
-        DI["distiller.rs<br/>PipelineDistiller"]
+        DI["distiller/pipeline.rs<br/>PipelineDistiller"]
         PR["prompt.rs<br/>PromptBuilder 投影"]
     end
 
@@ -182,7 +182,7 @@ Aho-Corasick 动词表匹配动作，`cognition_compiler.rs` 组装事实）。
 - 事实 CRUD + `set_decay` / `list_archived` / `get_decay`（衰减支持）。
 - `open` / `open_in_memory`：文件库与内存库（测试）。
 
-### 5.2 `PipelineDistiller`（distiller.rs）
+### 5.2 `PipelineDistiller`（`distiller/pipeline.rs`）
 
 8 阶段蒸馏管线（extract → classify → score → filter → compress → embed →
 resolve → persist），`DistillationConfig` 控制各阶段；`compress_pair` 把

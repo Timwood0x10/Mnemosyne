@@ -123,7 +123,18 @@ run inside a transaction with `PRAGMA foreign_keys` outside it.
 ### 4.4 Why snapshot export/import (memory_export)?
 
 **Decision** (`memory_export.rs`): `ExportBundle` serializes the whole graph;
-`memory_export` / `memory_import` tools back it up and restore it.
+`memory_export` / `memory_import` tools back it up and restore it. The
+export surface covers documents/objects/edges/evidence (with byte spans),
+**both evidence link kinds (object and edge — typed since v3, older bundles
+import via the field default)**, and the V7 world model (entities /
+profiles / relations / **events with participants, and world_states** —
+snapshot format v3). `chapters` bodies are NOT exported — the only bodies
+come from `migrate()`, which rebuilds them by re-reading the corpus; the
+`compile_source` path's chapter rows are empty shells (they exist only for
+the evidence FK), so nothing is lost. Known limitation: every sub-bundle
+row (objects, edges, evidence, links) is keyed by `doc_title` alone, so
+same-titled documents from different sources attach rows to the FIRST such
+document.
 
 **Why**: the "memory is never lost" guarantee — persona memory can be moved
 between machines, backed up, shared and restored intact.

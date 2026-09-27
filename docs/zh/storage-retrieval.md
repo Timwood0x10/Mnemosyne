@@ -157,7 +157,7 @@ flowchart TD
 |---|---|
 | `tenant_id` | 结果始终限定在租户范围内 |
 | `memory_type` | 可选——限制为单一记忆类型 |
-| `limit` | 最大结果数（默认：配置的 `retrieval_limit`，通常为 10） |
+| `limit` | 最大结果数（默认 5，即 `memory_search` 的 `limit` 参数缺省值） |
 
 ### 租户隔离
 

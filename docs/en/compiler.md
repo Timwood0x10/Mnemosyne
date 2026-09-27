@@ -93,8 +93,10 @@ chunk.
 - **Parallelism**: each chunk is an independent compilation unit
   ("parallel compilation unit" in code) — long novels (84k sentences) don't
   serialize.
-- **Bounded memory**: a 3.3 MB novel is never loaded whole into analysis state;
-  peak memory is bounded by chunk size.
+- **Memory shape**: the document is held as an in-memory String (plus one
+  chunk copy of it); sentence analysis runs over windows of that copy —
+  documents are not streamed from disk, so peak usage scales with the
+  source, not below it.
 - **Failure isolation**: one bad chunk doesn't kill the whole compile.
 
 ### 4.3 Why rules + dictionaries instead of an LLM?
@@ -105,7 +107,9 @@ chunk.
 
 **Why**:
 - **Zero API dependency**: local computation, no cost, no network failure mode.
-- **Reproducible**: identical corpus → byte-identical output every run — the
+- **Reproducible**: identical corpus → the same extracted events, relations
+  and claims every run — row ids and `created_at` timestamps are runtime
+  metadata and may differ between runs. The
   precondition for regression tests (`sanguo_compile`,
   `generalize_corpus_regression`).
 - **Traceable**: every event/relation points back to source sentences

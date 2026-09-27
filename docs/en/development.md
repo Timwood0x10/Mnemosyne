@@ -13,7 +13,7 @@ memory_distill/
 │   ├── compiler.rs         # ConversationCompiler — session state builder
 │   ├── config.rs           # Config — CLI args, env vars, validation
 │   ├── detector.rs         # QuestionDetector — is_problem heuristic
-│   ├── distiller.rs        # PipelineDistiller — 8-stage orchestrator
+│   ├── distiller/           # PipelineDistiller — 8-stage orchestrator (pipeline.rs, text tools in text.rs)
 │   ├── embed.rs            # EmbeddingService trait + NullEmbedder + RemoteEmbedder
 │   ├── error.rs            # Error — unified error types
 │   ├── extractor.rs        # ExperienceExtractor — problem-solution pairs
@@ -41,7 +41,7 @@ memory_distill/
 ```bash
 make check      # Runs: cargo clippy --all-targets --all-features + cargo check
 make test       # Runs: cargo test (142 unit tests + 3 doctests)
-make run        # Runs: cargo run --bin memory-mcp -- ...
+make run        # Runs: cargo run --bin mnemosyne -- ...
 make build      # Runs: cargo build --release
 ```
 
@@ -67,7 +67,7 @@ The project has **142 unit tests + 3 doctests**. Tests are organized per module:
 
 | Module | What's Tested |
 |---|---|
-| `distiller.rs` | Full pipeline, compression, Chinese text, capacity control |
+| `distiller/` | Full pipeline (`pipeline.rs`), compression (`text.rs`), capacity control |
 | `store.rs` | CRUD, FTS5 search, vector search, tenant isolation, batch ops |
 | `retrieval.rs` | BM25 scoring, tokenization, hybrid ranking, tenant filtering |
 | `classifier.rs` | All MemoryType classifications, case-insensitivity, fallback |
@@ -111,7 +111,7 @@ The project has **142 unit tests + 3 doctests**. Tests are organized per module:
 
 ### Adding a Pipeline Stage
 
-1. Add the phase function to `PipelineDistiller` in `src/distiller.rs`
+1. Add the phase function to `PipelineDistiller` in `src/distiller/pipeline.rs`
 2. Insert it into the `distill()` method in the correct position
 3. Add relevant counters to `DistillationMetrics`
 4. Write tests for the new stage behavior
@@ -138,8 +138,8 @@ The project has **142 unit tests + 3 doctests**. Tests are organized per module:
 Set `RUST_LOG` for verbose output:
 
 ```bash
-RUST_LOG=debug cargo run --bin memory-mcp -- --db-path /tmp/debug.db
-RUST_LOG=memory_distill=debug,rusqlite=info cargo run --bin memory-mcp
+RUST_LOG=debug cargo run --bin mnemosyne -- --db-path /tmp/debug.db
+RUST_LOG=mnemosyne=debug,rusqlite=info cargo run --bin mnemosyne
 ```
 
 ### In-Memory Database

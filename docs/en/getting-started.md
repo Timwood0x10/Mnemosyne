@@ -16,12 +16,12 @@ cd memory_distill
 cargo build --release
 ```
 
-The binary is placed at `target/release/memory-mcp`.
+The binary is placed at `target/release/mnemosyne`.
 
 ### From Cargo (when published)
 
 ```bash
-cargo install memory_distill
+cargo install mnemosyne
 ```
 
 ## Quick Start: Zero-Config Mode
@@ -29,7 +29,7 @@ cargo install memory_distill
 Run the server with no external dependencies — just SQLite:
 
 ```bash
-cargo run --bin memory-mcp -- \
+cargo run --bin mnemosyne -- \
   --embedding-provider none \
   --retrieval-mode keyword \
   --db-path ./my-memories.db
@@ -51,7 +51,7 @@ In stdio mode, you would typically connect through an MCP client. A quick test w
 
 ```bash
 # Start the server in background, capture its output
-cargo run --bin memory-mcp -- --db-path /tmp/test.db > /tmp/mcp-out &
+cargo run --bin mnemosyne -- --db-path /tmp/test.db > /tmp/mcp-out &
 MCP_PID=$!
 
 # Send a tools/list request
@@ -60,11 +60,13 @@ printf '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n' > /dev/stdin
 
 ## Distill Your First Memory
 
-Connect an MCP client and call the `memory_distill` tool:
+Connect an MCP client and call the `memory_compile` tool (with distillation
+enabled in this example):
 
 ```json
 {
   "conversation_id": "session-1",
+  "distill": true,
   "messages": [
     {"role": "user", "content": "How do I parse JSON in Rust?"},
     {"role": "assistant", "content": "Use serde_json::from_str with a typed struct."}
@@ -72,7 +74,7 @@ Connect an MCP client and call the `memory_distill` tool:
 }
 ```
 
-The server returns metrics: how many experiences were extracted, classified, stored, and whether any conflicts were resolved.
+The conversation is compiled into structured memory; because `distill` is true, the 8-stage distillation pipeline runs alongside the compile.
 
 ## Search Your Memories
 
@@ -90,7 +92,7 @@ The response contains ranked memories with relevance scores.
 ### With OpenAI
 
 ```bash
-MEMORY_OPENAI_API_KEY=sk-... cargo run --bin memory-mcp -- \
+MEMORY_OPENAI_API_KEY=sk-... cargo run --bin mnemosyne -- \
   --embedding-provider openai \
   --vector-dim 768 \
   --retrieval-mode hybrid

@@ -253,7 +253,7 @@ PDF 文本抽取为**尽力而为**（best-effort）实现，聚焦于简单的�
 | `agent_facts` | assistant 的 tool 调用或完成语 | Agent（`entity_type=agent`） | `agent` | 原值 |
 | `derived_facts` | agent 转述用户认知（"you like"/"你喜欢"/"the user wants"…） | User | `agent_derived` | 打折 ×0.5 |
 
-**零污染不变式**：User 的 Preference / Goal / Emotion 只来自 user 消息；`user_facts` 永不含 `attribution` 标记。agent 与 user 实体通过命名空间隔离的 `external_key`（`agent:<id>`）区分，永不碰撞。
+**零污染不变式**：User 的 Preference / Goal / Emotion 只来自 user 消息；`user_facts` 永不含 `attribution` 标记。agent 与 user 实体通过命名空间隔离的 `external_key`（agent 侧 `agent:<id>`，user 侧为裸 `user_id`）区分——仅当 `user_id` 恰以 `agent:` 开头时才可能撞键（该前缀约定保留给 agent）。
 
 #### 输入模式
 
@@ -404,7 +404,7 @@ PDF 文本抽取为**尽力而为**（best-effort）实现，聚焦于简单的�
 - **事实来自编译**：外部文档必须经编译器（分句→实体→事件→图谱），不绕过编译器裸注入原始文本。
 - **不双写**：外部 DB 默认索引型（查询转发），不物化、不同步，避免真相源漂移。
 - **agent 不替用户表态**：User 的 Preference / Goal / Emotion 只来自 user 消息；agent 转述必须带 `attribution=agent_derived` + 双重证据 + confidence 打折。
-- **实体隔离**：agent 实体用 `external_key=agent:<id>` 命名空间，与 user 实体永不碰撞。
+- **实体隔离**：agent 实体用 `external_key=agent:<id>` 命名空间，user 实体用裸 `user_id`——约定 user_id 不使用 `agent:` 前缀即可保证不撞键。
 - **可追溯**：每个图谱节点可追溯来源（文档偏移 / DB 表行 / tool_call_id）。
 
 ### 明确非目标

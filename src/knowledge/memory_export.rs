@@ -15,17 +15,21 @@
 //! ## Scope — what a bundle does and does not carry
 //!
 //! Exported: `documents` metadata (including the `source` provenance tag),
-//! `objects`, `edges`, `evidence` with byte spans, object→evidence links,
-//! and the V7 world model — `world_entities`, `world_profiles`,
-//! `world_relations`, `world_events` (with participants), `world_states`.
+//! `objects`, `edges`, `evidence` with byte spans, typed evidence links
+//! (object→evidence AND edge→evidence — v3; `Migrator::migrate` writes
+//! edge links, so backups keep them), and the V7 world model —
+//! `world_entities`, `world_profiles`, `world_relations`,
+//! `world_events` (with participants), `world_states`.
 //!
 //! Not exported, by design:
-//! - `chapters` bodies — they are rebuildable from the original sources
-//!   (`compile_source` re-splits any document; `Migrator::migrate` re-reads
-//!   the corpus files), so a restore re-derives them instead of shipping
-//!   duplicate prose.
-//! - edge→evidence links — `compile_source` only produces object→evidence
-//!   links today; nothing would populate the other direction.
+//! - `chapters` bodies — the only bodies come from `Migrator::migrate`,
+//!   which rebuilds them by re-reading the corpus files. `compile_source`
+//!   never writes bodies at all: its chapter row is an empty shell kept
+//!   solely for the evidence FK, so nothing is lost by omitting it.
+//!
+//! Known limitation: every sub-bundle row (objects, edges, evidence, links)
+//! is keyed by `doc_title` alone, so a bundle holding same-titled documents
+//! from different sources attaches those rows to the FIRST such document.
 
 use std::str::FromStr;
 
@@ -36,17 +40,16 @@ pub use crate::knowledge::memory_export_world::{
     ExportEventIdentity, ExportEventParticipant, ExportWorldEvent, ExportWorldState,
 };
 use crate::knowledge::store::KnowledgeStore;
-use crate::knowledge::{
-    Document, Evidence, EvidenceSourceType, KnowledgeEdge, KnowledgeObject, ObjectType, Origin,
-};
+use crate::knowledge::{Document, Evidence, KnowledgeEdge, KnowledgeObject, ObjectType, Origin};
 
 /// Format tag embedded in every bundle, for validation on import.
 pub const EXPORT_FORMAT: &str = "lorescope-memory";
 /// Current snapshot format version (bump on any schema-affecting change).
 ///
-/// v2 added the `world_events`/`world_states` sections (T9); v1 bundles
-/// still import (`#[serde(default)]` → empty sections).
-pub const EXPORT_VERSION: u32 = 2;
+/// v3 typed the evidence links (object vs edge, T19); v2 added the
+/// `world_events`/`world_states` sections (T9); v1 bundles still import
+/// (`#[serde(default)]` → empty sections, links default to object).
+pub const EXPORT_VERSION: u32 = 3;
 
 /// A document row, keyed for dedup by `title`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,13 +106,8 @@ pub struct ExportEvidence {
     pub end_offset: Option<i64>,
 }
 
-/// A fact↔evidence link (object evidence), keyed for dedup by
-/// `(source_name, evidence_content)`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExportEvidenceLink {
-    pub source_name: String,
-    pub evidence_content: String,
-}
+use crate::knowledge::memory_export_links::resolve_edge_endpoint_names;
+pub use crate::knowledge::memory_export_links::{ExportEdgeKey, ExportEvidenceLink};
 
 /// A V7 world entity, keyed for dedup by `name`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -267,29 +265,9 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
         }
     }
 
-    // Object→evidence links (the only kind `compile_source` produces; edge
-    // links are out of scope for now — see module docs).
-    let mut evidence_links = Vec::new();
-    for link in store.list_evidence_links().await? {
-        if link.source_type != EvidenceSourceType::Object {
-            continue;
-        }
-        let Some(obj) = store.get_object(link.source_id).await? else {
-            continue;
-        };
-        let Some(ev) = store
-            .get_evidence_for(EvidenceSourceType::Object, obj.id)
-            .await?
-            .into_iter()
-            .find(|e| e.id == link.evidence_id)
-        else {
-            continue;
-        };
-        evidence_links.push(ExportEvidenceLink {
-            source_name: obj.name.clone(),
-            evidence_content: ev.content.clone(),
-        });
-    }
+    // Typed evidence links (object + edge) — see `memory_export_links`.
+    let evidence_links =
+        crate::knowledge::memory_export_links::export_evidence_links(store).await?;
 
     // V7 world model: entities/profiles/relations (the general pipeline's
     // entity-centric output). Profiles and relations reference entity ids, so
@@ -359,23 +337,6 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
         world_events,
         world_states,
     })
-}
-
-/// Resolve the object names at both ends of an edge, querying the store.
-///
-/// Returns `None` when either endpoint object no longer exists (dangling
-/// edge) so the export can skip it instead of writing a broken edge.
-async fn resolve_edge_endpoint_names(
-    store: &dyn KnowledgeStore,
-    edge: &KnowledgeEdge,
-) -> Result<Option<(String, String)>> {
-    let Some(source) = store.get_object(edge.source_id).await? else {
-        return Ok(None);
-    };
-    let Some(target) = store.get_object(edge.target_id).await? else {
-        return Ok(None);
-    };
-    Ok(Some((source.name, target.name)))
 }
 
 /// Import a bundle into a store, deduplicating by identity so a re-import
@@ -535,6 +496,11 @@ pub async fn import_bundle(
     // Edges: resolve endpoints by (doc_title, name), skipping duplicates.
     let mut seen_edges: std::collections::HashSet<(String, String, String, String)> =
         std::collections::HashSet::new();
+    // edge identity → local id, consumed by the evidence-link pass below.
+    let mut edge_id_by_key: std::collections::HashMap<
+        crate::knowledge::memory_export_links::ExportEdgeKey,
+        i64,
+    > = std::collections::HashMap::new();
     for export_edge in &bundle.edges {
         let Some(&source_id) = obj_id_by_key.get(&(
             export_edge.doc_title.clone(),
@@ -560,17 +526,26 @@ pub async fn import_bundle(
         // Idempotent re-import: skip when the store already has this
         // (source, target, predicate) edge — `create_edge` is a bare INSERT
         // with no UNIQUE, so a second import of the same bundle used to
-        // double every relation.
+        // double every relation. Keep its id: edge evidence links re-point
+        // through this map.
         let already_exists = store
             .get_edges_touching(source_id)
             .await?
-            .iter()
-            .any(|e| e.target_id == target_id && e.predicate == export_edge.predicate);
-        if already_exists {
+            .into_iter()
+            .find(|e| e.target_id == target_id && e.predicate == export_edge.predicate);
+        if let Some(existing) = already_exists {
+            edge_id_by_key
+                .entry(crate::knowledge::memory_export_links::ExportEdgeKey {
+                    doc_title: export_edge.doc_title.clone(),
+                    source_name: export_edge.source_name.clone(),
+                    predicate: export_edge.predicate.clone(),
+                    target_name: export_edge.target_name.clone(),
+                })
+                .or_insert(existing.id);
             continue;
         }
         let origin = Origin::from_str(&export_edge.origin).unwrap_or(Origin::Observed);
-        store
+        let edge_id = store
             .create_edge(&KnowledgeEdge {
                 id: 0,
                 source_id,
@@ -584,23 +559,25 @@ pub async fn import_bundle(
                 created_at: now_ts(),
             })
             .await?;
+        edge_id_by_key
+            .entry(crate::knowledge::memory_export_links::ExportEdgeKey {
+                doc_title: export_edge.doc_title.clone(),
+                source_name: export_edge.source_name.clone(),
+                predicate: export_edge.predicate.clone(),
+                target_name: export_edge.target_name.clone(),
+            })
+            .or_insert(edge_id);
         stats.edges_created += 1;
     }
 
-    // Evidence links: resolve the object by name and the evidence by content
-    // (both globally), then link idempotently via `link_evidence`.
-    for link in &bundle.evidence_links {
-        let Some(obj_id) = global_object_by_name(store, &link.source_name).await? else {
-            continue;
-        };
-        let Some(ev_id) = global_evidence_by_content(store, &link.evidence_content).await? else {
-            continue;
-        };
-        store
-            .link_evidence(EvidenceSourceType::Object, obj_id, ev_id)
-            .await?;
-        stats.links_created += 1;
-    }
+    // Typed evidence links: objects resolve by name, edges by the key the
+    // edge pass above recorded (v1/v2 links default to the object path).
+    stats.links_created += crate::knowledge::memory_export_links::import_evidence_links(
+        store,
+        &bundle.evidence_links,
+        &edge_id_by_key,
+    )
+    .await?;
 
     // V7 world model: upsert entities/profiles/relations by identity so a
     // re-import is a no-op (same-named entity and same (entity,key) profile
@@ -679,7 +656,10 @@ async fn ensure_chapter(store: &dyn KnowledgeStore, doc_id: i64) -> Result<i64> 
 
 /// Find an object by name across all documents (used when a link references
 /// an object whose document isn't named explicitly in the bundle).
-async fn global_object_by_name(store: &dyn KnowledgeStore, name: &str) -> Result<Option<i64>> {
+pub(crate) async fn global_object_by_name(
+    store: &dyn KnowledgeStore,
+    name: &str,
+) -> Result<Option<i64>> {
     for doc in store.list_documents().await? {
         if let Some(obj) = store.find_object_by_name(name, Some(doc.id)).await? {
             return Ok(Some(obj.id));
@@ -689,7 +669,7 @@ async fn global_object_by_name(store: &dyn KnowledgeStore, name: &str) -> Result
 }
 
 /// Find an evidence row id by its content across all documents.
-async fn global_evidence_by_content(
+pub(crate) async fn global_evidence_by_content(
     store: &dyn KnowledgeStore,
     content: &str,
 ) -> Result<Option<i64>> {
@@ -773,7 +753,9 @@ mod tests {
                 end_offset: Some(10),
             }],
             evidence_links: vec![ExportEvidenceLink {
+                source_type: "object".into(),
                 source_name: "用户".into(),
+                edge: None,
                 evidence_content: "我偏好简洁的架构。".into(),
             }],
             world_entities: vec![ExportWorldEntity {

@@ -149,7 +149,7 @@ flowchart TB
     A["messages[] (role/content)"] --> B["conversation_compiler.rs<br/>session-state compilation"]
     B --> C["cognition_compiler.rs<br/>observations → facts"]
     C --> D["fact_store.rs<br/>SqliteFactStore persistence"]
-    C --> E["distiller.rs<br/>long-term memory distillation"]
+    C --> E["distiller/<br/>long-term memory distillation"]
     E --> F["prompt.rs<br/>PromptBuilder projection"]
 
     D --> G["retrieval"]
