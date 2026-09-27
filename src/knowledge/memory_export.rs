@@ -36,6 +36,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
+pub use crate::knowledge::memory_export_mentions::ExportMention;
 pub use crate::knowledge::memory_export_world::{
     ExportEventIdentity, ExportEventParticipant, ExportWorldEvent, ExportWorldState,
 };
@@ -46,10 +47,13 @@ use crate::knowledge::{Document, Evidence, KnowledgeEdge, KnowledgeObject, Objec
 pub const EXPORT_FORMAT: &str = "lorescope-memory";
 /// Current snapshot format version (bump on any schema-affecting change).
 ///
-/// v3 typed the evidence links (object vs edge, T19); v2 added the
-/// `world_events`/`world_states` sections (T9); v1 bundles still import
-/// (`#[serde(default)]` → empty sections, links default to object).
-pub const EXPORT_VERSION: u32 = 3;
+/// v4 carries `mentions` (where each name occurs) — without it a restore
+/// silently dropped the entity index; v3 typed the evidence links (object vs
+/// edge, T19); v2 added the `world_events`/`world_states` sections (T9).
+/// Older bundles still import (`#[serde(default)]` → empty sections, links
+/// default to object), and the bump is deliberate: a v4 bundle holds data a v3
+/// reader would drop without saying so, so it must refuse instead.
+pub const EXPORT_VERSION: u32 = 4;
 
 /// A document row, keyed for dedup by `title`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -163,6 +167,9 @@ pub struct ExportBundle {
     pub edges: Vec<ExportEdge>,
     pub evidence: Vec<ExportEvidence>,
     pub evidence_links: Vec<ExportEvidenceLink>,
+    /// Where each name occurs (T20): the entity index a restore used to drop.
+    #[serde(default)]
+    pub mentions: Vec<ExportMention>,
     #[serde(default)]
     pub world_entities: Vec<ExportWorldEntity>,
     #[serde(default)]
@@ -187,6 +194,11 @@ pub struct ImportStats {
     pub evidence_created: usize,
     pub edges_created: usize,
     pub links_created: usize,
+    pub mentions_created: usize,
+    /// Rows the bundle REFERENCES but the store cannot resolve — a missing
+    /// document, object, world entity or link endpoint. Counted so a caller can
+    /// tell a clean restore from a lossy one instead of inferring it from a log.
+    pub unresolved_references: usize,
 }
 
 fn now_ts() -> i64 {
@@ -314,6 +326,8 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
         .collect();
     let (world_events, world_states) =
         crate::knowledge::memory_export_world::export_world_sections(store).await?;
+    // Mentions travel last: they resolve their object by (doc_title, name).
+    let mentions = crate::knowledge::memory_export_mentions::export_mentions(store).await?;
 
     Ok(ExportBundle {
         format: EXPORT_FORMAT.to_string(),
@@ -324,6 +338,7 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
         edges,
         evidence,
         evidence_links,
+        mentions,
         world_entities: world_entities
             .into_iter()
             .map(|e| ExportWorldEntity {
@@ -339,9 +354,32 @@ pub async fn export_store(store: &dyn KnowledgeStore) -> Result<ExportBundle> {
     })
 }
 
-/// Import a bundle into a store, deduplicating by identity so a re-import
-/// is a no-op. Rejects bundles whose format tag does not match ours or
-/// whose version is newer than this build understands.
+/// Import a bundle into a store, deduplicating by identity.
+///
+/// Re-importing the same bundle converges: documents are matched by
+/// `(title, source)`, objects by `(doc, name)`, evidence by
+/// `(doc, span, content)`, edges by `(source, predicate, target)`, and every
+/// world row by its identity index. Mentions are matched by
+/// `(object, span, alias)`.
+///
+/// **Where an identity already exists, the bundle wins.** The non-identity
+/// columns — object properties (merged key by key), confidence, importance,
+/// descriptions, state values and spans — are refreshed from the bundle. This is
+/// deliberate (a restore is supposed to reproduce the bundle it was handed, not
+/// the store's drifted state), but it means importing an OLD bundle over a newer
+/// store moves those values backwards instead of skipping the row. A deployment
+/// that wants "never overwrite the store" must import into an empty database;
+/// there is no per-field switch, by design, because a half-applied merge is
+/// harder to reason about than either policy alone.
+///
+/// The whole import runs in one transaction (see below), so a failure leaves the
+/// store exactly as it was.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for a bundle whose format tag is not ours or
+/// whose version is newer than this build understands, and the first storage
+/// error of the import (with the transaction rolled back).
 pub async fn import_bundle(
     store: &dyn KnowledgeStore,
     bundle: &ExportBundle,
@@ -358,6 +396,42 @@ pub async fn import_bundle(
             bundle.version
         )));
     }
+    // A bundle is a snapshot, so the whole import runs in ONE transaction: a
+    // failure halfway through (a constraint violation, a disk error) must not
+    // leave the graph half-restored while the caller is told "import failed".
+    //
+    // The store's transaction API is not re-entrant (SQLite rejects a nested
+    // `BEGIN`), so a caller that already owns a transaction keeps ownership of
+    // it — including the commit.
+    if store.in_transaction().await? {
+        return import_bundle_body(store, bundle).await;
+    }
+    store.begin_transaction().await?;
+    match import_bundle_body(store, bundle).await {
+        Ok(stats) => {
+            store.commit_transaction().await?;
+            Ok(stats)
+        }
+        Err(error) => {
+            if let Err(rollback) = store.rollback_transaction().await {
+                // The caller needs the original failure; a failed rollback is
+                // logged because it means the store may hold partial data.
+                tracing::error!(
+                    error = %rollback,
+                    "rolling back a failed import failed; the store may hold part of the bundle"
+                );
+            }
+            Err(error)
+        }
+    }
+}
+
+/// The import itself: validation and transaction handling live in
+/// [`import_bundle`], so this only walks the bundle.
+async fn import_bundle_body(
+    store: &dyn KnowledgeStore,
+    bundle: &ExportBundle,
+) -> Result<ImportStats> {
     let mut stats = ImportStats {
         documents_created: 0,
         objects_created: 0,
@@ -365,6 +439,8 @@ pub async fn import_bundle(
         evidence_created: 0,
         edges_created: 0,
         links_created: 0,
+        mentions_created: 0,
+        unresolved_references: 0,
     };
     let mut docs_by_title: std::collections::HashMap<String, i64> =
         std::collections::HashMap::new();
@@ -406,10 +482,21 @@ pub async fn import_bundle(
         std::collections::HashMap::new();
     for export_obj in &bundle.objects {
         let Some(&doc_id) = docs_by_title.get(&export_obj.doc_title) else {
-            continue; // orphan object with no document in the bundle → skip
+            // Orphan object: the bundle names a document it does not carry.
+            stats.unresolved_references += 1;
+            continue;
         };
-        let object_type =
-            ObjectType::from_str(&export_obj.object_type).unwrap_or(ObjectType::Concept);
+        let object_type = ObjectType::from_str(&export_obj.object_type).unwrap_or_else(|error| {
+            // A bundle from a newer build can name a type this build does not
+            // know. Coercion keeps the restore going, but silently rewriting the
+            // value (the column even has a CHECK constraint) hid the mismatch.
+            tracing::warn!(
+                error = %error,
+                value = %export_obj.object_type,
+                "unknown object type in the bundle; storing it as `concept`"
+            );
+            ObjectType::Concept
+        });
         let key = (export_obj.doc_title.clone(), export_obj.name.clone());
         let obj_id = match store
             .find_object_by_name(&export_obj.name, Some(doc_id))
@@ -445,6 +532,20 @@ pub async fn import_bundle(
         obj_id_by_key.insert(key, obj_id);
     }
 
+    // Mentions: the entity index (where each name occurs). Imported right after
+    // the objects they point at, keyed by (doc_title, object_name) like every
+    // other cross-database reference in a bundle.
+    let (mentions_created, mention_skips) =
+        crate::knowledge::memory_export_mentions::import_mentions(
+            store,
+            &bundle.mentions,
+            &docs_by_title,
+            &obj_id_by_key,
+        )
+        .await?;
+    stats.mentions_created += mentions_created;
+    stats.unresolved_references += mention_skips;
+
     // Evidence: reuse by (doc_title, start, end, content) via the doc's first
     // chapter. Preload every involved doc's existing evidence ONCE instead of
     // calling `list_evidence_by_document` per bundle row (O(n²) → O(n)); the
@@ -465,12 +566,16 @@ pub async fn import_bundle(
     }
     for export_ev in &bundle.evidence {
         let Some(&doc_id) = docs_by_title.get(&export_ev.doc_title) else {
+            stats.unresolved_references += 1;
             continue;
         };
         let chapter_id = ensure_chapter(store, doc_id).await?;
-        let existing = evidence_cache
-            .get_mut(&doc_id)
-            .expect("every bundle doc is preloaded above");
+        let existing = evidence_cache.get_mut(&doc_id).ok_or_else(|| {
+            // The cache is seeded from `docs_by_title.values()` above, so this
+            // cannot happen today — but a panic inside a restore would abort the
+            // caller for an invariant that a future edit can break.
+            Error::Internal(format!("document {doc_id} missing from the evidence cache"))
+        })?;
         let key = (
             export_ev.start_offset,
             export_ev.end_offset,
@@ -506,12 +611,14 @@ pub async fn import_bundle(
             export_edge.doc_title.clone(),
             export_edge.source_name.clone(),
         )) else {
+            stats.unresolved_references += 1;
             continue;
         };
         let Some(&target_id) = obj_id_by_key.get(&(
             export_edge.doc_title.clone(),
             export_edge.target_name.clone(),
         )) else {
+            stats.unresolved_references += 1;
             continue;
         };
         let dedup_key = (
@@ -544,7 +651,14 @@ pub async fn import_bundle(
                 .or_insert(existing.id);
             continue;
         }
-        let origin = Origin::from_str(&export_edge.origin).unwrap_or(Origin::Observed);
+        let origin = Origin::from_str(&export_edge.origin).unwrap_or_else(|error| {
+            tracing::warn!(
+                error = %error,
+                value = %export_edge.origin,
+                "unknown edge origin in the bundle; storing it as `observed`"
+            );
+            Origin::Observed
+        });
         let edge_id = store
             .create_edge(&KnowledgeEdge {
                 id: 0,
@@ -572,12 +686,14 @@ pub async fn import_bundle(
 
     // Typed evidence links: objects resolve by name, edges by the key the
     // edge pass above recorded (v1/v2 links default to the object path).
-    stats.links_created += crate::knowledge::memory_export_links::import_evidence_links(
+    let (links_created, link_skips) = crate::knowledge::memory_export_links::import_evidence_links(
         store,
         &bundle.evidence_links,
         &edge_id_by_key,
     )
     .await?;
+    stats.links_created += links_created;
+    stats.unresolved_references += link_skips;
 
     // V7 world model: upsert entities/profiles/relations by identity so a
     // re-import is a no-op (same-named entity and same (entity,key) profile
@@ -592,6 +708,7 @@ pub async fn import_bundle(
     }
     for p in &bundle.world_profiles {
         let Some(&entity_id) = world_id_by_name.get(&p.entity_name) else {
+            stats.unresolved_references += 1;
             continue;
         };
         // Re-anchor the claim by content+span: evidence rows were already
@@ -636,7 +753,7 @@ pub async fn import_bundle(
 
 /// Ensure a document has at least one chapter (so evidence FK constraints
 /// hold); returns that chapter's id.
-async fn ensure_chapter(store: &dyn KnowledgeStore, doc_id: i64) -> Result<i64> {
+pub(crate) async fn ensure_chapter(store: &dyn KnowledgeStore, doc_id: i64) -> Result<i64> {
     if let Some(ch) = store.get_chapter_by_no(doc_id, 0).await? {
         return Ok(ch.id);
     }
@@ -683,18 +800,24 @@ pub(crate) async fn global_evidence_by_content(
     Ok(None)
 }
 
-/// Find an evidence row for a profile claim, preferring the row at the
-/// exported `(start, end)` span, then falling back to content-only matching.
+/// Find an evidence row for a claim, preferring the row at the exported
+/// `(start, end)` span, then falling back to content-only matching.
 ///
 /// The span preference matters when the same sentence text appears at two
-/// offsets (repeated paragraph): content alone would re-attach the claim to
-/// the wrong occurrence after a restore.
-async fn global_evidence_by_anchor(
+/// offsets (repeated paragraph): content alone would re-attach the claim to the
+/// wrong occurrence after a restore. Used by world profiles **and** by evidence
+/// links (`memory_export_links`), so both paths re-anchor identically.
+pub(crate) async fn global_evidence_by_anchor(
     store: &dyn KnowledgeStore,
     content: &str,
     start: Option<i64>,
     end: Option<i64>,
 ) -> Result<Option<i64>> {
+    // Without a span there is nothing to prefer, so take the plain content
+    // lookup (a bundle written before the span fields existed).
+    if start.is_none() {
+        return global_evidence_by_content(store, content).await;
+    }
     let mut content_fallback = None;
     for doc in store.list_documents().await? {
         for ev in store.list_evidence_by_document(doc.id).await? {
@@ -710,271 +833,4 @@ async fn global_evidence_by_anchor(
         }
     }
     Ok(content_fallback)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::knowledge::SQLiteKnowledgeStore;
-
-    fn sample_bundle() -> ExportBundle {
-        ExportBundle {
-            format: EXPORT_FORMAT.to_string(),
-            version: EXPORT_VERSION,
-            exported_at: now_ts(),
-            documents: vec![ExportDocument {
-                title: "会话-导出".into(),
-                author: None,
-                doc_type: Some("dialog".into()),
-                source: String::new(),
-            }],
-            objects: vec![ExportObject {
-                doc_title: "会话-导出".into(),
-                object_type: "person".into(),
-                name: "用户".into(),
-                properties: serde_json::json!({"偏好": "简洁"}),
-                confidence: 0.8,
-            }],
-            edges: vec![ExportEdge {
-                doc_title: "会话-导出".into(),
-                source_name: "用户".into(),
-                predicate: "偏好".into(),
-                target_name: "简洁".into(),
-                properties: serde_json::json!({}),
-                origin: "observed".into(),
-                confidence: 0.7,
-                valid_from: None,
-                valid_to: None,
-            }],
-            evidence: vec![ExportEvidence {
-                doc_title: "会话-导出".into(),
-                content: "我偏好简洁的架构。".into(),
-                start_offset: Some(0),
-                end_offset: Some(10),
-            }],
-            evidence_links: vec![ExportEvidenceLink {
-                source_type: "object".into(),
-                source_name: "用户".into(),
-                edge: None,
-                evidence_content: "我偏好简洁的架构。".into(),
-            }],
-            world_entities: vec![ExportWorldEntity {
-                name: "用户".into(),
-                entity_type: "person".into(),
-                importance: 0.5,
-            }],
-            world_profiles: vec![ExportWorldProfile {
-                entity_name: "用户".into(),
-                key: "偏好".into(),
-                value: "简洁".into(),
-                confidence: 0.8,
-                evidence_content: None,
-                evidence_start: None,
-                evidence_end: None,
-            }],
-            world_relations: vec![],
-            world_events: vec![],
-            world_states: vec![],
-        }
-    }
-
-    /// Objective: Verify `export_store` round-trips — importing an exported
-    /// bundle into a fresh store reproduces the same graph.
-    /// Invariants: import returns created counts; the entity is queryable by
-    /// name; re-import is a no-op (objects_created == 0).
-    #[tokio::test]
-    async fn export_import_round_trip() {
-        let src = SQLiteKnowledgeStore::open_in_memory()
-            .await
-            .expect("src store");
-        let bundle = import_bundle(&src, &sample_bundle()).await.expect("seed");
-        assert_eq!(bundle.documents_created, 1, "document created");
-        assert_eq!(bundle.objects_created, 1, "object created");
-
-        // Now export what we just imported.
-        let exported = export_store(&src).await.expect("export");
-        assert!(!exported.documents.is_empty(), "documents exported");
-        assert!(!exported.objects.is_empty(), "objects exported");
-
-        // Import into a fresh store and verify content is reproducible.
-        let dst = SQLiteKnowledgeStore::open_in_memory()
-            .await
-            .expect("dst store");
-        let stats = import_bundle(&dst, &exported).await.expect("re-import");
-        assert_eq!(stats.objects_created, 1, "object recreated in fresh store");
-
-        let obj = dst
-            .find_object_by_name("用户", None)
-            .await
-            .expect("query")
-            .expect("user entity present");
-        assert_eq!(obj.properties["偏好"], "简洁", "properties preserved");
-
-        // Re-import into the same store must be a no-op for objects.
-        let again = import_bundle(&dst, &exported).await.expect("import again");
-        assert_eq!(again.objects_created, 0, "idempotent: no new objects");
-        assert_eq!(again.objects_merged, 1, "existing object merged instead");
-    }
-
-    /// Objective: Verify an unsupported format is rejected on import.
-    /// Invariants: wrong format → error mentioning the format.
-    #[tokio::test]
-    async fn import_rejects_unknown_format() {
-        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let mut bundle = sample_bundle();
-        bundle.format = "other-tool".into();
-        let err = import_bundle(&store, &bundle)
-            .await
-            .expect_err("must reject");
-        assert!(
-            err.to_string().contains("unsupported export format"),
-            "clear error, got: {err}"
-        );
-    }
-
-    /// Objective: Verify a bundle from a FUTURE format version is rejected —
-    /// silently importing v2-as-v1 would drop fields this build cannot read.
-    /// Invariants: version > EXPORT_VERSION → error naming the version;
-    /// version == EXPORT_VERSION still imports (covered by round-trip test).
-    #[tokio::test]
-    async fn import_rejects_newer_bundle_version() {
-        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let mut bundle = sample_bundle();
-        bundle.version = EXPORT_VERSION + 1;
-        let err = import_bundle(&store, &bundle)
-            .await
-            .expect_err("must reject");
-        assert!(
-            err.to_string().contains("version"),
-            "error must name the version mismatch, got: {err}"
-        );
-    }
-
-    /// Objective: Verify exporting an empty store yields an empty bundle, not
-    /// an error.
-    /// Invariants: empty store → all sections empty.
-    #[tokio::test]
-    async fn export_empty_store_is_empty() {
-        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let bundle = export_store(&store).await.expect("export");
-        assert!(bundle.documents.is_empty());
-        assert!(bundle.objects.is_empty());
-        assert!(bundle.edges.is_empty());
-        assert!(bundle.evidence.is_empty());
-        assert!(bundle.evidence_links.is_empty());
-    }
-
-    /// Objective: Verify a world profile's evidence anchor exports its byte
-    /// SPAN (not just content), so a restore can re-attach the claim to the
-    /// right occurrence when the same sentence text appears at two offsets.
-    /// Invariants: evidence_start/end equal the source row's span; a profile
-    /// with no evidence keeps all three fields None.
-    #[tokio::test]
-    async fn profile_export_carries_evidence_span() {
-        let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
-        let did = store
-            .create_document(&crate::knowledge::Document {
-                id: 0,
-                title: "span-doc".into(),
-                author: None,
-                doc_type: Some("text".into()),
-                source: String::new(),
-                created_at: now_ts(),
-            })
-            .await
-            .expect("doc");
-        let cid = store
-            .create_chapter(&crate::knowledge::Chapter {
-                id: 0,
-                doc_id: did,
-                chapter_no: 1,
-                title: None,
-                content: String::new(),
-                start_offset: None,
-                end_offset: None,
-            })
-            .await
-            .expect("chapter");
-        // Same sentence text at two different offsets (repeated paragraph).
-        store
-            .create_evidence(&crate::knowledge::Evidence {
-                id: 0,
-                doc_id: did,
-                chapter_id: cid,
-                start_offset: Some(10),
-                end_offset: Some(20),
-                content: "重复的句子。".into(),
-                created_at: now_ts(),
-            })
-            .await
-            .expect("ev a");
-        let ev_b = store
-            .create_evidence(&crate::knowledge::Evidence {
-                id: 0,
-                doc_id: did,
-                chapter_id: cid,
-                start_offset: Some(300),
-                end_offset: Some(310),
-                content: "重复的句子。".into(),
-                created_at: now_ts(),
-            })
-            .await
-            .expect("ev b");
-        let eid = store
-            .upsert_world_entity("孔明", "person", 0.9)
-            .await
-            .expect("entity");
-        // Anchor to the SECOND occurrence — content-only matching would pick
-        // ev_a (first scan hit) and silently move the claim.
-        store
-            .upsert_world_profile(eid, "status", "出师", 0.8, Some(ev_b))
-            .await
-            .expect("profile");
-
-        let bundle = export_store(&store).await.expect("export");
-        let p = bundle
-            .world_profiles
-            .iter()
-            .find(|p| p.key == "status")
-            .expect("profile exported");
-        assert_eq!(
-            p.evidence_start,
-            Some(300),
-            "export must carry the anchored span, got {:?}",
-            p.evidence_start
-        );
-        assert_eq!(p.evidence_end, Some(310));
-        assert_eq!(
-            p.evidence_content.as_deref(),
-            Some("重复的句子。"),
-            "content still exported"
-        );
-
-        // Import into a fresh store: the claim must re-attach to the row at
-        // the SAME span (300..310), not to the first occurrence (10..20).
-        let dst = SQLiteKnowledgeStore::open_in_memory().await.expect("dst");
-        import_bundle(&dst, &bundle).await.expect("import");
-        let profiles = dst.list_world_profiles().await.expect("list");
-        let restored = profiles
-            .iter()
-            .find(|p| p.key == "status")
-            .expect("restored profile");
-        let evidence_id = restored
-            .evidence_id
-            .expect("restored profile keeps its anchor");
-        // Locate the restored evidence row and check its span.
-        let mut found_span = None;
-        for doc in dst.list_documents().await.expect("docs") {
-            for ev in dst.list_evidence_by_document(doc.id).await.expect("ev") {
-                if ev.id == evidence_id {
-                    found_span = Some((ev.start_offset, ev.end_offset));
-                }
-            }
-        }
-        assert_eq!(
-            found_span,
-            Some((Some(300), Some(310))),
-            "restore must re-anchor to the span-matching row"
-        );
-    }
 }

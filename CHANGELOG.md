@@ -174,6 +174,17 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shipped reference tables' `_meta.user_tables` notes, and the resources are
   documented in `docs/zh/configuration.md` and both READMEs (including
   `MNEMOSYNE_HOME`, which had never been written down).
+- **A `mentions` section in export bundles** (`ExportMention`, v4) plus
+  `ImportStats::{mentions_created, unresolved_references}`, both echoed by the
+  import tool.
+- **`ExperienceRepository::replace_batch`** — remove superseded rows and insert
+  their replacements as one unit — and the transaction API
+  (`begin`/`commit`/`rollback`/`in_transaction`) moved onto the `KnowledgeStore`
+  trait so trait-object callers such as `import_bundle` can use it.
+- **`tests/store_migration.rs`**: the dirty-database repair cases (duplicate
+  events with dependents, colliding dependents, stale index definition, clean
+  database untouched, legacy NULL columns), which a fresh in-memory store can
+  never exercise.
 
 ### Fixed
 
@@ -440,12 +451,163 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   falls through to the no-op arm), and the relationship merge drops a
   branch that was already provably dead (`(_, Value::Object(_))` cannot be
   null).
+- **A dirty database could make the knowledge store permanently unopenable.**
+  The unique-index migration deduplicated with a bare `DELETE`, which the
+  foreign keys — turned ON earlier in the same `init` — refuse as soon as a
+  duplicate event has participants or states. The failure was only warned about,
+  so the following `CREATE UNIQUE INDEX` failed too and `open()` failed with a
+  message that hid the cause. Duplicates are now collapsed by a window-function
+  mapping that re-points dependents onto the surviving row (dropping a dependent
+  whose link the survivor already has) inside one transaction, and any failure
+  is reported by index name. `tests/store_migration.rs` builds the dirty state
+  with raw SQL and asserts the repair — it cannot be reached with a fresh store.
+- **A stale index definition counted as "already installed".** Existence was
+  checked by index NAME, so an index created with the same name on different
+  columns was accepted and every `ON CONFLICT (...)` upsert then failed at
+  statement level. The stored definition is compared and rebuilt on mismatch.
+- **One legacy NULL row broke every world list and the whole export.** The
+  nullable columns `events.description`, `events/world_entities.importance` and
+  the profile/relation/state `confidence` columns were read as non-null, so a
+  single hand-written or legacy row made `list_world_*` — and with it
+  `export_store` — fail permanently. They now fall back to the DDL defaults.
+- **Evidence anchors ignored the tenant.** Both write paths inserted without
+  `tenant_id`, so every anchor landed in the column default `'default'` and no
+  per-tenant export or deletion could attribute (or find) the text that
+  justifies a fact. The anchor now inherits the tenant of the fact's entity, and
+  the explicit `insert_evidence` takes it as a parameter.
+- **`import_bundle` ran statement by statement.** A failure halfway left the
+  graph half-restored while the caller was told "import failed"; concurrent
+  readers could observe the partial state. The import is now one transaction,
+  and a caller that already owns one keeps ownership (the API is not
+  re-entrant) — `KnowledgeStore`'s transaction methods moved into the trait so a
+  `&dyn KnowledgeStore` can drive them.
+- **Mentions were not exported at all.** `migrations` writes them in production,
+  so a backup/restore silently dropped the entity index (where each name occurs)
+  while the docs promised that memory is never lost. Bundles now carry a
+  `mentions` section (v4), keyed by `(doc_title, object_name)` and deduplicated
+  by `(span, alias)` so a re-import converges instead of appending a second copy.
+- **Evidence LINKS re-anchored by content alone.** When the same sentence occurs
+  twice, a link re-attached to the wrong occurrence — the defect the world
+  profile path had already fixed — and the struct's comment claimed span
+  preference that the code did not implement. Links now carry their span and use
+  the same span-first resolver.
+- **Capacity eviction crossed users silently.** The quota is a tenant-level
+  invariant (stated in the code) while conflict resolution deliberately refuses
+  to touch another user's memory, so an eviction could delete someone else's
+  row without a trace. The asymmetry is now documented where it happens and
+  every eviction is logged with the affected users.
+- **A superseded memory could be deleted without its replacement being stored.**
+  Conflict resolution deleted during phase 6 and phase 8 inserted later, each in
+  its own transaction: a failure in between lost the old row and stored nothing.
+  Both now go through one `ExperienceRepository::replace_batch`, so the delete
+  and the inserts either land together or not at all (pinned by a trigger-based
+  test).
+- **`memory_compile`'s compatible knowledge/decisions belonged to nobody.** They
+  were written with an empty `user_id`, so they could never be deduplicated
+  against their owner's history (conflict resolution requires a shared
+  `user_id`) and no per-user query would return them. They now carry the
+  caller's.
+- **A restore silently coerced and silently dropped.** An unknown `object_type`
+  / `origin` in a bundle was rewritten to a default without a word (`origin` even
+  has a CHECK constraint), and unresolvable references were skipped without a
+  count. Both are now warned about, and the skipped references are reported as
+  `ImportStats::unresolved_references` so a caller can tell a clean restore from
+  a lossy one.
+- **A panic point on the import path.** A `.expect` in the evidence cache lookup
+  became a returned error.
+- **One caller could be two identities.** Tools handed a raw `""` down to the
+  store while echoing `"default"` back to the caller (and `memory_compile` only
+  normalised it for the response), so the same caller's rows were split across
+  an empty id and `default` — and, because conflict resolution only compares
+  rows with an equal `user_id`, they never deduplicated against each other.
+  Every tool now reads its identities through `mcp::types::identity_arg`, which
+  trims and defaults them in one place, and the tests pin that an omitted id and
+  a blank one resolve to the same user entity.
+- **Re-compiling a conversation appended a second copy of every evidence
+  anchor.** The `evidence` table had no identity at all, so it grew with the
+  compile count while the facts it justifies stayed equally readable. Anchors
+  are now unique per `(tenant, doc, chapter, span, text)` — enforced by the
+  database, with `IFNULL` placeholders so the nullable columns cannot let
+  duplicates through — and both write paths insert idempotently. The identity is
+  also what the in-call cache is keyed on: it used to key on text and span
+  alone, so the same span under another tenant or in another document could
+  reuse a row (a silent cross-link, not just a saving). Existing databases are
+  repaired on open: duplicates collapse onto the freshest row with
+  `facts.evidence_id` moved onto it first, because deleting a referenced row is
+  exactly what the foreign keys refuse.
+
+- **FK enforcement could stay OFF for the rest of a connection's life.**
+  `clear_all`, `clear_for_document` and `Migrator::migrate` each ran "disable FK →
+  BEGIN → work → COMMIT → enable FK", so a `?` on `BEGIN` (a concurrent `BEGIN`
+  can win the `is_autocommit` check) or on `COMMIT` returned *before* enforcement
+  was restored — and the connection then kept writing without referential
+  integrity, which is exactly the failure the pragma dance exists to prevent.
+  `PRAGMA foreign_keys` is also ignored inside a transaction, so even the paths
+  that did remember to restore were no-ops when the commit or rollback had
+  failed. One helper (`with_foreign_keys_disabled`) now owns the sequence,
+  restores enforcement on every exit path, and takes care not to touch a
+  transaction it did not open.
+- **One work could become two `documents` rows.** `documents(title, source)` had
+  no unique index, while every write path is "find_document → None →
+  create_document" under two separate lock acquisitions: two compilers of the
+  same work both saw `None` and both inserted, after which the objects, edges and
+  evidence split across the two rows and `clear_for_document` wiped only half (a
+  re-migration then duplicated the graph). The identity is a unique index with an
+  idempotent upsert (metadata is filled in, never erased), reads are ordered, and
+  a database that already holds duplicates is repaired on open.
+- **Timestamp columns defaulted to NULL.** Nine DDL defaults used
+  `strftime('%s','localtime')`, and `localtime` is a *modifier*: passing it where
+  SQLite expects a time value makes the whole expression evaluate to NULL. Every
+  row inserted without an explicit timestamp stored NULL, and the four row
+  mappers that decode `created_at` as a plain `i64` (documents, objects, edges,
+  evidence) failed on exactly those rows; two world-model upserts wrote NULL into
+  `updated_at` the same way. The defaults are UTC seconds now, and the readers
+  treat a NULL as "time unknown" (0) so databases written while the default was
+  broken stay readable.
 
 ### Changed
 
 - Removed the dead `--sse-addr` / `MEMORY_SSE_ADDR` option. The server only
   speaks stdio; an HTTP/SSE transport can be added as a follow-up if needed.
+- **The unique-index installer is shared** (`storage::unique_index`). The
+  knowledge store and the fact store both need to install an identity index on
+  databases that predate it, which means the same two hazards every time: a
+  name-only check accepts a stale definition, and deleting a duplicate whose id
+  is still referenced is refused by the foreign keys (taking `open()` down with
+  it). One implementation now covers both, so the repair cannot drift apart.
+- **`src/fact_store/mod.rs` came off the 1000-line edge** (1000 → 576): its unit
+  tests moved to `src/fact_store/tests.rs`, which keeps access to the private
+  schema helpers (`conversation_compiler/tests.rs` and
+  `compiler/profile/tests.rs` use the same split).
+- **The FK-safe transaction wrapper is public** (`with_foreign_keys_disabled`):
+  a caller that needs a wipe or a migration with enforcement off can no longer
+  forget to restore it.
+- **`knowledge/store/tests/mod.rs` split by area** (1099 → 421 lines, plus
+  `tests/objects.rs` and `tests/world.rs`) for the same one-file-per-1000-lines
+  reason as the earlier splits.
+- The distillation capacity cap is documented as what it is on a single-node
+  MCP server — the tenant *is* the local installation, so the quota is "how many
+  memories this installation keeps" — instead of reading like a multi-tenant
+  trade-off. Behaviour is unchanged.
 - `Compile` outputs are now tenant-scoped.
+- **`EXPORT_VERSION` 3 → 4.** A v3 reader would ignore the new `mentions`
+  section and report a successful restore while dropping the entity index, so
+  the bump makes it refuse the bundle instead — a loud failure over a silent
+  loss.
+- **`SqliteFactStore::insert_evidence` takes `tenant_id`** as its first
+  argument. The column has a `'default'` default, which is exactly how every row
+  ended up unattributed; requiring it keeps the call sites honest.
+- **The import's conflict policy is now written down** where it is applied:
+  where an identity already exists, the bundle wins (non-identity columns are
+  refreshed from it), which is what makes a restore reproduce the bundle — and
+  why importing an older bundle over a newer store moves values backwards.
+- **`src/compiler/profile.rs` came off the 1000-line edge** (999 → 658): its
+  unit tests moved to `src/compiler/profile/tests.rs`, which keeps private
+  access to the module (the same split `conversation_compiler/tests.rs` uses).
+- Three columns that looked alive are now marked as reserved in the DDL
+  (`world_entities.status`, `world_relations.valid_from`/`valid_to`,
+  `event_participants.side`): nothing writes or reads them, and a reader
+  deserves to know that before trusting them.
 
 ### Docs
 

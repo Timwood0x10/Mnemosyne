@@ -181,6 +181,8 @@ impl ToolHandler for MemoryImportHandler {
                     "evidence_created": stats.evidence_created,
                     "edges_created": stats.edges_created,
                     "links_created": stats.links_created,
+                    "mentions_created": stats.mentions_created,
+                    "unresolved_references": stats.unresolved_references,
                 }),
                 false,
             ),

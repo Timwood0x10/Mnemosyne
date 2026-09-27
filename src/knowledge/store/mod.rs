@@ -18,6 +18,7 @@ use serde::Serialize;
 use tokio::sync::Mutex;
 
 use crate::error::{Error, Result, StorageError};
+use crate::storage::unique_index::{UniqueIndex, ensure_unique_index};
 use crate::storage::{KNOWLEDGE_SCHEMA, WORLD_SCHEMA};
 
 use super::{
@@ -70,37 +71,59 @@ fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str)
     Ok(())
 }
 
-/// Create a unique index idempotently, deduplicating first when needed.
-///
-/// `CREATE UNIQUE INDEX IF NOT EXISTS` is skipped when the index already
-/// exists; when the index is missing but violating rows exist (the
-/// cross-connection race that this index exists to prevent), `dedupe_sql`
-/// collapses each identity group to its freshest row so the create succeeds.
-fn ensure_unique_index(
-    conn: &Connection,
-    name: &str,
-    create_sql: &str,
-    dedupe_sql: &str,
-) -> Result<()> {
-    let exists: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
-            params![name],
-            |r| r.get(0),
-        )
-        .map_err(|e| StorageError::Schema(format!("check index {name}: {e}")))?;
-    if exists > 0 {
-        return Ok(());
-    }
-    if let Err(e) = conn.execute_batch(dedupe_sql) {
-        // Empty table (the common case) makes the DELETE a no-op; a failure
-        // here must not brick init — the create below is the gate.
-        tracing::warn!(error = %e, index = name, "pre-index dedupe skipped");
-    }
-    conn.execute_batch(create_sql)
-        .map_err(|e| StorageError::Schema(format!("create index {name}: {e}")))?;
-    Ok(())
-}
+/// The unique identities the world model relies on.
+const UNIQUE_INDEXES: &[UniqueIndex] = &[
+    UniqueIndex {
+        name: "ux_events_identity",
+        table: "events",
+        create_sql: "CREATE UNIQUE INDEX IF NOT EXISTS ux_events_identity ON events(\
+                     title, IFNULL(timestamp, -1), IFNULL(start_offset, -1), \
+                     IFNULL(end_offset, -1))",
+        identity: &[
+            "title",
+            "IFNULL(timestamp, -1)",
+            "IFNULL(start_offset, -1)",
+            "IFNULL(end_offset, -1)",
+        ],
+        referencing: &[
+            ("event_participants", "event_id"),
+            ("world_states", "event_id"),
+        ],
+    },
+    UniqueIndex {
+        name: "ux_world_states_identity",
+        table: "world_states",
+        create_sql: "CREATE UNIQUE INDEX IF NOT EXISTS ux_world_states_identity ON world_states(\
+                     entity_id, slot, IFNULL(event_id, -1), IFNULL(chapter, -1))",
+        identity: &[
+            "entity_id",
+            "slot",
+            "IFNULL(event_id, -1)",
+            "IFNULL(chapter, -1)",
+        ],
+        referencing: &[],
+    },
+    UniqueIndex {
+        name: "ux_documents_identity",
+        table: "documents",
+        create_sql: "CREATE UNIQUE INDEX IF NOT EXISTS ux_documents_identity \
+                     ON documents(title, source)",
+        identity: &["title", "source"],
+        // Every write path is "find_document → None → create_document" under
+        // two separate locks, so two compilers of the same work both saw `None`
+        // and both inserted: one document became two rows and every
+        // object/edge/evidence row split between them (`clear_for_document`
+        // then wiped only half, so a re-migration duplicated the graph). The
+        // other tables the compiler writes were already unique-upserted; this
+        // is the one that was not.
+        referencing: &[
+            ("chapters", "doc_id"),
+            ("knowledge_objects", "doc_id"),
+            ("evidence", "doc_id"),
+            ("compiler_runs", "doc_id"),
+        ],
+    },
+];
 
 #[cfg(test)]
 mod tests;
@@ -176,29 +199,14 @@ impl SQLiteKnowledgeStore {
         // AFTER ensure_column: on a legacy DB the offset columns only exist
         // after the ALTER above, and SQLite rejects an index referencing
         // missing columns. A failed index would in turn make every
-        // `ON CONFLICT(...)` upsert fail at statement level.
-        ensure_unique_index(
-            &conn,
-            "ux_events_identity",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_events_identity ON events(\
-             title, IFNULL(timestamp, -1), IFNULL(start_offset, -1), IFNULL(end_offset, -1))",
-            // True duplicates can only come from the pre-index cross-connection
-            // race this index eliminates; keep the freshest row (MAX id), which
-            // matches the DO UPDATE refresh semantics.
-            "DELETE FROM events WHERE id NOT IN (\
-             SELECT MAX(id) FROM events \
-             GROUP BY title, IFNULL(timestamp, -1), IFNULL(start_offset, -1), \
-                      IFNULL(end_offset, -1))",
-        )?;
-        ensure_unique_index(
-            &conn,
-            "ux_world_states_identity",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_world_states_identity ON world_states(\
-             entity_id, slot, IFNULL(event_id, -1), IFNULL(chapter, -1))",
-            "DELETE FROM world_states WHERE id NOT IN (\
-             SELECT MAX(id) FROM world_states \
-             GROUP BY entity_id, slot, IFNULL(event_id, -1), IFNULL(chapter, -1))",
-        )?;
+        // `ON CONFLICT(...)` upsert fail at statement level — which is why a
+        // database that predates the index is REPAIRED here (duplicates
+        // collapsed, dependents re-pointed) rather than refused: the previous
+        // revision's best-effort dedupe left exactly those databases
+        // unopenable.
+        for spec in UNIQUE_INDEXES {
+            ensure_unique_index(&conn, spec)?;
+        }
         Ok(())
     }
 
@@ -217,57 +225,6 @@ impl SQLiteKnowledgeStore {
         Ok(())
     }
 
-    /// Begin an explicit SQLite transaction on the shared connection.
-    ///
-    /// All subsequent store calls on this connection participate in the
-    /// transaction until [`commit_transaction`](Self::commit_transaction) or
-    /// [`rollback_transaction`](Self::rollback_transaction) ends it. Used by
-    /// the migrator to make a full run atomic (H6): a failure mid-way rolls
-    /// back every row written so far instead of leaving a half-migrated
-    /// database.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error if `BEGIN` fails (e.g. a transaction is already
-    /// open on this connection — callers must not nest).
-    pub async fn begin_transaction(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch("BEGIN;").map_err(Into::into)
-    }
-
-    /// Commit the transaction opened by [`begin_transaction`](Self::begin_transaction).
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error if `COMMIT` fails.
-    pub async fn commit_transaction(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch("COMMIT;").map_err(Into::into)
-    }
-
-    /// Roll back the transaction opened by [`begin_transaction`](Self::begin_transaction),
-    /// discarding every write made since it began.
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error if `ROLLBACK` fails.
-    pub async fn rollback_transaction(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch("ROLLBACK;").map_err(Into::into)
-    }
-
-    /// Report whether a transaction is currently open on this connection.
-    ///
-    /// Used by callers like `Migrator::migrate` that would otherwise nest a
-    /// `BEGIN` inside a caller-owned transaction (SQLite rejects nested
-    /// BEGIN, and a failed `begin_transaction` would corrupt the outer
-    /// transaction's state). When this returns `true`, the caller must run
-    /// its inner work directly without opening or closing its own transaction.
-    pub async fn in_transaction(&self) -> Result<bool> {
-        let conn = self.conn.lock().await;
-        Ok(!conn.is_autocommit())
-    }
-
     /// Drop all general-model rows. Called by the migrator at the start of a
     /// full run so a re-migration is a clean rebuild rather than an
     /// accumulating append.
@@ -279,35 +236,115 @@ impl SQLiteKnowledgeStore {
     /// risks a spurious "FOREIGN KEY constraint failed" on the parent deletes.
     pub async fn clear_all(&self) -> Result<()> {
         // If a caller already opened a transaction (e.g. `Migrator::migrate`'s
-        // H6 wrap), we must NOT nest a `BEGIN` — SQLite rejects it with
+        // wrap), we must NOT nest a `BEGIN` — SQLite rejects it with
         // "cannot start a transaction within a transaction". Run the DELETE
         // directly inside the caller's transaction instead; the caller owns
-        // the atomicity. Otherwise wrap for atomicity (PRAGMA outside, DELETE
-        // inside, rollback on failure) so FK never stays OFF with a half-wipe.
-        let in_transaction = {
-            let conn = self.conn.lock().await;
-            !conn.is_autocommit()
-        };
-        if in_transaction {
+        // the atomicity. Otherwise wrap it: FK off, DELETE inside, and
+        // enforcement restored on every exit path (see
+        // [`Self::with_foreign_keys_disabled`]).
+        if self.in_transaction().await? {
             return self.clear_all_inner().await;
         }
+        self.with_foreign_keys_disabled(|| self.clear_all_inner())
+            .await
+    }
+
+    /// Run `work` inside a transaction with FK enforcement temporarily off,
+    /// restoring enforcement on EVERY exit path.
+    ///
+    /// The shape this replaces — disable, `BEGIN`, work, `COMMIT`, enable — is
+    /// unsafe twice over, because `PRAGMA foreign_keys` is connection-scoped
+    /// and a documented no-op inside a transaction:
+    ///
+    /// - A `?` on `BEGIN` (the `is_autocommit` check and the `BEGIN` are not
+    ///   atomic, so a concurrent `BEGIN` can win) or on `COMMIT`
+    ///   (`SQLITE_BUSY`, a full disk) returned **before** enforcement was
+    ///   restored, and the connection then kept writing without referential
+    ///   integrity for the rest of its life — exactly the state this dance
+    ///   exists to prevent.
+    /// - Re-enabling while a transaction is still open is silently ignored, so
+    ///   even the paths that did remember to restore were no-ops whenever the
+    ///   commit or rollback itself had failed.
+    ///
+    /// Callers therefore cannot forget, and the restore only ever runs from an
+    /// autocommit connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns the work's error when the work failed, or the restoration error
+    /// when the work succeeded but enforcement could not be re-established —
+    /// the second is strictly worse, since the connection is unsafe until it is
+    /// reopened.
+    pub async fn with_foreign_keys_disabled<F, Fut, T>(&self, work: F) -> Result<T>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
         self.set_foreign_keys_enabled(false).await?;
-        self.begin_transaction().await?;
-        let result = self.clear_all_inner().await;
-        match &result {
-            Ok(_) => {
-                // COMMIT first: `PRAGMA foreign_keys` is a no-op inside an
-                // open transaction, so re-enabling BEFORE commit left FK
-                // enforcement OFF for the connection's remaining lifetime.
-                self.commit_transaction().await?;
-                let _ = self.set_foreign_keys_enabled(true).await;
+        // `BEGIN` decides whether the transaction is OURS. If it fails — this
+        // connection is already inside a caller's transaction, which `migrate`
+        // and `clear_all` do on purpose — the caller owns that transaction and
+        // we must not touch it: rolling back somebody else's transaction would
+        // silently discard their work.
+        let (outcome, transaction_is_ours) = match self.begin_transaction().await {
+            Ok(()) => {
+                let outcome = match work().await {
+                    Ok(value) => self.commit_transaction().await.map(|()| value),
+                    Err(work_error) => {
+                        if let Err(rollback_error) = self.rollback_transaction().await {
+                            // Left open by a failed rollback;
+                            // `restore_foreign_keys` finishes it below.
+                            tracing::error!(
+                                error = %rollback_error,
+                                "rolling back the wrapped work failed"
+                            );
+                        }
+                        Err(work_error)
+                    }
+                };
+                (outcome, true)
             }
-            Err(_) => {
-                let _ = self.rollback_transaction().await;
-                let _ = self.set_foreign_keys_enabled(true).await;
+            Err(begin_error) => (Err(begin_error), false),
+        };
+        let restored = self.restore_foreign_keys(transaction_is_ours).await;
+        match (outcome, restored) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Ok(_), Err(restore_error)) => Err(restore_error),
+            (Err(work_error), Ok(())) => Err(work_error),
+            (Err(work_error), Err(restore_error)) => {
+                // Both failed: report what the caller asked about, but the
+                // connection is now writing without FK enforcement, which an
+                // operator has to hear about.
+                tracing::error!(
+                    error = %restore_error,
+                    "restoring foreign keys failed after a failed transaction; \
+                     the connection is running without referential integrity"
+                );
+                Err(work_error)
             }
         }
-        result
+    }
+
+    /// Re-enable FK enforcement, from an autocommit connection.
+    ///
+    /// The pragma is ignored inside a transaction, so a `COMMIT`/`ROLLBACK`
+    /// that failed would leave the transaction open and the change silently
+    /// dropped — the connection would keep going with enforcement off. When
+    /// that transaction is one this helper opened (`transaction_is_ours`), one
+    /// more `ROLLBACK` returns the connection to autocommit first; a
+    /// transaction opened by the caller is left strictly alone.
+    async fn restore_foreign_keys(&self, transaction_is_ours: bool) -> Result<()> {
+        {
+            let conn = self.conn.lock().await;
+            if transaction_is_ours && !conn.is_autocommit() {
+                tracing::warn!(
+                    "a transaction outlived its commit/rollback; rolling it back \
+                     before restoring foreign keys"
+                );
+                conn.execute_batch("ROLLBACK")?;
+            }
+        }
+        self.set_foreign_keys_enabled(true).await
     }
 
     async fn clear_all_inner(&self) -> Result<()> {
@@ -332,30 +369,13 @@ impl SQLiteKnowledgeStore {
     /// [`clear_all`].
     pub async fn clear_for_document(&self, doc_id: i64) -> Result<()> {
         // Same outer-transaction detection as clear_all: never nest a BEGIN
-        // inside a caller transaction (Migrator::migrate's H6 wrap calls us);
-        // the caller owns atomicity then.
-        let in_transaction = {
-            let conn = self.conn.lock().await;
-            !conn.is_autocommit()
-        };
-        if in_transaction {
+        // inside a caller transaction (Migrator::migrate's wrap calls us); the
+        // caller owns atomicity then.
+        if self.in_transaction().await? {
             return self.clear_for_document_inner(doc_id).await;
         }
-        self.set_foreign_keys_enabled(false).await?;
-        self.begin_transaction().await?;
-        let result = self.clear_for_document_inner(doc_id).await;
-        match &result {
-            Ok(_) => {
-                // COMMIT first: PRAGMA foreign_keys is a no-op in a transaction.
-                self.commit_transaction().await?;
-                let _ = self.set_foreign_keys_enabled(true).await;
-            }
-            Err(_) => {
-                let _ = self.rollback_transaction().await;
-                let _ = self.set_foreign_keys_enabled(true).await;
-            }
-        }
-        result
+        self.with_foreign_keys_disabled(|| self.clear_for_document_inner(doc_id))
+            .await
     }
 
     async fn clear_for_document_inner(&self, doc_id: i64) -> Result<()> {

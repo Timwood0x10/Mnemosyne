@@ -203,8 +203,18 @@ impl PipelineDistiller {
     /// exact content hash against existing memories of the same type for the
     /// tenant. A matching hash always replaces (the new memory is at least as
     /// fresh); non-matching hashes are kept as distinct entries.
-    async fn phase_resolve_conflicts(&self, memories: Vec<Memory>) -> Result<Vec<Memory>> {
+    /// Returns the memories worth storing **and** the ids they supersede.
+    ///
+    /// The superseded rows are NOT deleted here: a replacement is only a
+    /// replacement once the new row is stored, so phase 8 deletes them inside
+    /// the same transaction as the inserts (a failure in between used to lose
+    /// the old memory without storing the new one).
+    async fn phase_resolve_conflicts(
+        &self,
+        memories: Vec<Memory>,
+    ) -> Result<(Vec<Memory>, Vec<String>)> {
         let mut kept = Vec::with_capacity(memories.len());
+        let mut superseded: Vec<String> = Vec::new();
         for mem in memories {
             // Vector path: embeddings present.
             if !mem.vector.is_empty() {
@@ -263,10 +273,7 @@ impl PipelineDistiller {
                     }
                 }
                 if let Some(old_id) = replaced_existing_id {
-                    self.store.delete(&old_id).await?;
-                    self.metrics
-                        .memories_replaced
-                        .fetch_add(1, Ordering::Relaxed);
+                    superseded.push(old_id);
                 }
                 if conflict_found {
                     self.metrics
@@ -294,17 +301,10 @@ impl PipelineDistiller {
                     // candidate — deleting or dropping on it destroys one of
                     // the two histories.
                     && exp.user_id == mem.user_id
-                // Same-user scope (T15): an identical content hash from
-                // ANOTHER user's conversation is not a duplicate of this
-                // candidate — deleting or dropping on it destroys one of
-                // the two histories.
             });
             match duplicate {
                 Some(exp) if mem.importance > exp.confidence => {
-                    self.store.delete(&exp.id).await?;
-                    self.metrics
-                        .memories_replaced
-                        .fetch_add(1, Ordering::Relaxed);
+                    superseded.push(exp.id.clone());
                     self.metrics
                         .conflicts_resolved
                         .fetch_add(1, Ordering::Relaxed);
@@ -321,7 +321,7 @@ impl PipelineDistiller {
                 }
             }
         }
-        Ok(kept)
+        Ok((kept, superseded))
     }
 
     /// Phase 6: final top-N by importance.
@@ -340,6 +340,19 @@ impl PipelineDistiller {
     /// Only `Knowledge` memories are capped (matching the source project's
     /// `MaxSolutionsPerTenant`). When the count exceeds the cap, the
     /// lowest-confidence records are evicted.
+    ///
+    /// # Scope
+    ///
+    /// The cap counts the tenant's `Knowledge` memories. This is a single-node
+    /// MCP server, so the tenant is the local installation: the quota is simply
+    /// "how many memories this installation keeps", and eviction takes the
+    /// lowest-confidence rows whichever `user_id` wrote them.
+    ///
+    /// Conflict resolution is stricter on purpose and only ever replaces a row
+    /// the same user wrote (T15). The difference is what is at stake: evicting
+    /// a generic old row is housekeeping, while deleting somebody's only record
+    /// of a decision is data loss. Every eviction is logged, so it is never
+    /// invisible.
     async fn phase_enforce_capacity(&self, tenant_id: &str) -> Result<()> {
         let k_count = self
             .store
@@ -361,8 +374,18 @@ impl PipelineDistiller {
                 .partial_cmp(&b.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-        let ids_to_delete: Vec<String> = sorted.iter().take(excess).map(|e| e.id.clone()).collect();
+        let evicted: Vec<&Experience> = sorted.iter().take(excess).collect();
+        let ids_to_delete: Vec<String> = evicted.iter().map(|e| e.id.clone()).collect();
         if !ids_to_delete.is_empty() {
+            // Say what is about to disappear and why: an eviction the operator
+            // only notices when a memory is missing is indistinguishable from a
+            // bug.
+            tracing::warn!(
+                tenant = tenant_id,
+                cap = self.cfg.max_solutions_per_tenant,
+                evicted = ids_to_delete.len(),
+                "capacity cap reached: evicting lowest-confidence memories"
+            );
             self.store.delete_batch(&ids_to_delete).await?;
             self.metrics
                 .capacity_evictions
@@ -371,8 +394,13 @@ impl PipelineDistiller {
         Ok(())
     }
 
-    /// Phase 8: persist memories to the store as Experience records.
-    async fn phase_sync_to_store(&self, memories: &[Memory]) -> Result<()> {
+    /// Phase 8: persist memories and the rows they supersede, atomically.
+    ///
+    /// The deletes deferred by [`Self::phase_resolve_conflicts`] and the inserts
+    /// go through one `replace_batch`, so a failure leaves the store exactly as
+    /// it was: no lost update, and a "failed" distillation is not half applied.
+    async fn phase_sync_to_store(&self, memories: &[Memory], superseded: &[String]) -> Result<()> {
+        let mut replacements = Vec::with_capacity(memories.len());
         for mem in memories {
             let problem = mem
                 .metadata
@@ -416,11 +444,17 @@ impl PipelineDistiller {
             // AFTER the clone so it is not overwritten.
             exp.metadata
                 .insert("summary", serde_json::Value::String(mem.summary.clone()));
-            self.store.create(&exp).await?;
-            self.metrics
-                .memories_created
-                .fetch_add(1, Ordering::Relaxed);
+            replacements.push(exp);
         }
+        self.store.replace_batch(superseded, &replacements).await?;
+        // Counted only after the writes land: these describe what happened,
+        // not what was attempted.
+        self.metrics
+            .memories_created
+            .fetch_add(replacements.len() as u64, Ordering::Relaxed);
+        self.metrics
+            .memories_replaced
+            .fetch_add(superseded.len() as u64, Ordering::Relaxed);
         Ok(())
     }
 
@@ -490,8 +524,8 @@ impl Distiller for PipelineDistiller {
         }
 
         // Phase 6: resolve conflicts.
-        let memories = match self.phase_resolve_conflicts(memories).await {
-            Ok(m) => m,
+        let (memories, superseded) = match self.phase_resolve_conflicts(memories).await {
+            Ok(resolved) => resolved,
             Err(e) => {
                 self.metrics.failures.fetch_add(1, Ordering::Relaxed);
                 return Err(e);
@@ -502,7 +536,7 @@ impl Distiller for PipelineDistiller {
         let memories = self.phase_final_top_n(memories);
 
         // Phase 8: sync to store.
-        if let Err(e) = self.phase_sync_to_store(&memories).await {
+        if let Err(e) = self.phase_sync_to_store(&memories, &superseded).await {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }

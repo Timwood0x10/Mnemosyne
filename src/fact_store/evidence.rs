@@ -32,6 +32,12 @@ impl SqliteFactStore {
     /// `evidence_ids` entry even though the plan requires each state to carry
     /// its evidence.
     ///
+    /// `tenant_id` is the owner of the fact's entity (the caller resolves it
+    /// with [`SqliteFactStore::tenant_of_on`]); it is written explicitly so the
+    /// anchor belongs to the same tenant as the fact it justifies — every row
+    /// used to land in the column's `'default'`, where no per-tenant export or
+    /// deletion could attribute it.
+    ///
     /// Returns `Ok(None)` when the fact carries no anchor.
     ///
     /// # Errors
@@ -41,6 +47,7 @@ impl SqliteFactStore {
         conn: &Connection,
         payload: &serde_json::Value,
         anchors: &mut std::collections::HashMap<String, i64>,
+        tenant_id: &str,
     ) -> Result<Option<i64>> {
         let Some(anchor) = payload.get("evidence") else {
             return Ok(None);
@@ -51,15 +58,14 @@ impl SqliteFactStore {
         if text.is_empty() {
             return Ok(None);
         }
-        // Cache key includes the span so two anchors over the same text but at
-        // different offsets (e.g. the same sentence cited twice) do not share
-        // one row and lose the second position.
+        // Cache key mirrors the ROW's identity, not just its text: the same
+        // sentence at two offsets is two anchors, and so is the same span under
+        // another tenant or in another document. Keying on text+span alone
+        // would hand one tenant's row to another and lose the second position
+        // (the database distinguishes all of it, so a laxer cache only creates
+        // silent cross-links).
         let offset = anchor.get("offset").and_then(serde_json::Value::as_i64);
         let length = anchor.get("length").and_then(serde_json::Value::as_i64);
-        let cache_key = format!("{text}\u{0}{offset:?}\u{0}{length:?}");
-        if let Some(id) = anchors.get(&cache_key) {
-            return Ok(Some(*id));
-        }
         // `doc_id: 0` means "not from a corpus document" (the conversation
         // compilers set it for message-sourced utterances), so it is stored as
         // NULL rather than as a document id that cannot exist.
@@ -67,21 +73,36 @@ impl SqliteFactStore {
             .get("doc_id")
             .and_then(serde_json::Value::as_i64)
             .filter(|id| *id > 0);
+        let cache_key =
+            format!("{tenant_id}\u{0}{doc_id:?}\u{0}{text}\u{0}{offset:?}\u{0}{length:?}");
+        if let Some(id) = anchors.get(&cache_key) {
+            return Ok(Some(*id));
+        }
         // Persist the span too: the vision requires every claim to trace back
         // to an exact original-text position. Previously only `content` was
         // written and `start_offset`/`end_offset` stayed NULL, so any consumer
         // reading the evidence ROW (not the fact payload) lost the anchor.
-        conn.execute(
-            "INSERT INTO evidence (doc_id, chapter_id, start_offset, end_offset, content)
-             VALUES (?1, NULL, ?2, ?3, ?4)",
-            params![
-                doc_id,
-                offset,
-                length.map(|l| offset.unwrap_or(0) + l),
-                text
-            ],
+        //
+        // A length without an offset is not a span: writing `0 + length` would
+        // invent a position nobody recorded, so the end stays NULL.
+        let end_offset = offset.zip(length).map(|(start, len)| start + len);
+        // Idempotent by identity (see `UNIQUE_INDEXES` in `fact_store`): the
+        // same anchor is one row however often the conversation is compiled.
+        // `RETURNING id` and not `last_insert_rowid()` — the latter is NOT
+        // updated when the insert turns into the `DO UPDATE` branch, so it
+        // would hand back whatever row this connection inserted last.
+        let id: i64 = conn.query_row(
+            "INSERT INTO evidence \
+             (doc_id, tenant_id, chapter_id, start_offset, end_offset, content) \
+             VALUES (?1, ?2, NULL, ?3, ?4, ?5) \
+             ON CONFLICT(tenant_id, IFNULL(doc_id, -1), IFNULL(chapter_id, -1), \
+                         IFNULL(start_offset, -1), IFNULL(end_offset, -1), \
+                         IFNULL(content, '')) \
+             DO UPDATE SET content = excluded.content \
+             RETURNING id",
+            params![doc_id, tenant_id, offset, end_offset, text],
+            |row| row.get(0),
         )?;
-        let id = conn.last_insert_rowid();
         anchors.insert(cache_key, id);
         Ok(Some(id))
     }
@@ -138,23 +159,38 @@ impl SqliteFactStore {
     /// Facts reference evidence via `evidence_id`; this is the explicit write
     /// path for callers that own the anchor text themselves (imports, tests).
     /// Compiled conversation facts are anchored automatically by
-    /// [`SqliteFactStore::anchor_evidence_on`].
+    /// [`SqliteFactStore::anchor_evidence_on`], which resolves the tenant from
+    /// the fact's entity.
+    ///
+    /// `tenant_id` is required rather than defaulted: the column has a
+    /// `'default'` default, and rows that silently land there cannot be
+    /// attributed to an owner afterwards.
     ///
     /// # Errors
     ///
     /// Returns a storage error when the insert fails.
     pub fn insert_evidence(
         &self,
+        tenant_id: &str,
         doc_id: Option<i64>,
         chapter_id: Option<i64>,
         content: &str,
     ) -> Result<i64> {
         let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO evidence (doc_id, chapter_id, content) VALUES (?1, ?2, ?3)",
-            params![doc_id, chapter_id, content],
-        )?;
-        Ok(conn.last_insert_rowid())
+        // Same identity as `anchor_evidence_on`: writing the anchor a second
+        // time reuses the row instead of appending a duplicate.
+        conn.query_row(
+            "INSERT INTO evidence (tenant_id, doc_id, chapter_id, content) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(tenant_id, IFNULL(doc_id, -1), IFNULL(chapter_id, -1), \
+                         IFNULL(start_offset, -1), IFNULL(end_offset, -1), \
+                         IFNULL(content, '')) \
+             DO UPDATE SET content = excluded.content \
+             RETURNING id",
+            params![tenant_id, doc_id, chapter_id, content],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
     }
 }
 
@@ -195,7 +231,7 @@ mod tests {
         let mut anchors = std::collections::HashMap::new();
         let id = {
             let conn = store.lock_conn().expect("lock conn");
-            SqliteFactStore::anchor_evidence_on(&conn, &payload, &mut anchors)
+            SqliteFactStore::anchor_evidence_on(&conn, &payload, &mut anchors, "tenant-a")
                 .expect("anchor")
                 .expect("anchor row created")
         };
@@ -303,5 +339,157 @@ mod tests {
             None,
             "a fact without a payload anchor must not invent one"
         );
+    }
+
+    /// Build a fact of `entity_id` carrying a payload anchor with `text`.
+    fn anchored_fact(entity_id: i64, text: &str) -> Fact {
+        Fact {
+            id: None,
+            entity_id,
+            fact_type: FactType::Preference,
+            time: 2026,
+            payload: serde_json::json!({
+                "content": text,
+                "evidence": {"doc_id": 0, "offset": 0, "length": 2, "text": text},
+            }),
+            evidence_id: None,
+            created_at: 2026,
+            ..Fact::default()
+        }
+    }
+
+    /// Objective: Verify an evidence anchor inherits the tenant that owns the
+    /// fact's entity. Every row used to be inserted with the column default
+    /// (`'default'`), so no per-tenant export, deletion or decay could attribute
+    /// — or even find — the text that justifies a fact.
+    /// Invariants: a fact owned by `tenant-a` writes a `tenant-a` anchor; a fact
+    /// whose entity row is absent writes an empty tenant rather than the
+    /// misleading default.
+    #[test]
+    fn evidence_anchor_inherits_the_entity_tenant() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let alice = store
+            .resolve_user("tenant-a", "alice")
+            .expect("resolve the user entity");
+        store
+            .insert_batch(&[anchored_fact(alice, "我喜欢独处")])
+            .expect("insert the tenant's anchored fact");
+        store
+            .insert_batch(&[anchored_fact(9_999, "没有实体锚点")])
+            .expect("insert a fact whose entity row does not exist");
+
+        let conn = store.lock_conn().expect("lock conn");
+        let owned: String = conn
+            .query_row(
+                "SELECT tenant_id FROM evidence ORDER BY id ASC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read the owned anchor");
+        assert_eq!(
+            owned, "tenant-a",
+            "the anchor must inherit the fact's tenant, not the column default"
+        );
+        let orphan: String = conn
+            .query_row(
+                "SELECT tenant_id FROM evidence ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read the orphan anchor");
+        assert_eq!(
+            orphan, "",
+            "an entity that is gone yields no tenant — never a borrowed one"
+        );
+    }
+
+    /// Objective: Verify a half-recorded span is not completed by arithmetic.
+    /// `offset.unwrap_or(0) + length` used to write `end = length` for an anchor
+    /// that carried a length but no offset, inventing a position nobody
+    /// recorded — an anchor that looks re-locatable and is not.
+    /// Invariants: no offset → both ends stay NULL; a full span round-trips.
+    #[test]
+    fn half_a_span_is_not_invented() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let insert = |payload: serde_json::Value| {
+            let fact = Fact {
+                payload,
+                ..anchored_fact(7, "半截偏移")
+            };
+            store.insert_fact(&fact).expect("insert anchored fact");
+        };
+        insert(serde_json::json!({
+            "content": "半截偏移",
+            "evidence": {"doc_id": 0, "length": 8, "text": "半截偏移"},
+        }));
+        insert(serde_json::json!({
+            "content": "半截偏移",
+            "evidence": {"doc_id": 0, "offset": 12, "length": 8, "text": "半截偏移"},
+        }));
+
+        let conn = store.lock_conn().expect("lock conn");
+        let spans: Vec<(Option<i64>, Option<i64>)> = {
+            let mut stmt = conn
+                .prepare("SELECT start_offset, end_offset FROM evidence ORDER BY id ASC")
+                .expect("prepare");
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .expect("query spans");
+            rows.map(|row| row.expect("row")).collect()
+        };
+        assert_eq!(
+            spans,
+            vec![(None, None), (Some(12), Some(20))],
+            "a length without an offset is not a span, and a full span keeps its end"
+        );
+    }
+    /// Objective: Verify the same anchor is ONE row however often the
+    /// conversation is compiled. `evidence` had no identity at all, so every
+    /// compile appended another copy of every anchor: the table grew with the
+    /// compile count while nothing about the facts it justifies changed.
+    /// Invariants: re-anchoring the same span reuses the row; a different span,
+    /// document or tenant still gets its own row.
+    #[test]
+    fn anchoring_the_same_span_reuses_the_row() {
+        let store = SqliteFactStore::open_in_memory().expect("open fact store");
+        let payload = serde_json::json!({
+            "evidence": { "doc_id": 0, "offset": 12, "length": 8, "text": "我从去年开始喜欢 Rust" }
+        });
+        let shifted = serde_json::json!({
+            "evidence": { "doc_id": 0, "offset": 40, "length": 8, "text": "我从去年开始喜欢 Rust" }
+        });
+        let conn = store.lock_conn().expect("lock connection");
+        let mut anchors = std::collections::HashMap::new();
+
+        let first = SqliteFactStore::anchor_evidence_on(&conn, &payload, &mut anchors, "default")
+            .expect("anchor")
+            .expect("row created");
+        let mut next_call = std::collections::HashMap::new();
+        let second =
+            SqliteFactStore::anchor_evidence_on(&conn, &payload, &mut next_call, "default")
+                .expect("anchor again")
+                .expect("row reused");
+        assert_eq!(
+            first, second,
+            "re-compiling the same conversation must reuse its anchor row"
+        );
+
+        let other_span =
+            SqliteFactStore::anchor_evidence_on(&conn, &shifted, &mut next_call, "default")
+                .expect("anchor")
+                .expect("row created");
+        let other_tenant = SqliteFactStore::anchor_evidence_on(&conn, &payload, &mut anchors, "t2")
+            .expect("anchor")
+            .expect("row created");
+        assert_ne!(other_span, first, "a different span is a different anchor");
+        assert_ne!(
+            other_tenant, first,
+            "the same span under another tenant is a different anchor"
+        );
+
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM evidence", [], |row| row.get(0))
+            .expect("count anchors");
+        assert_eq!(rows, 3, "three identities, three rows");
     }
 }

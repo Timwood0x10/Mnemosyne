@@ -25,7 +25,13 @@
 //! ## Design notes
 //!
 //! - All surrogate ids are `INTEGER PRIMARY KEY AUTOINCREMENT`.
-//! - `created_at` / `updated_at` default to unix seconds.
+//! - `created_at` / `updated_at` default to unix seconds (UTC), via
+//!   `strftime('%s','now')` — deliberately NOT `strftime('%s','localtime')`.
+//!   `localtime` is a *modifier*, so passing it where a time value belongs makes
+//!   SQLite evaluate the whole expression to NULL: every row inserted without an
+//!   explicit timestamp stored NULL, and the readers that decode the column as a
+//!   plain `i64` (documents, objects, edges, evidence) failed on those rows. UTC
+//!   seconds also match what the Rust side writes with `Utc::now()`.
 //! - `entity_id` foreign keys use deferred validation for batch inserts.
 
 /// DDL for the V7 entity-centric world model — executed idempotently by
@@ -39,9 +45,12 @@ CREATE TABLE IF NOT EXISTS world_entities (
     name        TEXT NOT NULL,
     entity_type TEXT NOT NULL DEFAULT 'person',      -- person / place / org / concept
     status      TEXT NOT NULL DEFAULT 'active',       -- active / deceased / disbanded
+                                                      -- (RESERVED: never written or read;
+                                                      --  a character's status lives in
+                                                      --  `world_states`)
     importance  REAL DEFAULT 0.5,
-    created_at  INTEGER DEFAULT (strftime('%s','localtime')),
-    updated_at  INTEGER DEFAULT (strftime('%s','localtime'))
+    created_at  INTEGER DEFAULT (strftime('%s','now')),
+    updated_at  INTEGER DEFAULT (strftime('%s','now'))
 );
 -- Entity names are UNIQUE: upsert_world_entity and the export/import path
 -- both rely on unique-by-name being enforced by the DATABASE, not by the
@@ -88,7 +97,7 @@ CREATE TABLE IF NOT EXISTS events (
     -- rows written before this column existed.
     start_offset INTEGER,
     end_offset   INTEGER,
-    created_at  INTEGER DEFAULT (strftime('%s','localtime'))
+    created_at  INTEGER DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp);
 
@@ -98,7 +107,8 @@ CREATE TABLE IF NOT EXISTS event_participants (
     event_id    INTEGER NOT NULL REFERENCES events(id),
     entity_id   INTEGER NOT NULL REFERENCES world_entities(id),
     role        TEXT DEFAULT 'participant',      -- protagonist / antagonist / witness
-    side        TEXT,                            -- faction / alignment
+    side        TEXT,                            -- RESERVED: faction/alignment, never
+                                                 -- written since migration v1
     UNIQUE(event_id, entity_id)
 );
 CREATE INDEX IF NOT EXISTS idx_participants_event ON event_participants(event_id);
@@ -111,9 +121,12 @@ CREATE TABLE IF NOT EXISTS world_relations (
     target_id       INTEGER NOT NULL REFERENCES world_entities(id),
     relation_type   TEXT NOT NULL,                 -- brother / enemy / teacher / spouse
     valid_from      INTEGER,                       -- event id where relation started
+                                                   -- (RESERVED: never written — the
+                                                   --  upsert ignores both columns)
     valid_to        INTEGER,                       -- event id where relation ended (NULL=ongoing)
+                                                   -- (RESERVED: never written either)
     confidence      REAL DEFAULT 1.0,
-    created_at      INTEGER DEFAULT (strftime('%s','localtime')),
+    created_at      INTEGER DEFAULT (strftime('%s','now')),
     UNIQUE(source_id, target_id, relation_type)
 );
 CREATE INDEX IF NOT EXISTS idx_world_relations_source ON world_relations(source_id);
@@ -134,7 +147,7 @@ CREATE TABLE IF NOT EXISTS world_states (
     start_offset  INTEGER,                         -- source byte span (nullable)
     end_offset    INTEGER,
     confidence    REAL DEFAULT 0.8,
-    created_at    INTEGER DEFAULT (strftime('%s','localtime'))
+    created_at    INTEGER DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_world_states_entity ON world_states(entity_id, slot);
 CREATE INDEX IF NOT EXISTS idx_world_states_event ON world_states(event_id);
@@ -150,7 +163,7 @@ CREATE TABLE IF NOT EXISTS documents (
     author      TEXT,
     doc_type    TEXT,
     source      TEXT NOT NULL DEFAULT '',
-    created_at  INTEGER DEFAULT (strftime('%s','localtime'))
+    created_at  INTEGER DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_documents_title ON documents(title);
 
@@ -177,7 +190,7 @@ CREATE TABLE IF NOT EXISTS knowledge_objects (
     name        TEXT NOT NULL,
     properties  JSON DEFAULT '{}',              -- aliases, faction, appearance, personality...
     confidence  REAL DEFAULT 1.0,
-    created_at   INTEGER DEFAULT (strftime('%s','localtime')),
+    created_at   INTEGER DEFAULT (strftime('%s','now')),
     FOREIGN KEY(doc_id) REFERENCES documents(id)
 );
 CREATE INDEX IF NOT EXISTS idx_ko_name ON knowledge_objects(name);
@@ -198,7 +211,7 @@ CREATE TABLE IF NOT EXISTS knowledge_edges (
     confidence  REAL DEFAULT 1.0,
     valid_from  INTEGER,                        -- relation start (chapter_no)
     valid_to    INTEGER,                        -- relation end (NULL = ongoing)
-    created_at  INTEGER DEFAULT (strftime('%s','localtime')),
+    created_at  INTEGER DEFAULT (strftime('%s','now')),
     FOREIGN KEY(source_id) REFERENCES knowledge_objects(id),
     FOREIGN KEY(target_id) REFERENCES knowledge_objects(id)
 );
@@ -221,7 +234,7 @@ CREATE TABLE IF NOT EXISTS evidence (
     start_offset  INTEGER,
     end_offset    INTEGER,
     content       TEXT,                          -- original-text snippet
-    created_at    INTEGER DEFAULT (strftime('%s','localtime')),
+    created_at    INTEGER DEFAULT (strftime('%s','now')),
     FOREIGN KEY(doc_id) REFERENCES documents(id),
     FOREIGN KEY(chapter_id) REFERENCES chapters(id)
 );

@@ -21,7 +21,7 @@ use crate::fact_store::SqliteFactStore;
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::{EntityLinker, ExternalAlias, KnowledgeEdge, SQLiteKnowledgeStore};
 use crate::mcp::server::ServerBuilder;
-use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 
 /// Shared, runtime-mutable entity linker.
 ///
@@ -465,11 +465,8 @@ impl ToolHandler for CognitiveContextHandler {
         use crate::cognition::{FactStore as CognitionFactStore, StateEngine, build_snapshot};
 
         let name = req_str(args, "name")?;
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
+        let tenant_id = identity_arg(args, "tenant_id");
+        let user_id = identity_arg(args, "user_id");
         let store = &self.store;
 
         // 1. Resolve persisted knowledge entities. User identities are scoped

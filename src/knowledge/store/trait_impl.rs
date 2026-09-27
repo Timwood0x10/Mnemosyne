@@ -13,12 +13,27 @@ use super::*;
 impl KnowledgeStore for SQLiteKnowledgeStore {
     async fn create_document(&self, d: &Document) -> Result<i64> {
         let conn = self.conn.lock().await;
-        conn.execute(
+        // Idempotent by identity (title, source), which the database enforces:
+        // every caller does "find_document → None → create_document" under two
+        // separate lock acquisitions, so two of them can both decide to insert.
+        // Without the upsert one work became two document rows, with its
+        // objects, edges and evidence split between them.
+        //
+        // The conflict branch does not shrink what is already recorded: a
+        // caller that supplies no author must not erase the author stored
+        // earlier. `RETURNING id`, because `last_insert_rowid()` is NOT updated
+        // when the insert takes the `DO UPDATE` branch.
+        let id: i64 = conn.query_row(
             "INSERT INTO documents (title, author, doc_type, source, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(title, source) DO UPDATE SET
+             author = COALESCE(excluded.author, documents.author),
+             doc_type = COALESCE(excluded.doc_type, documents.doc_type)
+         RETURNING id",
             params![d.title, d.author, d.doc_type, d.source, d.created_at],
+            |row| row.get(0),
         )?;
-        Ok(conn.last_insert_rowid())
+        Ok(id)
     }
 
     async fn find_document_by_title(&self, title: &str) -> Result<Option<Document>> {
@@ -37,7 +52,11 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
 
     async fn find_document(&self, title: &str, source: &str) -> Result<Option<Document>> {
         let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare("SELECT * FROM documents WHERE title = ?1 AND source = ?2")?;
+        // ORDER BY id, for the same reason as `find_document_by_title`: when
+        // several rows share an identity the row returned must be the first one
+        // created, not whichever SQLite reaches first.
+        let mut stmt = conn
+            .prepare("SELECT * FROM documents WHERE title = ?1 AND source = ?2 ORDER BY id ASC")?;
         let mut rows = stmt.query_map(params![title, source], row_to_document)?;
         match rows.next() {
             Some(Ok(d)) => Ok(Some(d)),
@@ -591,6 +610,27 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         limit: usize,
     ) -> Result<Vec<EvidenceHit>> {
         self.search_evidence_query(query, doc_title, limit).await
+    }
+
+    // ── transactions ───────────────────────────────────────────
+    async fn begin_transaction(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("BEGIN;").map_err(Into::into)
+    }
+
+    async fn commit_transaction(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("COMMIT;").map_err(Into::into)
+    }
+
+    async fn rollback_transaction(&self) -> Result<()> {
+        let conn = self.conn.lock().await;
+        conn.execute_batch("ROLLBACK;").map_err(Into::into)
+    }
+
+    async fn in_transaction(&self) -> Result<bool> {
+        let conn = self.conn.lock().await;
+        Ok(!conn.is_autocommit())
     }
 }
 

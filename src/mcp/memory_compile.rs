@@ -12,7 +12,7 @@ use crate::cognition_compiler::CognitionCompiler;
 use crate::distiller::{Distiller, PipelineDistiller};
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
-use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 use crate::prompt::PromptBuilder;
 use crate::types::{Experience, Memory, MemoryType, Message};
 
@@ -89,11 +89,8 @@ impl ToolHandler for MemoryCompileTool {
             .and_then(Value::as_array)
             .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
         let messages = parse_messages(messages_raw)?;
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
+        let tenant_id = identity_arg(args, "tenant_id");
+        let user_id = identity_arg(args, "user_id");
 
         // Validate decision_outcome declarations BEFORE any write so a
         // malformed entry aborts with nothing applied. The actual outcome
@@ -149,8 +146,13 @@ impl ToolHandler for MemoryCompileTool {
         // survive in the store, otherwise it only lives in the JSON reply and
         // is lost on the next run. Runs regardless of the `distill` flag.
         if let Some(distiller) = &self.distiller {
-            persist_compatible_knowledge(distiller, tenant_id, &compiled.compatibility.knowledge)
-                .await?;
+            persist_compatible_knowledge(
+                distiller,
+                tenant_id,
+                user_id,
+                &compiled.compatibility.knowledge,
+            )
+            .await?;
         }
 
         let payload = serde_json::json!({
@@ -161,7 +163,7 @@ impl ToolHandler for MemoryCompileTool {
             "cognition": {
                 "user_entity_id": user_entity_id,
                 "tenant_id": tenant_id,
-                "user_id": if user_id.is_empty() { "default" } else { user_id },
+                "user_id": user_id,
                 "observations_compiled": compiled.observations.len(),
                 "facts_compiled": compiled.facts.len(),
                 "facts_stored": stored_facts,
@@ -368,14 +370,20 @@ impl MemoryCompileTool {
         let memories = distiller
             .distill(conversation_id, messages, tenant_id, user_id)
             .await?;
-        persist_compatible_decisions(distiller, tenant_id, &compatibility.decisions).await?;
+        persist_compatible_decisions(distiller, tenant_id, user_id, &compatibility.decisions)
+            .await?;
         Ok(Some(memories))
     }
 }
 
+/// `user_id` is the caller's, and it is recorded on every row: without it the
+/// memories belong to nobody (an empty `user_id`), so they can never be
+/// deduplicated or replaced against that user's own memories later — conflict
+/// resolution requires the two rows to share a `user_id`.
 async fn persist_compatible_decisions(
     distiller: &PipelineDistiller,
     tenant_id: &str,
+    user_id: &str,
     decisions: &[crate::types::Decision],
 ) -> Result<(), Error> {
     let noise_filter = crate::filter::NoiseFilter::new();
@@ -405,6 +413,7 @@ async fn persist_compatible_decisions(
             content,
             decision.importance,
         );
+        experience.user_id = user_id.to_string();
         experience.source = "compile".to_string();
         distiller.store().create(&experience).await?;
     }
@@ -416,9 +425,13 @@ async fn persist_compatible_decisions(
 /// projection and was never stored, so a compiled conversation's knowledge
 /// vanished on the next run. Filters noise/secrets and dedupes against
 /// existing Knowledge rows, mirroring [`persist_compatible_decisions`].
+/// `user_id` is recorded for the same reason as in
+/// [`persist_compatible_decisions`]: an unattributed memory can never be
+/// deduplicated against its owner's history.
 async fn persist_compatible_knowledge(
     distiller: &PipelineDistiller,
     tenant_id: &str,
+    user_id: &str,
     knowledge: &[crate::types::Memory],
 ) -> Result<(), Error> {
     let noise_filter = crate::filter::NoiseFilter::new();
@@ -444,6 +457,7 @@ async fn persist_compatible_knowledge(
         }
         let mut experience =
             Experience::new(tenant_id, MemoryType::Knowledge, content, memory.importance);
+        experience.user_id = user_id.to_string();
         experience.source = "compile".to_string();
         distiller.store().create(&experience).await?;
     }
@@ -801,6 +815,101 @@ mod tests {
                 .expect("read decisions")
                 .is_empty(),
             "a rejected call must not store any decision"
+        );
+    }
+
+    /// Objective: Verify the memories a compile produces are attributed to the
+    /// caller. They were written with an empty `user_id`, so they belonged to
+    /// nobody and could never be deduplicated against that user's own history —
+    /// conflict resolution requires the two rows to share a `user_id`, so every
+    /// later compile inserted a near-duplicate instead of replacing it.
+    /// Invariants: every persisted row carries the caller's `user_id`.
+    #[tokio::test]
+    async fn compatible_knowledge_is_attributed_to_the_caller() {
+        use crate::distiller::DistillationConfig;
+        use crate::embed::{EmbeddingService, NullEmbedder};
+        use crate::store::{ExperienceRepository, SQLiteVecStore};
+
+        let store: Arc<dyn ExperienceRepository> = Arc::new(
+            SQLiteVecStore::open_in_memory(0)
+                .await
+                .expect("open keyword-only store"),
+        );
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(NullEmbedder);
+        let distiller =
+            PipelineDistiller::new(DistillationConfig::default(), embedder, store.clone());
+        let knowledge = vec![Memory::new(
+            "tenant-a",
+            MemoryType::Knowledge,
+            "Rust compiles fast",
+            0.7,
+        )];
+
+        persist_compatible_knowledge(&distiller, "tenant-a", "alice", &knowledge)
+            .await
+            .expect("persist compatible knowledge");
+
+        let stored = store
+            .get_by_memory_type("tenant-a", MemoryType::Knowledge)
+            .await
+            .expect("read memories");
+        assert_eq!(stored.len(), 1, "one memory is persisted");
+        assert_eq!(
+            stored[0].user_id, "alice",
+            "the row must belong to the caller, not to nobody"
+        );
+    }
+
+    /// Objective: Verify a caller that omits `user_id` is the SAME identity
+    /// everywhere — the response, the cognition facts and the persisted memory.
+    /// The handler used to echo `"default"` while handing `""` down to the
+    /// store, so one caller's rows were split across two identities and (since
+    /// conflict resolution only compares equal `user_id`s) never deduplicated
+    /// against each other.
+    /// Invariants: an omitted id and a blank id resolve to the same reported
+    /// identity and to the same user entity.
+    #[tokio::test]
+    async fn omitted_user_id_is_the_same_identity_as_an_explicit_default() {
+        let fact_store = Arc::new(
+            SqliteFactStore::open_in_memory().expect("An isolated fact store must initialize"),
+        );
+        let tool = MemoryCompileTool::new(None, fact_store);
+        let messages = serde_json::json!([
+            {"role": "user", "content": "I want to learn Rust."},
+            {"role": "assistant", "content": "Let us start."}
+        ]);
+
+        let omitted = result_payload(
+            &tool
+                .call(&serde_json::json!({
+                    "tenant_id": "tenant-a",
+                    "messages": messages
+                }))
+                .await
+                .expect("a call without user_id must succeed"),
+        );
+        let blank = result_payload(
+            &tool
+                .call(&serde_json::json!({
+                    "tenant_id": "tenant-a",
+                    "user_id": "   ",
+                    "messages": messages
+                }))
+                .await
+                .expect("a call with a blank user_id must succeed"),
+        );
+
+        assert_eq!(
+            omitted["cognition"]["user_id"], "default",
+            "an omitted user_id is the default user, not an empty one"
+        );
+        assert_eq!(
+            omitted["cognition"]["user_id"], blank["cognition"]["user_id"],
+            "an omitted id and a blank id must be one identity"
+        );
+        assert_eq!(
+            omitted["cognition"]["user_entity_id"], blank["cognition"]["user_entity_id"],
+            "both spellings must resolve to the same user entity"
         );
     }
 }

@@ -180,6 +180,19 @@ pub trait ExperienceRepository: Send + Sync {
     async fn update(&self, exp: &Experience) -> Result<()>;
     async fn delete(&self, id: &str) -> Result<()>;
     async fn delete_batch(&self, ids: &[String]) -> Result<()>;
+    /// Remove `superseded` and insert `replacements` as ONE unit.
+    ///
+    /// A conflict resolution is a replacement: the old memory is only gone once
+    /// the new one is stored. Running the delete and the inserts as separate
+    /// operations meant a failure in between destroyed the old memory without
+    /// storing the new one — a lost update that no retry can recover, because
+    /// the replacement lives in the caller's memory, not in this store.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when any write fails; nothing is applied.
+    async fn replace_batch(&self, superseded: &[String], replacements: &[Experience])
+    -> Result<()>;
     /// Delete all memories for a tenant whose `expires_at` is in the past.
     /// Returns the number of forgotten memories.
     async fn forget_expired(&self, tenant_id: &str, now: DateTime<Utc>) -> Result<usize>;
@@ -926,5 +939,48 @@ mod tests {
         let _ = store
             .search_by_keyword("rust:(\"weird*query)\"", "t1", 5, None)
             .await;
+    }
+
+    /// Objective: Verify `replace_batch` is atomic — the superseded rows
+    /// survive when a replacement cannot be written. The distillation pipeline
+    /// used to delete the old memory in its conflict phase and insert the new
+    /// one later, so a failure in between destroyed the old row and stored
+    /// nothing: an unrecoverable lost update (the replacement only exists in the
+    /// caller's memory).
+    /// Invariants: the call returns the trigger error, the superseded row is
+    /// still readable, and nothing of the failed replacement is stored.
+    #[tokio::test]
+    async fn replace_batch_rolls_back_when_a_replacement_fails() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let old = sample_exp("t1", MemoryType::Knowledge, "old fact");
+        store.create(&old).await.expect("create the old memory");
+        {
+            let conn = store.conn.lock().await;
+            // Abort the INSERT, which runs AFTER the delete inside the batch.
+            conn.execute_batch(
+                "CREATE TRIGGER abort_new BEFORE INSERT ON memories \
+                 WHEN NEW.content = 'new fact' \
+                 BEGIN SELECT RAISE(ABORT, 'new-insert-triggered'); END;",
+            )
+            .expect("create abort trigger");
+        }
+
+        let new = sample_exp("t1", MemoryType::Knowledge, "new fact");
+        let error = store
+            .replace_batch(std::slice::from_ref(&old.id), std::slice::from_ref(&new))
+            .await
+            .expect_err("the failing insert must surface as Err");
+        assert!(
+            matches!(error, crate::error::Error::Storage(_)),
+            "the insert failure must surface as a storage error, got {error:?}"
+        );
+        assert!(
+            store.get(&old.id).await.expect("get old").is_some(),
+            "the rollback must restore the superseded memory"
+        );
+        assert!(
+            store.get(&new.id).await.expect("get new").is_none(),
+            "a failed replacement must not be partly stored"
+        );
     }
 }

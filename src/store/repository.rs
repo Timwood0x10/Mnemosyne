@@ -7,37 +7,12 @@ use async_trait::async_trait;
 impl ExperienceRepository for SQLiteVecStore {
     async fn create(&self, exp: &Experience) -> Result<()> {
         let mut conn = self.conn.lock().await;
-        let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
         // Single transaction: `memories` and `vec_memories` must land (or
         // neither). Without it a vec insert failure left the memory row
         // persisted while the caller got an error — a retry then hit the PK
         // conflict on `memories.id`.
         let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, expires_at, metadata, vector)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-            params![
-                exp.id, exp.tenant_id, exp.user_id,
-                memory_type_to_str(exp.memory_type),
-                exp.problem, exp.solution, exp.content,
-                exp.confidence, exp.source,
-                extraction_method_to_str(exp.extraction_method),
-                exp.created_at.to_rfc3339(),
-                exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
-                serde_json::to_string(&exp.metadata).unwrap_or_default(),
-                vector_json,
-            ],
-        )?;
-
-        if !exp.vector.is_empty() {
-            let vec_json = serde_json::to_string(&exp.vector)
-                .map_err(|e| StorageError::Schema(format!("serialize vector: {e}")))?;
-            tx.execute(
-                "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
-                params![exp.id, vec_json],
-            )?;
-        }
-
+        insert_experience(&tx, exp)?;
         tx.commit()?;
         Ok(())
     }
@@ -99,12 +74,9 @@ impl ExperienceRepository for SQLiteVecStore {
         // creates `vec_memories`, so the vec delete must be skipped there —
         // and the two-table delete must land together or not at all.
         let tx = conn.transaction()?;
-        let affected = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-        if affected == 0 {
+        if delete_experience(&tx, id, self.dim)? == 0 {
+            // Dropping the transaction rolls it back.
             return Err(StorageError::NotFound(id.to_string()).into());
-        }
-        if self.dim > 0 {
-            tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
         }
         tx.commit()?;
         Ok(())
@@ -126,10 +98,28 @@ impl ExperienceRepository for SQLiteVecStore {
         // (phase_enforce_capacity) could never run.
         let tx = conn.transaction()?;
         for id in ids {
-            tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-            if self.dim > 0 {
-                tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
-            }
+            delete_experience(&tx, id, self.dim)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    async fn replace_batch(
+        &self,
+        superseded: &[String],
+        replacements: &[Experience],
+    ) -> Result<()> {
+        let mut conn = self.conn.lock().await;
+        // ONE transaction for the whole replacement: the superseded rows only
+        // disappear once the replacements are stored. Split in two (the
+        // pipeline used to delete in its conflict phase and insert later), a
+        // failure in between lost the old memory and stored nothing.
+        let tx = conn.transaction()?;
+        for id in superseded {
+            delete_experience(&tx, id, self.dim)?;
+        }
+        for exp in replacements {
+            insert_experience(&tx, exp)?;
         }
         tx.commit()?;
         Ok(())
@@ -153,11 +143,7 @@ impl ExperienceRepository for SQLiteVecStore {
         };
         let mut count = 0usize;
         for id in &ids {
-            let deleted = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
-            if self.dim > 0 {
-                tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
-            }
-            if deleted > 0 {
+            if delete_experience(&tx, id, self.dim)? > 0 {
                 count += 1;
             }
         }
@@ -385,4 +371,58 @@ impl ExperienceRepository for SQLiteVecStore {
         }
         Ok(results)
     }
+}
+
+/// Insert one `Experience` into `memories` — and into `vec_memories` when it
+/// carries a vector — on an open transaction.
+///
+/// Shared by `create` and `replace_batch` so the two write paths cannot drift
+/// apart (the vector column and the vec table must agree).
+///
+/// # Errors
+///
+/// Returns a storage error when the row or its vector cannot be written.
+fn insert_experience(tx: &rusqlite::Transaction<'_>, exp: &Experience) -> Result<()> {
+    let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
+    tx.execute(
+        "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, expires_at, metadata, vector)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        params![
+            exp.id, exp.tenant_id, exp.user_id,
+            memory_type_to_str(exp.memory_type),
+            exp.problem, exp.solution, exp.content,
+            exp.confidence, exp.source,
+            extraction_method_to_str(exp.extraction_method),
+            exp.created_at.to_rfc3339(),
+            exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+            serde_json::to_string(&exp.metadata).unwrap_or_default(),
+            vector_json,
+        ],
+    )?;
+    if !exp.vector.is_empty() {
+        let vec_json = serde_json::to_string(&exp.vector)
+            .map_err(|e| StorageError::Schema(format!("serialize vector: {e}")))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
+            params![exp.id, vec_json],
+        )?;
+    }
+    Ok(())
+}
+
+/// Delete one memory — and its vector when the store keeps one (`dim > 0`) — on
+/// an open transaction.
+///
+/// Returns how many `memories` rows were removed, which is what lets `delete`
+/// distinguish "removed" from "was never there".
+///
+/// # Errors
+///
+/// Returns a storage error when either delete fails.
+fn delete_experience(tx: &rusqlite::Transaction<'_>, id: &str, dim: usize) -> Result<usize> {
+    let deleted = tx.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+    if dim > 0 {
+        tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
+    }
+    Ok(deleted)
 }

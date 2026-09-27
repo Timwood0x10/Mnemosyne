@@ -263,7 +263,12 @@ mod tests {
             .expect("insert source fact B");
         // Attach an evidence row the derived fact points at.
         let evidence_id = store
-            .insert_evidence(Some(128), None, "2026-08-15: “我从去年开始喜欢 Rust”")
+            .insert_evidence(
+                "tenant-a",
+                Some(128),
+                None,
+                "2026-08-15: “我从去年开始喜欢 Rust”",
+            )
             .expect("insert evidence row");
         let derived = store
             .insert_fact(&Fact {

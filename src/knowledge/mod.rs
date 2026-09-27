@@ -29,6 +29,7 @@ pub mod format;
 pub mod key_events;
 pub mod memory_export;
 pub mod memory_export_links;
+pub mod memory_export_mentions;
 pub mod memory_export_world;
 pub mod migration;
 pub mod pdf;

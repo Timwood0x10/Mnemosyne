@@ -300,6 +300,7 @@ mod tests {
             ],
             evidence: vec![],
             evidence_links: vec![],
+            mentions: vec![],
             world_entities: vec![],
             world_profiles: vec![],
             world_relations: vec![],

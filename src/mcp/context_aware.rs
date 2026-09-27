@@ -23,7 +23,9 @@ use crate::config::{CONTEXT_INJECT_THRESHOLD, EMBEDDING_MEMORY_GRAYSCALE};
 use crate::distiller::{Distiller, PipelineDistiller};
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
-use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{
+    DEFAULT_IDENTITY, ToolCallResult, ToolDefinition, ToolHandler, identity_arg,
+};
 use crate::types::Message;
 
 /// Backward-compatible alias for the default context-usage threshold.
@@ -79,11 +81,8 @@ impl ToolHandler for ContextCheckTool {
             .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
         let messages = parse_messages(messages_raw)?;
 
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let user_id = args.get("user_id").and_then(Value::as_str).unwrap_or("");
+        let tenant_id = identity_arg(args, "tenant_id");
+        let user_id = identity_arg(args, "user_id");
 
         let context_usage = Self::parse_context_usage(args);
         let threshold = Self::parse_threshold(args);
@@ -100,24 +99,14 @@ impl ToolHandler for ContextCheckTool {
             // materialize an entity for a user who never chatted (audit:
             // read-only tools writing via resolve_user). find_entity never
             // writes; unknown users simply report zero facts.
-            let norm_tenant = if tenant_id.trim().is_empty() {
-                "default"
-            } else {
-                tenant_id.trim()
-            };
-            let norm_user = if user_id.trim().is_empty() {
-                "default"
-            } else {
-                user_id.trim()
-            };
-            let name = if norm_user == "default" {
+            let name = if user_id == DEFAULT_IDENTITY {
                 "User".to_string()
             } else {
-                format!("User:{norm_user}")
+                format!("User:{user_id}")
             };
             let user_entity_id = self
                 .fact_store
-                .find_entity(norm_tenant, Some(norm_user), &name)?
+                .find_entity(tenant_id, Some(user_id), &name)?
                 .map(|(id, _, _)| id);
             let facts = match user_entity_id {
                 Some(id) => self.fact_store.get_facts(id)?,

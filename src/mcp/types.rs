@@ -11,6 +11,31 @@ use serde_json::Value;
 
 use crate::error::Result;
 
+/// The tenant / user a tool call runs as when the caller omits it.
+///
+/// This engine is a single-node MCP server: `tenant_id` is the local
+/// deployment and `user_id` is the person using it, so an omitted value means
+/// "the one local tenant / user", never "anonymous". Tools used to pass a raw
+/// `""` down to the store while echoing `"default"` back to the caller, so one
+/// caller's rows landed under two identities — and, because conflict resolution
+/// only compares rows with an equal `user_id`, they never deduplicated against
+/// each other.
+pub const DEFAULT_IDENTITY: &str = "default";
+
+/// The `field` argument, trimmed, or [`DEFAULT_IDENTITY`] when absent or blank.
+///
+/// Every tool reads its identities through this helper so the value written to
+/// the store, the value echoed in the response and the value used for entity
+/// resolution cannot drift apart.
+#[must_use]
+pub fn identity_arg<'a>(args: &'a Value, field: &str) -> &'a str {
+    args.get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_IDENTITY)
+}
+
 /// Server implementation identification, sent in `initialize` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Implementation {
@@ -257,5 +282,35 @@ mod tests {
             }
             other => panic!("expected Notification, got {other:?}"),
         }
+    }
+
+    /// Objective: Verify an omitted or blank identity resolves to the documented
+    /// default (and a padded one is trimmed), so every tool writes, resolves and
+    /// echoes the same value. Tools used to hand a raw `""` to the store while
+    /// reporting `"default"`, splitting one caller across two identities that
+    /// conflict resolution never compared.
+    /// Invariants: absent/blank/non-string → `default`; surrounding whitespace
+    /// is dropped; a real id is returned as given.
+    #[test]
+    fn identity_arg_defaults_blank_values_and_trims() {
+        let absent = serde_json::json!({});
+        assert_eq!(identity_arg(&absent, "user_id"), DEFAULT_IDENTITY);
+
+        let blank = serde_json::json!({ "user_id": "   " });
+        assert_eq!(
+            identity_arg(&blank, "user_id"),
+            DEFAULT_IDENTITY,
+            "a blank id is an omitted id"
+        );
+
+        let padded = serde_json::json!({ "user_id": "  alice " });
+        assert_eq!(identity_arg(&padded, "user_id"), "alice");
+
+        let wrong_type = serde_json::json!({ "user_id": 7 });
+        assert_eq!(
+            identity_arg(&wrong_type, "user_id"),
+            DEFAULT_IDENTITY,
+            "a non-string id must not be coerced into an identity"
+        );
     }
 }

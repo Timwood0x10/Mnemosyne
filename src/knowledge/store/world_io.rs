@@ -8,6 +8,7 @@ use rusqlite::{OptionalExtension, params};
 
 use crate::error::Result;
 
+use super::types::{DEFAULT_CONFIDENCE, DEFAULT_IMPORTANCE, DEFAULT_STATE_CONFIDENCE};
 use super::{
     EventParticipantRef, NewWorldEvent, NewWorldState, SQLiteKnowledgeStore, WorldEntity,
     WorldEvent, WorldProfile, WorldRelation, WorldState,
@@ -108,7 +109,9 @@ impl SQLiteKnowledgeStore {
                 id: r.get("id")?,
                 name: r.get("name")?,
                 entity_type: r.get("entity_type")?,
-                importance: r.get("importance")?,
+                importance: r
+                    .get::<_, Option<f64>>("importance")?
+                    .unwrap_or(DEFAULT_IMPORTANCE),
             })
         })?;
         let mut out = Vec::new();
@@ -130,7 +133,9 @@ impl SQLiteKnowledgeStore {
                 entity_id: r.get("entity_id")?,
                 key: r.get("key")?,
                 value: r.get("value")?,
-                confidence: r.get("confidence")?,
+                confidence: r
+                    .get::<_, Option<f64>>("confidence")?
+                    .unwrap_or(DEFAULT_CONFIDENCE),
                 evidence_id: r.get("evidence_id")?,
             })
         })?;
@@ -153,7 +158,9 @@ impl SQLiteKnowledgeStore {
                 source_id: r.get("source_id")?,
                 target_id: r.get("target_id")?,
                 relation_type: r.get("relation_type")?,
-                confidence: r.get("confidence")?,
+                confidence: r
+                    .get::<_, Option<f64>>("confidence")?
+                    .unwrap_or(DEFAULT_CONFIDENCE),
             })
         })?;
         let mut out = Vec::new();
@@ -223,7 +230,7 @@ impl SQLiteKnowledgeStore {
             conn.query_row(
                 "INSERT INTO world_entities (name, entity_type, importance) \
                  VALUES (?1, 'person', 0.5) \
-                 ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','localtime') \
+                 ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','now') \
                  RETURNING id",
                 params![entity_name],
                 |r| r.get(0),
@@ -253,8 +260,12 @@ impl SQLiteKnowledgeStore {
                 event_type: r.get("event_type")?,
                 timestamp: r.get("timestamp")?,
                 location: r.get("location")?,
-                description: r.get("description")?,
-                importance: r.get("importance")?,
+                description: r
+                    .get::<_, Option<String>>("description")?
+                    .unwrap_or_default(),
+                importance: r
+                    .get::<_, Option<f64>>("importance")?
+                    .unwrap_or(DEFAULT_IMPORTANCE),
                 start_offset: r.get("start_offset")?,
                 end_offset: r.get("end_offset")?,
             })
@@ -323,7 +334,7 @@ impl SQLiteKnowledgeStore {
             conn.query_row(
                 "INSERT INTO world_entities (name, entity_type, importance) \
                  VALUES (?1, 'person', 0.5) \
-                 ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','localtime') \
+                 ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','now') \
                  RETURNING id",
                 params![entity_name],
                 |r| r.get(0),
@@ -390,7 +401,9 @@ impl SQLiteKnowledgeStore {
                 event_id: r.get("event_id")?,
                 start_offset: r.get("start_offset")?,
                 end_offset: r.get("end_offset")?,
-                confidence: r.get("confidence")?,
+                confidence: r
+                    .get::<_, Option<f64>>("confidence")?
+                    .unwrap_or(DEFAULT_STATE_CONFIDENCE),
             })
         };
         let mut out = Vec::new();

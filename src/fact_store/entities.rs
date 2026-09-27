@@ -186,6 +186,19 @@ impl SqliteFactStore {
     /// Returns a storage error when the lookup fails.
     pub fn entity_tenant(&self, entity_id: i64) -> Result<Option<String>> {
         let conn = self.lock_conn()?;
+        Self::tenant_of_on(&conn, entity_id)
+    }
+
+    /// The tenant that owns `entity_id`, on an already-locked connection.
+    ///
+    /// Fact insertion resolves the owner of the fact's entity through this, so
+    /// everything a fact spawns (its evidence anchor) can inherit the same
+    /// tenant instead of falling back to the column default.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the lookup fails.
+    pub(super) fn tenant_of_on(conn: &Connection, entity_id: i64) -> Result<Option<String>> {
         let tenant = conn
             .query_row(
                 "SELECT tenant_id FROM entities WHERE id = ?1",

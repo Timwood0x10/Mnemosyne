@@ -235,4 +235,51 @@ pub trait KnowledgeStore: Send + Sync {
         doc_title: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EvidenceHit>>;
+
+    // ── transactions ───────────────────────────────────────────
+    /// Begin an explicit SQLite transaction on the connection.
+    ///
+    /// Every subsequent call on this connection participates in it until
+    /// [`commit_transaction`](Self::commit_transaction) or
+    /// [`rollback_transaction`](Self::rollback_transaction) ends it. Used by the
+    /// migrator and by `import_bundle` to make a multi-statement run atomic: a
+    /// failure halfway rolls back instead of leaving a half-written graph.
+    ///
+    /// Not re-entrant: SQLite rejects a nested `BEGIN`, so a caller that may
+    /// already be inside a transaction must ask
+    /// [`in_transaction`](Self::in_transaction) first (see `import_bundle`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when `BEGIN` fails (e.g. a transaction is already
+    /// open on this connection).
+    async fn begin_transaction(&self) -> Result<()>;
+
+    /// Commit the transaction opened by
+    /// [`begin_transaction`](Self::begin_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `COMMIT` fails.
+    async fn commit_transaction(&self) -> Result<()>;
+
+    /// Roll back the transaction opened by
+    /// [`begin_transaction`](Self::begin_transaction), discarding every write
+    /// made since it began.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `ROLLBACK` fails.
+    async fn rollback_transaction(&self) -> Result<()>;
+
+    /// Report whether a transaction is currently open on this connection.
+    ///
+    /// Callers that may run inside a caller-owned transaction ask this before
+    /// opening their own: nesting a `BEGIN` is rejected by SQLite, and a failed
+    /// `begin_transaction` would otherwise be reported as "the work failed".
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when the connection state cannot be read.
+    async fn in_transaction(&self) -> Result<bool>;
 }

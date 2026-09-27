@@ -6,6 +6,7 @@
 //! logic, mirroring the `storage/schema.rs` layout called for in the dev guide.
 
 pub mod schema;
+pub(crate) mod unique_index;
 
 pub use schema::KNOWLEDGE_SCHEMA;
 pub use schema::WORLD_SCHEMA;

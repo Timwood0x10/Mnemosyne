@@ -41,7 +41,7 @@ use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::{Chapter, Document, Evidence, SQLiteKnowledgeStore};
 use crate::mcp::knowledge_tools::SharedEntityLinker;
 use crate::mcp::server::ServerBuilder;
-use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 use crate::types::Message;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -595,8 +595,8 @@ impl ToolHandler for AgentFactCompileHandler {
             .and_then(Value::as_array)
             .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
         let messages = parse_messages(messages_raw)?;
-        let tenant_id = opt_str(args, "tenant_id").unwrap_or("default");
-        let user_id = opt_str(args, "user_id").unwrap_or("");
+        let tenant_id = identity_arg(args, "tenant_id");
+        let user_id = identity_arg(args, "user_id");
         let agent_id = opt_str(args, "agent_id").unwrap_or("");
         let include_agent_facts = args
             .get("include_agent_facts")

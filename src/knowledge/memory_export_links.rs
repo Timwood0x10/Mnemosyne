@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::knowledge::memory_export::{global_evidence_by_content, global_object_by_name};
+use crate::knowledge::memory_export::{global_evidence_by_anchor, global_object_by_name};
 use crate::knowledge::store::KnowledgeStore;
 use crate::knowledge::{EvidenceSourceType, KnowledgeEdge};
 
@@ -46,9 +46,19 @@ pub struct ExportEvidenceLink {
     /// Edge identity for edge links; `None` for object links.
     #[serde(default)]
     pub edge: Option<ExportEdgeKey>,
-    /// Content of the evidence row this link points at (resolved globally
-    /// on import, preferring the span-exact row where one exists).
+    /// Content of the evidence row this link points at.
     pub evidence_content: String,
+    /// Source byte span of the evidence row, so import can re-attach to the
+    /// SAME occurrence of a repeated sentence.
+    ///
+    /// Optional because bundles written before this field exist: a link without
+    /// a span falls back to content-only resolution, which is what every bundle
+    /// used to do.
+    #[serde(default)]
+    pub evidence_start: Option<i64>,
+    /// Source byte span end (see [`Self::evidence_start`]).
+    #[serde(default)]
+    pub evidence_end: Option<i64>,
 }
 
 fn default_source_type() -> String {
@@ -121,6 +131,8 @@ pub(crate) async fn export_evidence_links(
                     source_name: obj.name.clone(),
                     edge: None,
                     evidence_content: ev.content.clone(),
+                    evidence_start: ev.start_offset,
+                    evidence_end: ev.end_offset,
                 });
             }
             EvidenceSourceType::Edge => {
@@ -140,6 +152,8 @@ pub(crate) async fn export_evidence_links(
                     source_name: key.source_name.clone(),
                     edge: Some(key.clone()),
                     evidence_content: ev.content.clone(),
+                    evidence_start: ev.start_offset,
+                    evidence_end: ev.end_offset,
                 });
             }
         }
@@ -154,25 +168,41 @@ pub(crate) async fn export_evidence_links(
 /// skipped rather than mis-typed — a v1/v2 bundle (`source_type` defaulted
 /// to `"object"`) takes exactly the old object path.
 ///
-/// Returns how many links were created (idempotent re-imports resolve to
-/// existing rows and count again, matching the previous `links_created`
-/// semantics).
+/// Returns `(created, skipped)`: idempotent re-imports resolve to existing rows
+/// and count again (matching the previous `links_created` semantics), while a
+/// link whose evidence or endpoint cannot be resolved is SKIPPED — and counted,
+/// so a lossy restore is visible to the caller instead of only in a log.
 pub(crate) async fn import_evidence_links(
     store: &dyn KnowledgeStore,
     links: &[ExportEvidenceLink],
     edge_id_by_key: &HashMap<ExportEdgeKey, i64>,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let mut created = 0;
+    let mut skipped = 0;
     for link in links {
-        let Some(ev_id) = global_evidence_by_content(store, &link.evidence_content).await? else {
+        // Resolve by SPAN first: when the same sentence occurs twice, content
+        // alone re-attaches the link to the wrong occurrence (the object and
+        // edge endpoints are name-keyed, so the mistake is invisible). A bundle
+        // written before the span fields existed falls back to content.
+        let Some(ev_id) = global_evidence_by_anchor(
+            store,
+            &link.evidence_content,
+            link.evidence_start,
+            link.evidence_end,
+        )
+        .await?
+        else {
+            skipped += 1;
             continue;
         };
         match link.source_type.as_str() {
             "edge" => {
                 let Some(key) = &link.edge else {
+                    skipped += 1;
                     continue;
                 };
                 let Some(&edge_id) = edge_id_by_key.get(key) else {
+                    skipped += 1;
                     continue;
                 };
                 store
@@ -183,6 +213,7 @@ pub(crate) async fn import_evidence_links(
             // "object" and the v1/v2 default both resolve through source_name.
             _ => {
                 let Some(obj_id) = global_object_by_name(store, &link.source_name).await? else {
+                    skipped += 1;
                     continue;
                 };
                 store
@@ -192,7 +223,7 @@ pub(crate) async fn import_evidence_links(
             }
         }
     }
-    Ok(created)
+    Ok((created, skipped))
 }
 
 #[cfg(test)]

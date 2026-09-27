@@ -9,7 +9,10 @@ pub(super) fn row_to_document(row: &rusqlite::Row) -> rusqlite::Result<Document>
         author: row.get("author")?,
         doc_type: row.get("doc_type")?,
         source: row.get("source")?,
-        created_at: row.get("created_at")?,
+        // `unwrap_or(0)` — databases created while the DDL default was
+        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // recorded times" must not make the row unreadable.
+        created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
 }
 
@@ -46,7 +49,10 @@ pub(super) fn row_to_object(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeOb
         properties: serde_json::from_str(&props_str)
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
         confidence: row.get("confidence")?,
-        created_at: row.get("created_at")?,
+        // `unwrap_or(0)` — databases created while the DDL default was
+        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // recorded times" must not make the row unreadable.
+        created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
 }
 
@@ -72,7 +78,10 @@ pub(super) fn row_to_edge(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEdge
         confidence: row.get("confidence")?,
         valid_from: row.get("valid_from")?,
         valid_to: row.get("valid_to")?,
-        created_at: row.get("created_at")?,
+        // `unwrap_or(0)` — databases created while the DDL default was
+        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // recorded times" must not make the row unreadable.
+        created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
 }
 
@@ -88,7 +97,10 @@ pub(super) fn row_to_evidence(row: &rusqlite::Row) -> rusqlite::Result<Evidence>
         start_offset: row.get("start_offset")?,
         end_offset: row.get("end_offset")?,
         content: row.get("content")?,
-        created_at: row.get("created_at")?,
+        // `unwrap_or(0)` — databases created while the DDL default was
+        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // recorded times" must not make the row unreadable.
+        created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
 }
 
@@ -202,6 +214,20 @@ pub struct EventParticipantRef {
     pub role: String,
 }
 
+/// Importance used when `events.importance` / `world_entities.importance` is
+/// NULL — the columns are nullable, so a row written by an older revision can
+/// hold NULL, and reading it as a non-null `f64` made the whole `list_world_*`
+/// call fail instead of reporting that row.
+pub(crate) const DEFAULT_IMPORTANCE: f64 = 0.5;
+
+/// Confidence used when `world_entity_profiles.confidence` /
+/// `world_relations.confidence` is NULL (mirrors their DDL default of 1.0).
+pub(crate) const DEFAULT_CONFIDENCE: f64 = 1.0;
+
+/// Confidence used when `world_states.confidence` is NULL. State slots are
+/// inferred rather than asserted, hence a lower default than the other tables'.
+pub(crate) const DEFAULT_STATE_CONFIDENCE: f64 = 0.8;
+
 /// The fields that identify and describe a world event to insert (`events`).
 ///
 /// Mirrors [`WorldEvent`] minus the assigned `id`. It exists because the upsert
@@ -242,7 +268,7 @@ impl<'a> Default for NewWorldEvent<'a> {
             timestamp: None,
             location: None,
             description: "",
-            importance: 0.5,
+            importance: DEFAULT_IMPORTANCE,
             start_offset: None,
             end_offset: None,
         }
@@ -286,7 +312,7 @@ impl<'a> Default for NewWorldState<'a> {
             event_id: None,
             start_offset: None,
             end_offset: None,
-            confidence: 0.8,
+            confidence: DEFAULT_STATE_CONFIDENCE,
         }
     }
 }

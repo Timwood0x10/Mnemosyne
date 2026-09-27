@@ -126,31 +126,16 @@ impl<'a> Migrator<'a> {
             return self.migrate_inner(&snapshot).await;
         }
 
-        // Self-owned transaction: the original H6 path. Disable FK enforcement
-        // for the duration of the migration: the migrator inserts in
-        // parent→child order so enforcement is unnecessary, and cross-novel
-        // edges can transiently reference not-yet-migrated objects. Re-enable
-        // unconditionally afterwards so production queries keep FK integrity
-        // checking. This PRAGMA must run OUTSIDE the transaction below —
-        // SQLite ignores foreign_keys changes mid-transaction.
-        self.knowledge.set_foreign_keys_enabled(false).await?;
-        self.knowledge.begin_transaction().await?;
-        let result = self.migrate_inner(&snapshot).await;
-        match &result {
-            Ok(_) => {
-                // COMMIT first: `PRAGMA foreign_keys` is a documented no-op
-                // inside an open transaction, so re-enabling BEFORE commit
-                // left FK enforcement OFF for the connection's lifetime.
-                self.knowledge.commit_transaction().await?;
-                let _ = self.knowledge.set_foreign_keys_enabled(true).await;
-            }
-            Err(_) => {
-                // Discard partial writes, then restore FK enforcement.
-                let _ = self.knowledge.rollback_transaction().await;
-                let _ = self.knowledge.set_foreign_keys_enabled(true).await;
-            }
-        }
-        result
+        // Self-owned transaction. FK enforcement is disabled for the duration:
+        // the migrator inserts in parent→child order so enforcement is
+        // unnecessary, and cross-novel edges can transiently reference
+        // not-yet-migrated objects. `with_foreign_keys_disabled` restores it on
+        // every exit path — the previous spelling re-enabled it *after* the
+        // `?` on BEGIN/COMMIT, so a failure there left this connection writing
+        // without referential integrity for the rest of its life.
+        self.knowledge
+            .with_foreign_keys_disabled(|| self.migrate_inner(&snapshot))
+            .await
     }
 
     async fn migrate_inner(&self, snapshot: &V1Snapshot) -> Result<MigrationStats> {
