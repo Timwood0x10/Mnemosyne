@@ -200,7 +200,7 @@ async fn cognition_layer_full_loop_over_mcp() {
         &server,
         2,
         "state_timeline",
-        json!({ "entity_id": entity_id }),
+        json!({ "entity_id": entity_id, "tenant_id": "tenant-a" }),
     )
     .await;
     let dimensions = timeline["dimensions"]
@@ -235,7 +235,7 @@ async fn cognition_layer_full_loop_over_mcp() {
         &server,
         3,
         "decision_search",
-        json!({ "subject": entity_id }),
+        json!({ "subject": entity_id, "tenant_id": "tenant-a" }),
     )
     .await;
     let decisions = search["decisions"]
@@ -260,7 +260,7 @@ async fn cognition_layer_full_loop_over_mcp() {
         &server,
         4,
         "decision_trace",
-        json!({ "decision_id": decision_id }),
+        json!({ "decision_id": decision_id, "tenant_id": "tenant-a" }),
     )
     .await;
     let because = trace["because"]
@@ -285,7 +285,7 @@ async fn cognition_layer_full_loop_over_mcp() {
         &server,
         5,
         "fact_provenance",
-        json!({ "fact_id": anchor_id }),
+        json!({ "fact_id": anchor_id, "tenant_id": "tenant-a" }),
     )
     .await;
     assert_eq!(provenance["fact_id"], json!(anchor_id));
@@ -361,7 +361,7 @@ async fn user_stance_flip_is_reachable_over_mcp() {
         &server,
         3,
         "state_timeline",
-        json!({ "entity_id": entity_id, "dimension": "preference" }),
+        json!({ "entity_id": entity_id, "dimension": "preference", "tenant_id": "tenant-a" }),
     )
     .await;
     let dimensions = timeline["dimensions"]
@@ -434,7 +434,7 @@ async fn three_state_evolution_chain_carries_its_evidence() {
         &server,
         1,
         "state_timeline",
-        json!({ "entity_id": entity_id, "dimension": "preference" }),
+        json!({ "entity_id": entity_id, "dimension": "preference", "tenant_id": "tenant-a" }),
     )
     .await;
     let dimensions = timeline["dimensions"]
@@ -512,7 +512,7 @@ async fn three_state_evolution_chain_carries_its_evidence() {
         &server,
         2,
         "fact_provenance",
-        json!({ "fact_id": first_fact }),
+        json!({ "fact_id": first_fact, "tenant_id": "tenant-a" }),
     )
     .await;
     assert_eq!(
@@ -567,7 +567,7 @@ async fn self_introduction_lands_in_the_identity_dimension() {
         &server,
         2,
         "state_timeline",
-        json!({ "entity_id": entity_id, "dimension": "identity" }),
+        json!({ "entity_id": entity_id, "dimension": "identity", "tenant_id": "tenant-a" }),
     )
     .await;
     let dimensions = timeline["dimensions"]
@@ -643,7 +643,7 @@ async fn declared_outcome_closes_the_decision_loop_over_mcp() {
         &server,
         2,
         "decision_search",
-        json!({ "subject": subject, "keyword": "医院" }),
+        json!({ "subject": subject, "keyword": "医院", "tenant_id": "tenant-a" }),
     )
     .await;
     let decision_id = found["decisions"][0]["decision_id"]
@@ -682,7 +682,7 @@ async fn declared_outcome_closes_the_decision_loop_over_mcp() {
         &server,
         4,
         "decision_trace",
-        json!({ "decision_id": decision_id }),
+        json!({ "decision_id": decision_id, "tenant_id": "tenant-a" }),
     )
     .await;
     assert_eq!(
@@ -713,7 +713,7 @@ async fn declared_outcome_closes_the_decision_loop_over_mcp() {
         &server,
         6,
         "decision_trace",
-        json!({ "decision_id": decision_id }),
+        json!({ "decision_id": decision_id, "tenant_id": "tenant-a" }),
     )
     .await;
     assert_eq!(

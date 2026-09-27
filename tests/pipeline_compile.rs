@@ -33,7 +33,7 @@ async fn dialog_compiles_into_general_model() {
             Message::new("assistant", "好的，我们一步一步来。"),
         ],
     );
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert_eq!(stats.documents, 1, "one dialog → one document");
@@ -76,7 +76,7 @@ async fn txt_compiles_into_general_model() {
     )
     .expect("write");
     let source = mnemosyne::knowledge::document_source::FileSource::new(&path);
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert_eq!(stats.documents, 1);
@@ -106,7 +106,7 @@ async fn novel_dictionary_registers_known_cast() {
     let text = "赵云字子龙，常山真定人也。其人身长八尺，姿颜雄伟。";
     let source =
         mnemosyne::knowledge::document_source::RawTextSource::new("三国演义", "test", text, "text");
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert!(stats.objects >= 1, "novel cast registered, got {stats:?}");
@@ -146,7 +146,7 @@ async fn novel_dictionary_registers_known_cast() {
 async fn empty_source_yields_zero_stats() {
     let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
     let source = DialogSource::new("empty", "export.json", Vec::new());
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert_eq!(stats.documents, 0);
@@ -169,12 +169,12 @@ async fn recompile_same_title_reuses_entity() {
         "text",
     );
 
-    let first = compile_source(&source, &profile(), &store, "t1")
+    let first = compile_source(&source, &profile(), &store)
         .await
         .expect("first compile");
     assert_eq!(first.objects, 1, "first run creates the entity");
 
-    let second = compile_source(&source, &profile(), &store, "t1")
+    let second = compile_source(&source, &profile(), &store)
         .await
         .expect("second compile");
     assert_eq!(second.objects, 0, "second run reuses, does not duplicate");
@@ -202,7 +202,7 @@ async fn relation_sentences_do_not_spawn_concepts() {
         "text",
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert_eq!(stats.documents, 1, "one document → one document");
@@ -242,7 +242,7 @@ async fn compile_writes_v7_world_entities() {
         "text",
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert_eq!(stats.documents, 1, "one document compiled");
@@ -304,7 +304,7 @@ async fn prose_persists_world_events_with_byte_spans() {
         "text",
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert!(
@@ -333,7 +333,7 @@ async fn prose_persists_world_events_with_byte_spans() {
 
     // Re-compile: identical (title, timestamp, span) must not duplicate.
     let before = store.list_world_events().await.expect("list before").len();
-    let second = compile_source(&source, &profile(), &store, "t1")
+    let second = compile_source(&source, &profile(), &store)
         .await
         .expect("recompile");
     let after = store.list_world_events().await.expect("list after").len();
@@ -359,7 +359,7 @@ async fn prose_persists_world_state_slots() {
         "text",
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert!(
@@ -391,7 +391,7 @@ async fn prose_persists_world_state_slots() {
 
     // Re-compile: same (entity, slot, event, chapter) is a no-op.
     let before = store.list_world_states(None).await.expect("before").len();
-    compile_source(&source, &profile(), &store, "t1")
+    compile_source(&source, &profile(), &store)
         .await
         .expect("recompile");
     let after = store.list_world_states(None).await.expect("after").len();
@@ -412,7 +412,7 @@ async fn dialog_title_not_in_v7_world_entities() {
         vec![Message::new("user", "我喜欢 Rust，目标是稳定可靠。")],
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert_eq!(stats.objects, 0, "dialog → no objects");
@@ -448,7 +448,7 @@ async fn corpus_text_discovers_multiple_entities() {
         "text",
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     // Anchor + the discovered cast: must exceed the single-anchor case.
@@ -503,7 +503,7 @@ async fn english_prose_persists_events_and_death_state() {
         "text",
     );
 
-    let stats = compile_source(&source, &profile(), &store, "t1")
+    let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
     assert!(
@@ -554,24 +554,14 @@ async fn same_title_from_different_sources_stays_separate() {
         )
     };
 
-    let first = compile_source(
-        &mk("source-a", "甲说：开始推进。"),
-        &profile(),
-        &store,
-        "t1",
-    )
-    .await
-    .expect("compile a");
+    let first = compile_source(&mk("source-a", "甲说：开始推进。"), &profile(), &store)
+        .await
+        .expect("compile a");
     assert_eq!(first.documents, 1, "first source creates its document");
 
-    let second = compile_source(
-        &mk("source-b", "乙说：开始推进。"),
-        &profile(),
-        &store,
-        "t1",
-    )
-    .await
-    .expect("compile b");
+    let second = compile_source(&mk("source-b", "乙说：开始推进。"), &profile(), &store)
+        .await
+        .expect("compile b");
     assert_eq!(
         second.documents, 1,
         "second source creates its own document"
@@ -588,14 +578,9 @@ async fn same_title_from_different_sources_stays_separate() {
     );
 
     // Same source again → reuse, not a third row.
-    compile_source(
-        &mk("source-a", "甲说：开始推进。"),
-        &profile(),
-        &store,
-        "t1",
-    )
-    .await
-    .expect("recompile a");
+    compile_source(&mk("source-a", "甲说：开始推进。"), &profile(), &store)
+        .await
+        .expect("recompile a");
     let docs = store.list_documents().await.expect("list after");
     assert_eq!(
         docs.iter().filter(|d| d.title == "shared-title").count(),

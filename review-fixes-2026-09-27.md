@@ -204,3 +204,110 @@ SELECT strftime('%s','now','localtime') → 1790505610  ← 正确写法
 
 **仍未处理**：C1–C3（属架构级，且按"单机 MCP、不要多租户"的定位应**重新表述**而非实现）、
 H1、H5、C4–C6、C8、H7–H21。
+
+## 8. 第四批修复（2026-09-27，C1 / C2 / C3 / C5 / C6）
+
+按"继续做吧 + 严格按编码规范 + 不要多租户（单机 MCP）"推进 `review-2026-09-26.md` 的 Critical。
+
+### 8.1 先定基线：本引擎是**单机**服务（C1 / C2 / C3 的统一收口）
+
+三条 Critical 的前提都是"多租户隔离"，而你的定位是**单机 MCP**。所以按报告 C2 给出的第二个选项处理：
+**不做租户隔离，消除"看起来隔离了"的假象**，并在文档里明确声明。
+
+| 编号 | 原问题 | 单机语义下的修法 |
+|---|---|---|
+| **C1** | `ensure_entity_tenant` 在调用方没传 `tenant_id` 时直接 `Ok(())` —— 校验只是**看起来**存在；不传就能靠猜 id 读别人的 `state_timeline` / `fact_provenance` / `decision_trace` / `decision_search` / `persona_timeline` / `memory_feedback` | 删除"可选"这一层：租户一律经 `mcp::types::identity_arg` 归一化（**省略 = 本地标签**），校验**恒定执行**。`tenant_argument` 随之删除（调用点直接复用 `identity_arg`，消掉第二份实现） |
+| **C2** | `compile_source` 的 `_tenant_id` 是装饰参数（函数体从不使用），调用方以为图谱按租户隔离 | 删掉该参数与 `generalize_compile` 的 `tenant_id` 声明（9 个调用点一并更新）。知识图谱按设计**不分区**，两处 README 新增「部署模型：单机」章节明确写出 |
+| **C3** | `memory_decay {entity_id}` 不带 `tenant_id` 时跳过归属校验，`run_decay_pass` 的 `Some(id)` 分支也不过滤 → **跨标签归档**（这是写操作） | 只要给了 `entity_id` 就**无条件**校验归属；`memory_feedback` 的"可选绑定"同样改为恒定绑定 |
+
+**行为变化（有意为之）**：以前"省略 `tenant_id` 就等于不校验"，现在"省略 = 本地标签"。因此**标签不符的 id 现在报 NotFound**。
+受影响的测试全部按新契约重写（两个 `..._when_asked` 测试改名 `..._enforce_tenant_always` 并断言"省略也必须拒绝"；`cognitive_state_e2e` 的 11 处读取补上它们编译时用的标签；两个用裸 `entity_id: 7` 的测试改为先建实体）。
+
+### 8.2 C5 · 承诺上限「字符 vs 字节」不一致 → 长中文消息中断整个 compile
+
+`validate_decision` 用 `String::len`（**字节**）比较 512，而提取器用 `truncate_chars`（**字符**）截断：
+512 个汉字的 object = 1536 字节 → 校验必失败 → 因为 `insert_compilation` 在**开事务之前**校验全部决策，
+**一条长中文承诺就让整轮编译一条 fact 都不落库**，客户端只看到 `invalid decision field 'object'`。
+
+**修法**：两侧统一为**字符**，并把上限收敛到单一来源（`decision::MAX_OBJECT_CHARS` / `MAX_VERB_CHARS`，
+`commitment.rs` 改为引用它 —— 两份常量正是漂移的根源）。补了缺失的**跨模块契约测试**：
+提取器的输出必须能被写校验接受（原先两个模块各测各的，中间没有断言）。
+
+### 8.3 C6 · 衰减读取**没有任何生产者写入**的 payload key
+
+`importance` / `access_count` 都从 fact payload 读，而生产构造器（`persona::signal_to_fact`、会话/观测编译器、
+`agent_facts`、`commitment::anchor_fact`）**一个都不写** → `ImportanceBased` 恒不下档、`AccessFrequencyBased` 恒不下档、
+`Hybrid` 退化成时间策略。最危险的是：运维把 `importance_threshold` 从默认 0.5 调到 0.6（一个看起来很合理的值），
+**每条未受保护的事实**都满足 `decay_score < 1.0` → 一次后台 tick **全库降权归档**。
+
+**修法**：`extract_importance` 改为 —— payload 里显式写了 `importance` 就用它，否则回落到 **`Fact::confidence`**
+（生产者真正在填的信号，来自 persona 信号分数）。`access_count` 保持读 payload（无写入方 → 恒 `None` → 不降权，
+方向是安全的），并在读取处写明"目前没有生产者"。
+
+### 8.4 验证结果
+
+| 检查 | 结果 |
+|---|---|
+| `make test` | ✅ **895 passed / 0 failed / 9 skipped**（本轮 +2 净增：新增 3 条、重写 8 条） |
+| `make check` / clippy | ✅ 0 error / **0 warning** |
+| `cargo fmt --all --check` | ✅ 干净 |
+| `#[allow(...)]`（规则 5） | ✅ 0 处 |
+| 单文件 ≤1000 行（规则 1） | ✅ 最大 `src/store/mod.rs` 986 |
+| `mnemosyne config-check` | ✅ 未回归 |
+
+**下一批**：C4（http session 生命周期）、C7（冲突替换的另一半：平分重复被保留）、C8（中文 + embedding 零结果）、
+H1（`knowledge_attach` 的路径穿越）、H5（AhoCorasick 匹配模式），以及其余 H 条目。
+
+### 8.5 C8 · 中文查询在 embedding 模式返回**零结果**
+
+`tokenize` / `bm25_score` 按"非字母数字"切分，而汉字是字母数字且词间无空格 →
+`「刘备很高兴。」` 整体是**一个 token**，查询词永远匹配不上 → `bm25_score == 0` →
+`repository.rs` 把 0 分行直接 `continue` 丢弃：`dim > 0` 时**结果集为空**（报告症状），
+`dim == 0` 时 LIKE 兜底能召回但每行得分都是 0，排序退化成 importance。
+
+**修法**：对 Han 连续段做**重叠字符 bigram**（查询侧与文档侧同一套规则，所以两字查询词就是文档产出的那个 bigram）；
+单字段保留原样（否则单字查询永远匹配不到）；`bm25_score` 不再自己 split，直接复用 `tokenize`（消掉第二套切分规则）。
+补了 tokenize 单元测试、BM25 中文（有匹配 / 无匹配 / 匹配更多词得分更高），以及 **`dim == 0` 与 `dim > 0` 两个分支**的端到端检索测试。
+
+### 8.6 H5 · AhoCorasick 默认模式让 `not` / `began*` / `Mrs` **永不匹配**
+
+默认 `MatchKind::Standard` 报"最早结束"的匹配 + `find_iter` 非重叠：`no`/`not` 共起点时先报 `no`，
+游标越过该区间，词边界过滤又把 `no` 丢掉 —— `not` **再也没有机会被尝试**。随包词典里有 **131 组**这样的前缀对，
+受害者包括 `not`（被 `no` 吞）、`began/begin/begins/beginning/begun`（被 `be` 吞）、`Mrs`/`Mrs.`（被 `Mr` 吞），
+而这个 matcher 正是会话编译器的**英文否定检测**与 title/entity 扫描所依赖的。
+
+**修法**：改用 `MatchKind::LeftmostLongest`（同位置取最长形态）。补两条测试：更长形态可达（`I do not care` 必须匹配 `not`）
++ 边界约束没有被放松（`notebook` 里的 `not` 仍须拒绝）+ `no` 单独出现时仍匹配（不能换来换去）。
+
+### 8.7 H1 · `knowledge_attach` 沙箱可读引擎自身配置与数据库
+
+原实现有两个缺口：
+
+1. **白名单就是整个安装根**。`config/`、SQLite 文件、部署凭据都在里面，`knowledge_attach {"path":"config/…"}` 可以直接读出来，
+   再经 `evidence` 工具取回 —— 这不是"附加语料"，而是"读取主机任意文件"的原语。
+2. **只比较路径文本**。`starts_with` 比的是字符串，白名单目录里放一个 symlink（`root/link -> /etc`）就能过检查，
+   而实际读取会跟着链接走出去。
+
+**修法**：应用白名单**之前**先 `canonicalize`（两侧都规范化，否则 macOS 的 `/var` 与 `/private/var` 会误杀合法文件）；
+`config/…`、`.env*`、`*.db`/`*.sqlite*` 明确拒绝；对"扩展名未知 → 兜底当文本"的情况，
+读头部 8KB 检查 NUL 字节（`notes.bin` 这类必须被拒，`.txt` 与 PDF 各自按声明豁免）。
+`memory_transfer_tools::resolve_transfer_path` 同样加固（解决"导出目标尚不存在"的场景：只 canonicalize **已存在的前缀**）。
+
+### 8.8 顺带
+
+`src/store/mod.rs` 因新增测试涨到 **1024 行**（越规则 1 红线），按既有拆法把测试移到 `src/store/tests.rs`
+（`mod.rs` 424 + `tests.rs` 608）。
+
+### 8.9 验证结果（第四批）
+
+| 检查 | 结果 |
+|---|---|
+| `make test` | ✅ **904 passed / 0 failed / 9 skipped** |
+| `make check` / clippy | ✅ 0 error / **0 warning** |
+| `cargo fmt --all --check` | ✅ 干净 |
+| `#[allow(...)]`（规则 5） | ✅ 0 处 |
+| 单文件 ≤1000 行（规则 1） | ✅ 最大 `src/ingest/characters/data.rs` 950 |
+| `mnemosyne config-check` | ✅ 退出码 0 |
+
+**已关闭**：C1、C2、C3、C5、C6、C8、H1、H3、H4、H5、H6（含此前记在 §6/§7 的条目）。
+**仍未处理**：C4（http session 生命周期）、C7 的"平分重复被保留"那一半、H7–H21。

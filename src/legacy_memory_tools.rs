@@ -8,7 +8,7 @@ use mnemosyne::distiller::{Distiller, PipelineDistiller};
 use mnemosyne::error::Error;
 use mnemosyne::knowledge::SQLiteKnowledgeStore;
 use mnemosyne::knowledge::store::KnowledgeStore;
-use mnemosyne::mcp::types::{ToolCallResult, ToolHandler};
+use mnemosyne::mcp::types::{ToolCallResult, ToolHandler, identity_arg};
 use mnemosyne::retrieval::RetrievalEngine;
 use mnemosyne::store::ExperienceRepository;
 use mnemosyne::types::{Experience, MemoryType, Message};
@@ -151,21 +151,19 @@ impl ToolHandler for MemoryFeedbackTool {
             .and_then(Value::as_str)
             .ok_or_else(|| Error::InvalidInput("missing `memory_id`".into()))?;
         let useful = args.get("useful").and_then(Value::as_bool).unwrap_or(true);
-        // Optional tenant binding: a leaked UUID must not let any client
-        // rewrite another tenant's confidence/votes.
-        let tenant_filter = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .filter(|t| !t.trim().is_empty());
+        // Tenant binding, resolved like every other identity: a leaked UUID
+        // must not let a client rewrite another tenant's confidence/votes. The
+        // binding used to be optional, so leaving `tenant_id` out was enough to
+        // write into whatever tenant the id belonged to (audit C1/C3); an
+        // omitted value now means the LOCAL tenant.
+        let tenant = identity_arg(args, "tenant_id");
 
         let Some(mut exp) = self.store.get(memory_id).await? else {
             return Ok(ToolCallResult::text(format!(
                 "memory `{memory_id}` not found; feedback not applied"
             )));
         };
-        if let Some(expected) = tenant_filter
-            && exp.tenant_id != expected
-        {
+        if exp.tenant_id != tenant {
             return Ok(ToolCallResult::text(format!(
                 "memory `{memory_id}` not found; feedback not applied"
             )));

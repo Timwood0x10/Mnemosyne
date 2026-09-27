@@ -60,6 +60,17 @@
 - **状态来自事件**：实体当前状态由其事实时间线聚合而来，而非临时拼 prompt。
 - **长期认知来自模型**：认知状态持久化于 SQLite，跨会话演化，与上下文窗口大小无关。
 
+### 部署模型：单机（single-node）
+
+本引擎是**单机 MCP 服务**：一次安装服务一个租户，`tenant_id` 是**数据标签**，不是授权边界。
+
+- 工具参数里的 `tenant_id` 让「按 id 寻址」的读取（`state_timeline`、`fact_provenance`、
+  `decision_trace`、`decision_search`、`persona_timeline`、`memory_feedback`、`memory_decay`）
+  确认目标数据带的是同一个标签；**省略时等于本地标签**，而不是"跳过检查"。
+- 知识图谱（`documents` / `knowledge_objects` / `knowledge_edges`）与世界模型按设计**不分区**：
+  一次部署就是一个图谱、一份语料。
+- 所以不要把它当作多租户服务暴露给互不信任的调用方；需要隔离请一进程一实例。
+
 > 模块级详细文档：参见 [模块文档](#模块文档)。
 
 ---

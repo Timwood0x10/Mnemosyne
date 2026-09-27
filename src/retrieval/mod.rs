@@ -133,6 +133,53 @@ mod tests {
         assert!(tokenize("a b c").is_empty(), "single chars filtered");
     }
 
+    /// Objective: Verify a Han run is expanded into overlapping character
+    /// bigrams. Chinese is written without spaces, so splitting on
+    /// non-alphanumeric characters left a whole sentence as ONE token that no
+    /// query term could match — `bm25_score` then returned 0 for every Chinese
+    /// row, and the keyword search dropped all of them (audit C8).
+    /// Invariants: bigrams overlap across the run; a lone Han character is kept
+    /// as itself; Han and ASCII in one string are tokenized side by side.
+    #[test]
+    fn tokenize_expands_han_runs_into_bigrams() {
+        assert_eq!(
+            tokenize("刘备很高兴。"),
+            vec!["刘备", "备很", "很高", "高兴"],
+            "overlapping bigrams over the whole run"
+        );
+        assert_eq!(tokenize("好"), vec!["好"], "a lone character is kept");
+        assert_eq!(
+            tokenize("喜欢 Rust"),
+            vec!["喜欢", "rust"],
+            "Han and ASCII side by side"
+        );
+    }
+
+    /// Objective: Verify BM25 scores Chinese content at all. The query and the
+    /// document go through the same tokenizer, so a two-character Chinese query
+    /// term is the bigram the document produced — before the fix the score was
+    /// always 0, which dropped the row outright in embedding mode (audit C8).
+    /// Invariants: a matching Chinese query scores above zero; an unrelated
+    /// document scores zero; matching more query terms scores higher.
+    #[test]
+    fn bm25_scores_chinese_content() {
+        let query = tokenize("刘备");
+        assert!(
+            bm25_score(&query, "刘备很高兴。") > 0.0,
+            "a matching Chinese query must score above zero"
+        );
+        assert_eq!(
+            bm25_score(&query, "曹操很生气。"),
+            0.0,
+            "an unrelated Chinese document must not score"
+        );
+        let two_terms = tokenize("刘备 高兴");
+        assert!(
+            bm25_score(&two_terms, "刘备很高兴。") > bm25_score(&two_terms, "刘备来了。"),
+            "a document matching more query terms must score higher"
+        );
+    }
+
     /// Objective: Verify bm25_score returns 0 for empty query terms.
     /// Invariants: No query terms -> score 0.
     #[test]

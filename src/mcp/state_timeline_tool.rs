@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 use crate::cognition::{FactStore, StateEngine};
 use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
-use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 
 use super::tenant_scope;
 
@@ -106,10 +106,14 @@ impl ToolHandler for StateTimelineTool {
             }
         };
 
-        // An id alone does not say who owns it: enforce the tenant when the
-        // caller supplied one, before any fact is read.
-        let tenant_id = tenant_scope::tenant_argument(args)?;
-        tenant_scope::ensure_entity_tenant(&self.store, entity_id, tenant_id)?;
+        // An id alone does not say which label it carries: enforce it before
+        // reading, always. An omitted `tenant_id` means the LOCAL tenant, not
+        // "skip the check" (audit C1).
+        tenant_scope::ensure_entity_tenant(
+            &self.store,
+            entity_id,
+            identity_arg(args, "tenant_id"),
+        )?;
 
         let facts = self.store.get_facts(entity_id)?;
         let engine = StateEngine::new();
@@ -214,7 +218,7 @@ mod tests {
     async fn state_timeline_preserves_historical_states() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
         let entity_id = store
-            .resolve_user("tenant-a", "alice")
+            .resolve_user("default", "alice")
             .expect("resolve user");
         for (id, time, content) in [
             (1i64, 2024i64, "喜欢 Python"),
@@ -277,7 +281,7 @@ mod tests {
     async fn state_timeline_detects_definite_transitions_only() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
         let entity_id = store
-            .resolve_user("tenant-a", "alice")
+            .resolve_user("default", "alice")
             .expect("resolve user");
 
         // A definite stance flip: same topic, opposite negation.
@@ -323,7 +327,7 @@ mod tests {
 
         // An unrelated change (no shared topic) must NOT fabricate a transition.
         let store2 = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
-        let entity2 = store2.resolve_user("tenant-a", "bob").expect("resolve bob");
+        let entity2 = store2.resolve_user("default", "bob").expect("resolve bob");
         store2
             .insert_fact(&fact(
                 1,
@@ -367,14 +371,15 @@ mod tests {
         );
     }
 
-    /// Objective: Verify the tool is tenant-scoped when — and only when — the
-    /// caller states a tenant. An entity id carries no ownership, so without
-    /// this any client could read another tenant's state history by guessing an
-    /// id.
-    /// Invariants: wrong tenant → NotFound; owning tenant → served; omitted
-    /// tenant → legacy unscoped read.
+    /// Objective: Verify the tool enforces the subject's tenant label ALWAYS. An
+    /// entity id carries no ownership, and the check used to be skipped whenever
+    /// the caller omitted `tenant_id` — so simply leaving the field out was
+    /// enough to read another label's state history by guessing an id (audit C1).
+    /// Invariants: a foreign label → NotFound; the owning label → served; an
+    /// OMITTED label resolves to the LOCAL tenant, so a foreign entity is still
+    /// NotFound instead of being read unscoped.
     #[tokio::test]
-    async fn state_timeline_is_tenant_scoped_when_asked() {
+    async fn state_timeline_enforces_tenant_always() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
         let entity_id = store
             .resolve_user("tenant-a", "alice")
@@ -402,9 +407,18 @@ mod tests {
         tool.call(&json!({"entity_id": entity_id, "tenant_id": "tenant-a"}))
             .await
             .expect("the owning tenant is served");
-        tool.call(&json!({"entity_id": entity_id}))
+
+        // The regression the audit found: an omitted `tenant_id` skipped the
+        // check entirely. It now means the LOCAL tenant, which does not own this
+        // entity — the read is refused rather than served unscoped.
+        let error = tool
+            .call(&json!({"entity_id": entity_id}))
             .await
-            .expect("an omitted tenant keeps the unscoped behaviour");
+            .expect_err("an omitted tenant must not read another label's entity");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "an omitted tenant resolves to the local one, got {error:?}"
+        );
     }
 
     /// Objective: Verify input validation — missing entity_id, unknown
@@ -436,7 +450,7 @@ mod tests {
 
         // An entity with no facts yields empty dimensions, not an error.
         let entity_id = store
-            .resolve_user("tenant-a", "nobody")
+            .resolve_user("default", "nobody")
             .expect("resolve empty user");
         let result = tool
             .call(&json!({"entity_id": entity_id}))

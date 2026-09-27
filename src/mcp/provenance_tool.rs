@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::cognition::{Fact, FactStore};
 use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
-use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 
 use super::tenant_scope;
 
@@ -115,12 +115,13 @@ impl ToolHandler for FactProvenanceTool {
             .store
             .get_fact_by_id(fact_id)?
             .ok_or_else(|| Error::NotFound(format!("no fact with id {fact_id}")))?;
-        // A fact id alone does not say who owns it: enforce the tenant when the
-        // caller supplied one.
+        // A fact id alone does not say which label it carries: enforce it
+        // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
+        // not "skip the check" (audit C1).
         tenant_scope::ensure_entity_tenant(
             &self.store,
             fact.entity_id,
-            tenant_scope::tenant_argument(args)?,
+            identity_arg(args, "tenant_id"),
         )?;
 
         // Fetch the original-text evidence anchor, if any — content AND the
@@ -236,11 +237,16 @@ mod tests {
     #[tokio::test]
     async fn provenance_reports_evidence_and_derivation_chain() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("open fact store"));
+        // The entity must exist: an id alone carries no label, and the tool
+        // enforces that label before reading (audit C1).
+        let entity_id = store
+            .resolve_user("default", "alice")
+            .expect("resolve user");
         // Seed two source facts and one derived fact.
         let src_a = store
             .insert_fact(&Fact {
                 id: None,
-                entity_id: 7,
+                entity_id,
                 fact_type: FactType::Preference,
                 time: 2024,
                 payload: json!({"content": "likes Python"}),
@@ -252,7 +258,7 @@ mod tests {
         let src_b = store
             .insert_fact(&Fact {
                 id: None,
-                entity_id: 7,
+                entity_id,
                 fact_type: FactType::Preference,
                 time: 2025,
                 payload: json!({"content": "started Rust"}),
@@ -273,7 +279,7 @@ mod tests {
         let derived = store
             .insert_fact(&Fact {
                 id: None,
-                entity_id: 7,
+                entity_id,
                 fact_type: FactType::Preference,
                 time: 2026,
                 payload: json!({"content": "prefers Rust"}),
@@ -325,10 +331,13 @@ mod tests {
     #[tokio::test]
     async fn provenance_handles_fact_without_evidence_or_chain() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("open fact store"));
+        let entity_id = store
+            .resolve_user("default", "alice")
+            .expect("resolve user");
         let id = store
             .insert_fact(&Fact {
                 id: None,
-                entity_id: 7,
+                entity_id,
                 fact_type: FactType::Event,
                 time: 2026,
                 payload: json!({"content": "went for a walk"}),

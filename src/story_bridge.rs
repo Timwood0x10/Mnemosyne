@@ -188,7 +188,7 @@ mod tests {
             "text",
         );
         let profile = conversation_profile();
-        let _stats = compile_source(&source, profile, &kstore, "t1")
+        let _stats = compile_source(&source, profile, &kstore)
             .await
             .expect("compile");
 

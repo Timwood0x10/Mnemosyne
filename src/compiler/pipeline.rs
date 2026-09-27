@@ -93,7 +93,6 @@ pub async fn compile_source(
     source: &dyn DocumentSource,
     profile: &DomainProfile,
     store: &dyn KnowledgeStore,
-    _tenant_id: &str,
 ) -> Result<PipelineStats> {
     let docs = source.load()?;
     let mut stats = PipelineStats::default();

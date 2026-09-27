@@ -70,6 +70,22 @@ AI *remember its user* — deterministically, without an LLM in the loop.
 
 ---
 
+### Deployment model: single-node
+
+This engine is a **single-node MCP server**: one installation serves one tenant, and `tenant_id`
+is a **data label**, not an authorization boundary.
+
+- The `tenant_id` argument of the id-addressed reads (`state_timeline`, `fact_provenance`,
+  `decision_trace`, `decision_search`, `persona_timeline`, `memory_feedback`, `memory_decay`)
+  confirms the subject carries the same label; **omitting it means the local label**, never
+  "skip the check".
+- The knowledge graph (`documents` / `knowledge_objects` / `knowledge_edges`) and the world model
+  are deliberately **not partitioned**: one deployment is one graph over one corpus.
+- Do not expose it as a multi-tenant service to mutually untrusted callers; for isolation, run one
+  process per instance.
+
+---
+
 ## MCP Tool Overview
 
 ### Cognitive State Tools

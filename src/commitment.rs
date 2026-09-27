@@ -16,7 +16,7 @@
 //! not a commitment, so "I will not help you" is never recorded as one).
 
 use crate::cognition::Fact;
-use crate::decision::{Decision, DecisionStatus};
+use crate::decision::{Decision, DecisionStatus, MAX_OBJECT_CHARS};
 use crate::types::Message;
 
 /// Explicit commitment markers mapped to the decision verb they imply.
@@ -38,8 +38,6 @@ pub const COMMITMENT_MARKERS: &[(&str, &str)] = &[
 
 /// Maximum number of supporting facts attached to one decision.
 const MAX_SUPPORTING_FACTS: usize = 8;
-/// Maximum stored length of a decision's `object` (mirrors `validate_decision`).
-const MAX_OBJECT_CHARS: usize = 512;
 
 /// Negation cues that cancel a commitment.
 ///
@@ -362,6 +360,21 @@ mod tests {
             decisions[0].object.chars().count(),
             MAX_OBJECT_CHARS,
             "the object is truncated to the validator's character limit"
+        );
+        // The cross-module contract that was missing: truncation happens in
+        // CHARACTERS, so the validator must count characters too. It compared
+        // `String::len` (bytes), and 512 characters of Chinese is 1536 bytes —
+        // the decision was rejected and `insert_compilation` validates every
+        // decision BEFORE opening its transaction, so one long message aborted
+        // the whole compile (audit C5).
+        assert!(
+            decisions[0].object.len() > MAX_OBJECT_CHARS,
+            "the truncated object must exceed the cap in BYTES for this test to mean anything"
+        );
+        assert_eq!(
+            crate::decision::validate_decision(&decisions[0]),
+            None,
+            "the write validator must accept exactly what the extractor produces"
         );
     }
 

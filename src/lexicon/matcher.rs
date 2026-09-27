@@ -53,7 +53,21 @@ impl LexiconMatcher {
                 });
             }
         }
-        let ac = aho_corasick::AhoCorasick::new(&patterns)
+        // `MatchKind::LeftmostLongest`, NOT the default `Standard`.
+        //
+        // Standard reports the match that ENDS earliest, and `find_iter` is
+        // non-overlapping: with `no` and `not` sharing a start it reports `no`,
+        // the cursor advances past that span, and the word-boundary filter then
+        // drops `no` — so `not` is never tried. The shipped dictionary contains
+        // 131 such prefix pairs: `not` (swallowed by `no`), all of
+        // `began/begin/begins/beginning/begun` (by `be`) and `Mrs`/`Mrs.` (by
+        // `Mr`) were unreachable, which silently disabled English negation
+        // detection in the matcher the conversation compiler and the title/entity
+        // scanner rely on (audit H5). LeftmostLongest resolves the longest form
+        // at a position, so a superstring wins over its prefix.
+        let ac = aho_corasick::AhoCorasickBuilder::new()
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            .build(&patterns)
             .expect("lexeme forms are valid non-empty patterns");
         LexiconMatcher { ac, meta }
     }
@@ -109,4 +123,54 @@ fn is_word_boundary(text: &str, start: usize, end: usize) -> bool {
         .next()
         .is_none_or(|c| !c.is_alphanumeric());
     before_ok && after_ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Objective: Verify a form that is a SUPERSTRING of another form is still
+    /// reachable. The automaton used `MatchKind::Standard`, which reports the
+    /// match ending earliest: at a shared start (`no` / `not`) it reported `no`,
+    /// the non-overlapping iterator advanced past that span, and the
+    /// word-boundary filter then discarded `no` — leaving `not` unreachable. The
+    /// matcher backs negation detection in the conversation compiler (audit H5).
+    /// Invariants: the longer form is matched, and the reported span covers it.
+    #[test]
+    fn a_longer_form_is_not_shadowed_by_its_prefix() {
+        let matcher = LexiconMatcher::from_global_registry();
+        let matched: Vec<String> = matcher
+            .find_iter("I do not care")
+            .map(|m| m.matched)
+            .collect();
+        assert!(
+            matched.iter().any(|m| m == "not"),
+            "the `not` form must be reachable, got {matched:?}"
+        );
+
+        // `no` must still match on its own — the fix must not trade one form for
+        // the other.
+        let bare: Vec<String> = matcher.find_iter("no idea").map(|m| m.matched).collect();
+        assert!(
+            bare.iter().any(|m| m == "no"),
+            "`no` must keep matching when `not` is absent, got {bare:?}"
+        );
+    }
+
+    /// Objective: Verify the word-boundary filter still rejects a substring whose
+    /// edges fall inside a longer word, so the longer-match preference did not
+    /// loosen that contract.
+    /// Invariants: a boundary-constrained form inside a word is dropped.
+    #[test]
+    fn boundary_constrained_forms_do_not_match_inside_words() {
+        let matcher = LexiconMatcher::from_global_registry();
+        let matched: Vec<String> = matcher
+            .find_iter("the notebook is here")
+            .map(|m| m.matched)
+            .collect();
+        assert!(
+            !matched.iter().any(|m| m == "not"),
+            "`not` inside `notebook` must stay rejected, got {matched:?}"
+        );
+    }
 }

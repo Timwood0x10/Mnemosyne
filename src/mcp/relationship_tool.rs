@@ -169,13 +169,14 @@ impl ToolHandler for PersonaTimelineTool {
             .get("entity_id")
             .and_then(Value::as_i64)
             .ok_or_else(|| Error::InvalidInput("missing `entity_id`".into()))?;
-        // Optional tenant scoping, matching state_timeline / fact_provenance /
-        // decision_trace: a raw entity id carries no ownership, so without
-        // this a guessed id disclosed another tenant's full persona evolution.
+        // Tenant scoping, matching state_timeline / fact_provenance /
+        // decision_trace: a raw entity id carries no label, so it is enforced
+        // before the persona evolution is read. An omitted `tenant_id` means the
+        // LOCAL tenant, not "skip the check" (audit C1).
         crate::mcp::tenant_scope::ensure_entity_tenant(
             &self.store,
             entity_id,
-            crate::mcp::tenant_scope::tenant_argument(args)?,
+            crate::mcp::types::identity_arg(args, "tenant_id"),
         )?;
         let timeline = build_timeline_for_entity(self.store.as_ref(), entity_id)?;
         let payload = json!({

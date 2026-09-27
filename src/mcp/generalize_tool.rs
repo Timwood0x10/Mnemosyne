@@ -97,7 +97,10 @@ impl ToolHandler for GeneralizeCompileHandler {
             .map(ToOwned::to_owned)
             .unwrap_or_else(default_title);
         let source = opt_str(args, "source").unwrap_or("generalize_compile");
-        let tenant = opt_str(args, "tenant_id").unwrap_or("default");
+        // No `tenant_id`: this engine is a single-node server, so the compiled
+        // graph belongs to the installation. The parameter used to be read here
+        // and then dropped by `compile_source` — the "half-wired" state that made
+        // callers believe the graph was tenant-scoped (audit C2).
 
         // Resolve the domain profile: an explicit name loads on demand;
         // otherwise fall back to the process-cached conversation pack. A
@@ -148,7 +151,7 @@ impl ToolHandler for GeneralizeCompileHandler {
 
         // Persist through the unified pipeline. Persistence failures are
         // surfaced as a graceful error result so the client sees the message.
-        match compile_source(boxed.as_ref(), &profile, self.store.as_ref(), tenant).await {
+        match compile_source(boxed.as_ref(), &profile, self.store.as_ref()).await {
             Ok(stats) => json_ok(&serde_json::json!({
                 "compiled": true,
                 "doc_type": doc_type,
@@ -197,8 +200,7 @@ pub async fn register_generalize_tool(
                         "text": {"type": "string", "description": "Raw prose / notes (required when doc_type=text)"},
                         "title": {"type": "string", "description": "Optional document title; defaults to a generated id"},
                         "source": {"type": "string", "description": "Optional provenance origin tag"},
-                        "profile": {"type": "string", "default": "conversation_cognition", "description": "Optional domain profile pack name from config/domain_profiles/"},
-                        "tenant_id": {"type": "string", "default": "default"}
+                        "profile": {"type": "string", "default": "conversation_cognition", "description": "Optional domain profile pack name from config/domain_profiles/"}
                     },
                     "oneOf": [
                         {"required": ["messages"]},

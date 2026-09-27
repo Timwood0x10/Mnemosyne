@@ -536,7 +536,79 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `facts.evidence_id` moved onto it first, because deleting a referenced row is
   exactly what the foreign keys refuse.
 
-- **FK enforcement could stay OFF for the rest of a connection's life.**
+- **Chinese queries returned nothing whenever embeddings were enabled.** The
+  keyword tokenizer split on non-alphanumeric characters, and Han characters are
+  alphanumeric with no spaces between them — so `「刘备很高兴。」` was ONE token that
+  no query term could match, `bm25_score` was 0 for every Chinese row, and the
+  repository drops zero-score rows: with `dim > 0` the result set was empty, and
+  with `dim == 0` the LIKE fallback recalled rows but ranked them all at 0 (pure
+  importance order). Han runs are expanded into overlapping character bigrams on
+  both the query and the document side now, so a two-character query is the same
+  bigram the document produced.
+- **English negation detection was silently dead in the lexicon matcher.** The
+  Aho-Corasick automaton used the default `MatchKind::Standard`, which reports
+  the match ending *earliest*: with `no` and `not` sharing a start it reported
+  `no`, the non-overlapping iterator advanced past that span, and the
+  word-boundary filter then discarded `no` — leaving `not` unreachable. The
+  shipped dictionary has 131 such prefix pairs; `not`, all of
+  `began/begin/begins/beginning/begun` and `Mrs`/`Mrs.` were among the casualties,
+  and the matcher backs the negation cues the conversation compiler relies on.
+  `MatchKind::LeftmostLongest` resolves the longest form at a position.
+- **`knowledge_attach` could read the engine's own configuration and databases.**
+  Two gaps: the allowlist is the whole installation root (`config/…`, `*.db` and
+  credentials all live under it), and the check compared path *text*, so a symlink
+  placed inside an allowed directory passed while the read followed it out.
+  Paths are now canonicalized before the allowlist is applied (both sides, so the
+  macOS `/var` vs `/private/var` split does not reject legitimate files),
+  `config/…`, `.env*` and SQLite files are refused outright, and content that
+  falls back to the text loader is rejected when it contains a NUL byte — closing
+  the "read any host file, fetch it back through the evidence tool" path. The
+  transfer sandbox (`exports/`) got the same symlink resolution, keeping the
+  not-yet-created export target working by resolving the existing prefix only.
+
+- **A long Chinese commitment aborted the whole compile.**
+  `validate_decision` capped `object` at 512 *bytes* (`String::len`) while the
+  commitment extractor truncates at 512 *characters* — so a 512-character Chinese
+  object is 1536 bytes and the validator refused exactly what the extractor had
+  just built. Because `insert_compilation` validates every decision *before*
+  opening its transaction, one such utterance kept every fact in that compile out
+  of the store, and the caller only saw `invalid decision field \`object\``. Both
+  limits now count characters and live in one place
+  (`decision::MAX_OBJECT_CHARS` / `MAX_VERB_CHARS`), with a cross-module test
+  pinning that the extractor's output passes the write validator.
+- **The decay sweep scored a payload key no producer writes.** `importance` was
+  read from the fact payload, but none of the constructors write that field, so
+  every fact scored the same 0.5 default — which is below any threshold an
+  operator would sensibly set. Raising `importance_threshold` to 0.6 therefore
+  satisfied `decay_score < 1.0` for every unprotected fact, and one background
+  tick archived the store. Importance now falls back to `Fact::confidence`, the
+  signal the producers do fill in, while an explicit payload value still wins.
+  `access_count` has no producer either; that is safe (an unknown access history
+  must not count as "never accessed") and is now documented where it is read.
+- **The tenant check on the id-addressed tools could be skipped by omitting
+  the argument.** `tenant_scope::ensure_entity_tenant` returned `Ok(())` when the
+  caller sent no `tenant_id`, so the guard only *looked* like isolation: a client
+  that left the field out could read another label's `state_timeline`,
+  `fact_provenance`, `decision_trace`, `decision_search`, `persona_timeline` and
+  `memory_feedback` rows by guessing an id — and `memory_decay` would *archive*
+  them. The tenant is now resolved through `mcp::types::identity_arg`, the same
+  helper every other identity uses, so the check always runs and an omitted value
+  means the **local label** rather than "unscoped". Note the behaviour change for
+  callers that relied on the old spelling: an id whose label differs from the
+  caller's (including the local default) is now reported as not-found. The tests
+  that pinned the old "tenant-scoped when asked" contract were rewritten around
+  the always-enforced one, and the two id-addressed reads that had no entity at
+  all now seed one.
+- **`generalize_compile` accepted a `tenant_id` the pipeline threw away.**
+  `compile_source`'s `_tenant_id` parameter was never read, so a caller believed
+  the compiled graph was labelled while the documents, objects, edges and world
+  rows were shared by construction. The parameter is gone (this is a single-node
+  engine — see the new "Deployment model" section in both READMEs), the tool's
+  input schema no longer declares it, and all nine call sites follow.
+
+### Changed
+
+- Removed the dead `--sse-addr` / `MEMORY_SSE_ADDR` option.
   `clear_all`, `clear_for_document` and `Migrator::migrate` each ran "disable FK →
   BEGIN → work → COMMIT → enable FK", so a `?` on `BEGIN` (a concurrent `BEGIN`
   can win the `is_autocommit` check) or on `COMMIT` returned *before* enforcement
@@ -579,6 +651,8 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tests moved to `src/fact_store/tests.rs`, which keeps access to the private
   schema helpers (`conversation_compiler/tests.rs` and
   `compiler/profile/tests.rs` use the same split).
+- **`src/store/mod.rs` split** (1024 → 424 lines, tests moved to
+  `src/store/tests.rs`) for the one-file-per-1000-lines rule.
 - **The FK-safe transaction wrapper is public** (`with_foreign_keys_disabled`):
   a caller that needs a wipe or a migration with enforcement off can no longer
   forget to restore it.

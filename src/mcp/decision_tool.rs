@@ -22,7 +22,7 @@ use crate::cognition::FactStore;
 use crate::decision::{Decision, DecisionOutcome};
 use crate::error::{Error, Result};
 use crate::fact_store::SqliteFactStore;
-use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler};
+use crate::mcp::types::{ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 
 use super::tenant_scope;
 
@@ -96,12 +96,13 @@ impl ToolHandler for DecisionTraceTool {
             .store
             .get_decision(decision_id)?
             .ok_or_else(|| Error::NotFound(format!("no decision with id {decision_id}")))?;
-        // A decision id alone does not say who owns it: enforce the tenant when
-        // the caller supplied one.
+        // A decision id alone does not say which label it carries: enforce it
+        // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
+        // not "skip the check" (audit C1).
         tenant_scope::ensure_entity_tenant(
             &self.store,
             decision.subject,
-            tenant_scope::tenant_argument(args)?,
+            identity_arg(args, "tenant_id"),
         )?;
         let payload = decision_json(self.store.as_ref(), &decision)?;
         Ok(ToolCallResult::text(payload.to_string()))
@@ -143,13 +144,10 @@ impl ToolHandler for DecisionSearchTool {
                 requested.min(MAX_DECISION_SEARCH_LIMIT) as usize
             }
         };
-        // A subject id alone does not say who owns it: enforce the tenant when
-        // the caller supplied one, before any decision is read.
-        tenant_scope::ensure_entity_tenant(
-            &self.store,
-            subject,
-            tenant_scope::tenant_argument(args)?,
-        )?;
+        // A subject id alone does not say which label it carries: enforce it
+        // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
+        // not "skip the check" (audit C1).
+        tenant_scope::ensure_entity_tenant(&self.store, subject, identity_arg(args, "tenant_id"))?;
 
         let decisions = self.store.search_decisions(subject, &keyword)?;
         let mut payloads = Vec::new();
@@ -255,13 +253,15 @@ mod tests {
         }
     }
 
-    /// Objective: Verify both decision tools are tenant-scoped when the caller
-    /// states a tenant: a decision id or subject id carries no ownership, so any
-    /// client could otherwise read another tenant's decisions by guessing an id.
+    /// Objective: Verify both decision tools enforce the tenant label ALWAYS: a
+    /// decision id or subject id carries no ownership, and the check used to be
+    /// skipped whenever the caller omitted `tenant_id` — so leaving the field out
+    /// was enough to read another label's decisions by guessing an id (audit C1).
     /// Invariants: wrong tenant → NotFound on trace and search; owning tenant →
-    /// served on both; omitted tenant → legacy unscoped read.
+    /// served on both; an OMITTED tenant resolves to the LOCAL one, so a foreign
+    /// subject is still NotFound instead of being read unscoped.
     #[tokio::test]
-    async fn decision_tools_are_tenant_scoped_when_asked() {
+    async fn decision_tools_enforce_tenant_always() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
         let subject = store
             .resolve_user("tenant-a", "alice")
@@ -302,10 +302,24 @@ mod tests {
             Some(1),
             "the owning tenant sees its decision"
         );
-        search
+        // The regression the audit found: an omitted `tenant_id` skipped the
+        // check. It now means the LOCAL tenant, which does not own this subject.
+        let error = trace
+            .call(&json!({"decision_id": decision_id}))
+            .await
+            .expect_err("an omitted tenant must not trace another label's decision");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "an omitted tenant resolves to the local one, got {error:?}"
+        );
+        let error = search
             .call(&json!({"subject": subject}))
             .await
-            .expect("an omitted tenant keeps the unscoped behaviour");
+            .expect_err("an omitted tenant must not search another label's subject");
+        assert!(
+            matches!(error, Error::NotFound(_)),
+            "an omitted tenant resolves to the local one, got {error:?}"
+        );
     }
 
     /// Objective: Verify `decision_trace` expands `because` into resolved
@@ -315,10 +329,15 @@ mod tests {
     #[tokio::test]
     async fn decision_trace_resolves_supporting_facts() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
+        // The subject entity must exist: the tool enforces its tenant label
+        // before reading (audit C1), and an id alone carries none.
+        let entity_id = store
+            .resolve_user("default", "alice")
+            .expect("resolve user");
         let fact_id = store
             .insert_fact(&Fact {
                 id: None,
-                entity_id: 7,
+                entity_id,
                 fact_type: FactType::Preference,
                 time: 2026,
                 payload: json!({"content": "用户最近情绪低落"}),
@@ -328,7 +347,12 @@ mod tests {
             })
             .expect("insert supporting fact");
         let decision_id = store
-            .insert_decision(&decision(7, "decline", "不给建议", vec![fact_id, 404]))
+            .insert_decision(&decision(
+                entity_id,
+                "decline",
+                "不给建议",
+                vec![fact_id, 404],
+            ))
             .expect("insert decision");
 
         let tool = DecisionTraceTool::new(store);
@@ -394,28 +418,36 @@ mod tests {
     #[tokio::test]
     async fn decision_search_filters_by_keyword_and_limit() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
-        let mut old = decision(7, "promise", "陪用户明天去医院", vec![]);
+        // Two real subjects: the tool enforces their tenant label before reading
+        // (audit C1), and a bare id carries none.
+        let subject = store
+            .resolve_user("default", "alice")
+            .expect("resolve subject");
+        let other = store
+            .resolve_user("default", "bob")
+            .expect("resolve other subject");
+        let mut old = decision(subject, "promise", "陪用户明天去医院", vec![]);
         old.made_at = 2024;
         store.insert_decision(&old).expect("insert old");
         store
-            .insert_decision(&decision(7, "decide", "这周末学习 Rust", vec![]))
+            .insert_decision(&decision(subject, "decide", "这周末学习 Rust", vec![]))
             .expect("insert decide");
         store
-            .insert_decision(&decision(8, "promise", "陪用户去医院", vec![]))
+            .insert_decision(&decision(other, "promise", "陪用户去医院", vec![]))
             .expect("insert other subject");
 
         let tool = DecisionSearchTool::new(store);
         let result = tool
-            .call(&json!({"subject": 7, "keyword": "医院", "limit": 10}))
+            .call(&json!({"subject": subject, "keyword": "医院", "limit": 10}))
             .await
             .expect("search succeeds");
         let body = parse_payload(&result);
         let hits = body["decisions"].as_array().expect("decisions array");
-        assert_eq!(hits.len(), 1, "one match in subject 7");
+        assert_eq!(hits.len(), 1, "one match in the subject");
         assert_eq!(hits[0]["object"], json!("陪用户明天去医院"));
 
         let result = tool
-            .call(&json!({"subject": 7, "keyword": "", "limit": 1}))
+            .call(&json!({"subject": subject, "keyword": "", "limit": 1}))
             .await
             .expect("search all succeeds");
         let body = parse_payload(&result);

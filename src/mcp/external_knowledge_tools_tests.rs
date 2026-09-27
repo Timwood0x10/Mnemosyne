@@ -424,3 +424,96 @@ async fn knowledge_attach_rejects_unknown_source_type() {
     let text = result.content[0].text.clone().unwrap_or_default();
     assert!(text.contains("quantum"), "error names the bad source_type");
 }
+
+/// Objective: Verify the attach sandbox refuses a path that lives INSIDE an
+/// allowlisted root but names engine configuration or a database. The allowlist
+/// is the whole installation directory, so `config/…` and `*.db` files were
+/// readable and could be pumped back out through the evidence tools — a file-read
+/// primitive rather than an attach (audit H1).
+/// Invariants: a corpus file under an allowlisted root still resolves; a
+/// `config/` path and a `.db` path are rejected even though both exist.
+#[test]
+fn attach_path_rejects_engine_configuration_and_databases() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir(&config_dir).expect("create config dir");
+    let secret = config_dir.join("keys.json");
+    std::fs::write(&secret, "{\"openai_api_key\": \"sk-secret\"}").expect("write secret");
+    let database = dir.path().join("memory.db");
+    std::fs::write(&database, b"SQLite format 3\0").expect("write database");
+
+    let corpus = dir.path().join("corpus.txt");
+    std::fs::write(&corpus, "刘备很高兴。").expect("write corpus");
+    let resolved = resolve_knowledge_path(corpus.to_str().expect("utf-8 path"))
+        .expect("a corpus file under an allowlisted root must resolve");
+    assert_eq!(
+        resolved,
+        corpus.canonicalize().expect("canonical corpus path"),
+        "the resolved path is the canonical one"
+    );
+
+    for denied in [&secret, &database] {
+        let error = resolve_knowledge_path(denied.to_str().expect("utf-8 path"))
+            .expect_err("engine state must not be attachable");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "{denied:?} must be InvalidInput, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("not attachable"),
+            "the error must state the reason, got: {error}"
+        );
+    }
+}
+
+/// Objective: Verify a symlink cannot smuggle a read out of the sandbox. The
+/// check compared path TEXT (`starts_with`), so a link placed in an allowlisted
+/// directory passed while the actual read followed it out (audit H1).
+/// Invariants: a link that resolves outside every allowlisted root is rejected.
+#[cfg(unix)]
+#[test]
+fn attach_path_rejects_symlinks_that_leave_the_sandbox() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let link = dir.path().join("escape.txt");
+    std::os::unix::fs::symlink("/etc/hosts", &link).expect("create symlink");
+
+    let error = resolve_knowledge_path(link.to_str().expect("utf-8 path"))
+        .expect_err("a link pointing outside the sandbox must be refused");
+    assert!(
+        matches!(error, Error::InvalidInput(_)),
+        "expected InvalidInput, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("escapes the allowlisted roots"),
+        "the error must name the escape, got: {error}"
+    );
+}
+
+/// Objective: Verify a binary file with an extension the loader does not know is
+/// refused instead of being decoded as prose. `detect_format` falls back to
+/// `Text`, so `payload.bin` used to be stored as evidence and read back out
+/// through the evidence tools (audit H1).
+/// Invariants: NUL-bearing content under an unknown extension is InvalidInput; a
+/// `.txt` file with the same bytes is treated as text, because the extension
+/// declares it.
+#[test]
+fn attach_path_rejects_binary_content_with_an_unknown_extension() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let payload = dir.path().join("payload.bin");
+    std::fs::write(&payload, b"\x7fELF\x02\x01\x00\x00binary").expect("write binary");
+
+    let error =
+        reject_binary_content(&payload, "payload.bin").expect_err("binary content must be refused");
+    assert!(
+        matches!(error, Error::InvalidInput(_)),
+        "expected InvalidInput, got {error:?}"
+    );
+    assert!(
+        error.to_string().contains("looks binary"),
+        "the error must state the reason, got: {error}"
+    );
+
+    let text = dir.path().join("notes.txt");
+    std::fs::write(&text, "刘备很高兴。").expect("write text");
+    reject_binary_content(&text, "notes.txt").expect("text content passes");
+}

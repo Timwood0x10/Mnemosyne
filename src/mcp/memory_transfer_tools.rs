@@ -99,9 +99,36 @@ const TRANSFER_DIR: &str = "exports";
 /// Rejects absolute paths and any path that escapes `./exports` via `..`
 /// segments, so a remote client can never touch files outside the sandbox.
 ///
+/// Resolve the longest EXISTING prefix of `path` and re-attach the rest.
+///
+/// `canonicalize` requires every component to exist, and an export target
+/// usually does not (the parent directory is created right *after* this check).
+/// Resolving the existing prefix still defeats the escape this guards against: a
+/// symlink can only be traversed when it exists, so the components that could
+/// carry the path out of the sandbox are exactly the ones that get resolved.
+fn canonicalize_existing_prefix(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut missing_tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(mut resolved) = existing.canonicalize() {
+            // Re-attach in original order: `missing_tail` was built leaf-first.
+            for part in missing_tail.iter().rev() {
+                resolved.push(part);
+            }
+            return Some(resolved);
+        }
+        let name = existing.file_name()?.to_os_string();
+        missing_tail.push(name);
+        if !existing.pop() {
+            return None;
+        }
+    }
+}
+
 /// # Errors
 ///
-/// Returns `InvalidInput` when the path is absolute or escapes the directory.
+/// Returns `InvalidInput` when the path is absolute, escapes the directory, or
+/// cannot be resolved.
 fn resolve_transfer_path(path: &str) -> Result<std::path::PathBuf> {
     let base = std::path::Path::new(TRANSFER_DIR);
     let p = std::path::Path::new(path);
@@ -128,13 +155,28 @@ fn resolve_transfer_path(path: &str) -> Result<std::path::PathBuf> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    if normalized.starts_with(base) {
-        Ok(normalized)
-    } else {
-        Err(Error::InvalidInput(format!(
+    if !normalized.starts_with(base) {
+        return Err(Error::InvalidInput(format!(
             "path escapes `{TRANSFER_DIR}/`; rejected: {path}"
-        )))
+        )));
     }
+    // Lexical normalization is not enough: `starts_with` compares TEXT, so a
+    // symlink inside `exports/` pointing anywhere passed the check while the
+    // write (or read) followed it out of the sandbox. Resolving both sides makes
+    // the comparison about what the paths actually are (audit H1).
+    let resolved = canonicalize_existing_prefix(&normalized)
+        .ok_or_else(|| Error::InvalidInput(format!("cannot resolve `{path}`; rejected")))?;
+    let resolved_base = canonicalize_existing_prefix(base).ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "`{TRANSFER_DIR}/` does not exist yet; create it first; rejected: {path}"
+        ))
+    })?;
+    if resolved_base.starts_with(&resolved) || !resolved.starts_with(&resolved_base) {
+        return Err(Error::InvalidInput(format!(
+            "path escapes `{TRANSFER_DIR}/` after resolving links; rejected: {path}"
+        )));
+    }
+    Ok(resolved)
 }
 
 /// Build a graceful error [`ToolCallResult`] (protocol success, content error).
@@ -444,6 +486,46 @@ mod tests {
         assert!(
             text.contains("invalid memory bundle"),
             "clear error, got: {text}"
+        );
+    }
+
+    /// Objective: Verify the transfer sandbox resolves symlinks instead of
+    /// trusting the path text. It compared prefixes lexically, so a link placed
+    /// inside `exports/` passed the check while the write followed it out of the
+    /// allowlist — and the same helper gates imports, so it was a read too
+    /// (audit H1).
+    /// Invariants: a link resolving outside `exports/` is rejected; a plain
+    /// nested target that does not exist yet still resolves inside the allowlist.
+    #[cfg(unix)]
+    #[test]
+    fn transfer_path_rejects_symlinks_that_leave_the_allowlist() {
+        std::fs::create_dir_all(TRANSFER_DIR).expect("create exports dir");
+        let link = format!("{TRANSFER_DIR}/escape-link.json");
+        let link_path = std::path::Path::new(&link);
+        let _ = std::fs::remove_file(link_path);
+        std::os::unix::fs::symlink("/etc/hosts", link_path).expect("create symlink");
+
+        let error = resolve_transfer_path(&link)
+            .expect_err("a link pointing outside the allowlist must be refused");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "expected InvalidInput, got {error:?}"
+        );
+        assert!(
+            error.to_string().contains("escapes"),
+            "the error must name the escape, got: {error}"
+        );
+        std::fs::remove_file(link_path).expect("remove symlink");
+
+        let nested = format!("{TRANSFER_DIR}/nested/plain.json");
+        let resolved = resolve_transfer_path(&nested)
+            .expect("a not-yet-created target inside the allowlist must resolve");
+        let base = std::path::Path::new(TRANSFER_DIR)
+            .canonicalize()
+            .expect("canonical exports dir");
+        assert!(
+            resolved.starts_with(&base) && resolved.ends_with("plain.json"),
+            "expected a path under {base:?}, got {resolved:?}"
         );
     }
 }

@@ -267,7 +267,7 @@ impl MemoryCompileTool {
             if let Err(Error::NotFound(_)) = crate::mcp::tenant_scope::ensure_entity_tenant(
                 &self.fact_store,
                 decision.subject,
-                Some(tenant_id),
+                tenant_id,
             ) {
                 reports.push(serde_json::json!({
                     "decision_id": decision_id,

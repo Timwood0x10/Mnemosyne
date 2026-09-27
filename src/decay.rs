@@ -273,18 +273,37 @@ fn access_score(access_count: u64, config: &DecayConfig) -> f64 {
     1.0 - (1.0 - base) * (1.0 - config.decay_factor)
 }
 
-/// Read the optional `importance` field from the fact payload (default 0.5).
+/// The importance signal for a fact: an explicit payload override, else the
+/// fact's epistemic confidence.
+///
+/// The payload key cannot be the only source. NO production constructor writes
+/// an `importance` field (`persona::signal_to_fact`, the conversation and
+/// observation compilers, `agent_facts`, `commitment::anchor_fact` all omit it),
+/// so every fact scored the same default of 0.5 — which is *below* any threshold
+/// an operator would sensibly configure. Raising `importance_threshold` to 0.6
+/// therefore satisfied `decay_score < 1.0` for every unprotected fact and one
+/// background tick archived the entire store (audit C6).
+///
+/// `Fact::confidence` is the signal the producers do fill in (per-epistemic
+/// trust, populated from persona signal scores), so it is what an absent payload
+/// override falls back to.
 fn extract_importance(fact: &Fact) -> f64 {
     fact.payload
         .get("importance")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.5)
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or_else(|| fact.confidence.clamp(0.0, 1.0))
 }
 
 /// Read the optional `access_count` field from the fact payload.
 ///
 /// `None` means "no access history recorded" — distinct from an explicit `0`
 /// ("recorded as never accessed"), which is a real signal and does decay.
+///
+/// Nothing in production writes this field either, so in practice
+/// [`DecayStrategy::AccessFrequencyBased`] never down-weights anything and the
+/// access component of [`DecayStrategy::Hybrid`] is always 1.0. That is the safe
+/// direction (an unknown history must not be treated as "never accessed"), but it
+/// means `access_threshold` is inert until a producer records accesses.
 fn extract_access_count(fact: &Fact) -> Option<u64> {
     fact.payload
         .get("access_count")
@@ -776,5 +795,52 @@ mod tests {
         assert_eq!(cfg.importance_threshold, 0.4);
         assert_eq!(cfg.access_threshold, 3);
         assert_eq!(cfg.decay_factor, 0.7);
+    }
+
+    /// Objective: Verify importance falls back to the fact's CONFIDENCE. No
+    /// production constructor writes an `importance` payload key, so a fixed
+    /// default of 0.5 made every fact look identical — and any threshold above
+    /// 0.5 (a perfectly sensible-looking 0.6) satisfied `decay_score < 1.0` for
+    /// every unprotected fact, so one background tick archived the whole store
+    /// (audit C6).
+    /// Invariants: under a 0.6 threshold a confident fact stays fresh, a
+    /// low-confidence fact is the one that decays, and an explicit payload
+    /// override still wins over the confidence.
+    #[test]
+    fn importance_falls_back_to_confidence() {
+        let config = DecayConfig {
+            strategy: DecayStrategy::ImportanceBased,
+            importance_threshold: 0.6,
+            ..DecayConfig::default()
+        };
+        let confident = Fact {
+            confidence: 0.9,
+            ..fact(None, FactType::Event, 0, json!({}))
+        };
+        let unsure = Fact {
+            confidence: 0.2,
+            ..fact(None, FactType::Event, 0, json!({}))
+        };
+
+        assert_eq!(
+            compute_decay(&confident, &config, 0).decay_score,
+            1.0,
+            "a confident fact must not be decayed by a threshold it clears"
+        );
+        assert!(
+            compute_decay(&unsure, &config, 0).should_archive,
+            "a low-confidence fact is what the importance strategy should decay"
+        );
+
+        let overridden = Fact {
+            confidence: 0.1,
+            payload: json!({"importance": 0.9}),
+            ..fact(None, FactType::Event, 0, json!({}))
+        };
+        assert_eq!(
+            compute_decay(&overridden, &config, 0).decay_score,
+            1.0,
+            "an explicit payload importance still overrides the confidence"
+        );
     }
 }

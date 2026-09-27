@@ -267,7 +267,7 @@ mod tests {
             "流苏说道：我一个人惯了。范柳原笑道：你何苦这样。流苏又说道：我宁可一个人走夜路。",
             "text",
         );
-        let stats = compile_source(&source, conversation_profile(), &store, "t1")
+        let stats = compile_source(&source, conversation_profile(), &store)
             .await
             .expect("compile");
         // Events were materialized: prose with a discovered cast produces
@@ -311,7 +311,7 @@ mod tests {
                 "我喜欢简洁架构，目标是长期稳定。",
             )],
         );
-        let stats = compile_source(&source, &profile, &store, "t1")
+        let stats = compile_source(&source, &profile, &store)
             .await
             .expect("compile");
         assert_eq!(stats.objects, 0, "dialog creates no anchor entity");
@@ -330,10 +330,10 @@ mod tests {
             "流苏说道：我一个人惯了。范柳原笑道：你何苦这样。",
             "text",
         );
-        let first = compile_source(&source, conversation_profile(), &store, "t1")
+        let first = compile_source(&source, conversation_profile(), &store)
             .await
             .expect("first");
-        let second = compile_source(&source, conversation_profile(), &store, "t1")
+        let second = compile_source(&source, conversation_profile(), &store)
             .await
             .expect("second");
         assert_eq!(

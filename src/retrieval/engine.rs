@@ -350,6 +350,22 @@ impl RetrievalEngine {
     }
 }
 
+/// Whether `c` belongs to a script written WITHOUT spaces between words.
+///
+/// Han ideographs (`is_alphanumeric() == true`, no separators) are what makes the
+/// splitting rule below useless for Chinese text: `「刘备很高兴。」` is a single
+/// run. The ranges are the CJK Unified Ideographs blocks plus the Compatibility
+/// and Extension-A..F planes; the shipped corpora are Chinese, and other
+/// unspaced scripts (kana, Hangul) are out of scope until a pack needs them.
+fn is_han(c: char) -> bool {
+    matches!(c as u32,
+        0x3400..=0x4DBF        // Extension A
+        | 0x4E00..=0x9FFF      // Unified Ideographs
+        | 0xF900..=0xFAFF      // Compatibility Ideographs
+        | 0x2_0000..=0x2_FA1F  // Extensions B..F
+    )
+}
+
 pub(crate) fn tokenize(text: &str) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
         "a", "an", "the", "and", "or", "but", "is", "are", "was", "were", "be", "been", "being",
@@ -359,16 +375,36 @@ pub(crate) fn tokenize(text: &str) -> Vec<String> {
         "after", "above", "below", "between", "under", "i", "you", "he", "she", "it", "we", "they",
         "me", "him", "her", "us", "them", "my", "your", "his", "its", "our", "their",
     ];
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter_map(|s| {
-            let lower = s.to_lowercase();
-            if lower.is_empty() || lower.len() == 1 || STOPWORDS.contains(&lower.as_str()) {
-                None
+    let mut terms = Vec::new();
+    for run in text.split(|c: char| !c.is_alphanumeric()) {
+        if run.is_empty() {
+            continue;
+        }
+        // A Han run carries no spaces, so the split above leaves it whole and a
+        // query term can never match it: `刘备` did not appear in the token list
+        // of `刘备很高兴。`, `bm25_score` returned 0 for that row, and the keyword
+        // search dropped every Chinese row — empty results whenever embeddings
+        // were enabled (audit C8). Overlapping character bigrams fix that, and
+        // because the QUERY is tokenized the same way, a two-character query term
+        // is the same bigram the document produced.
+        if run.chars().any(is_han) {
+            let chars: Vec<char> = run.chars().collect();
+            if chars.len() == 1 {
+                // No bigram to build; keeping the single character is what makes
+                // a one-character query match at all.
+                terms.push(chars[0].to_string());
             } else {
-                Some(lower)
+                terms.extend(chars.windows(2).map(|w| w.iter().collect::<String>()));
             }
-        })
-        .collect()
+            continue;
+        }
+        let lower = run.to_lowercase();
+        if lower.len() == 1 || STOPWORDS.contains(&lower.as_str()) {
+            continue;
+        }
+        terms.push(lower);
+    }
+    terms
 }
 
 /// Compute a BM25-style score for a query against a document.
@@ -386,11 +422,14 @@ pub(crate) fn bm25_score(query_terms: &[String], document: &str) -> f64 {
         return 0.0;
     }
     const K1: f64 = 1.2;
-    let doc_lower = document.to_lowercase();
-    let doc_terms: Vec<&str> = doc_lower.split(|c: char| !c.is_alphanumeric()).collect();
+    // The document goes through the SAME tokenizer as the query — including the
+    // Han bigram rule — so the two sides cannot disagree about what a term is
+    // (audit C8: they used to split differently in effect, because a whole
+    // Chinese sentence stayed one token no query could match).
+    let doc_terms = tokenize(document);
     let mut score = 0.0_f64;
     for qterm in query_terms {
-        let term_freq = doc_terms.iter().filter(|t| **t == qterm.as_str()).count();
+        let term_freq = doc_terms.iter().filter(|t| *t == qterm).count();
         if term_freq > 0 {
             let tf = term_freq as f64;
             score += tf / (tf + K1);

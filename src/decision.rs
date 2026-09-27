@@ -109,6 +109,21 @@ pub struct Decision {
 /// Validate a decision before persistence.
 ///
 /// Returns the first invalid field name, or `None` when valid.
+/// Maximum stored length of a decision's `verb`, in CHARACTERS.
+pub const MAX_VERB_CHARS: usize = 64;
+
+/// Maximum stored length of a decision's `object`, in CHARACTERS.
+///
+/// Characters, not bytes. The commitment extractor stores the whole utterance
+/// truncated with `truncate_chars` (`commitment.rs`), so a byte-count comparison
+/// here rejected exactly the long Chinese messages that truncation exists to make
+/// storable: 512 characters of Chinese is 1536 bytes, the validator said
+/// `Some("object")`, and `insert_compilation` validates every decision *before*
+/// opening its transaction — so one long message aborted the entire compile
+/// (audit C5). Both sides now read this constant, so they cannot drift apart
+/// again.
+pub const MAX_OBJECT_CHARS: usize = 512;
+
 #[must_use]
 pub fn validate_decision(decision: &Decision) -> Option<&'static str> {
     if decision.subject <= 0 {
@@ -120,10 +135,10 @@ pub fn validate_decision(decision: &Decision) -> Option<&'static str> {
     if decision.object.trim().is_empty() {
         return Some("object");
     }
-    if decision.verb.len() > 64 {
+    if decision.verb.chars().count() > MAX_VERB_CHARS {
         return Some("verb");
     }
-    if decision.object.len() > 512 {
+    if decision.object.chars().count() > MAX_OBJECT_CHARS {
         return Some("object");
     }
     None
@@ -253,5 +268,43 @@ mod tests {
         let fresh = sample_decision();
         assert_eq!(fresh.outcome, None);
         assert_eq!(fresh.status, DecisionStatus::Open);
+    }
+
+    /// Objective: Verify the length limits count CHARACTERS, not bytes. Counting
+    /// bytes rejected every long Chinese decision: the extractor truncates with
+    /// `truncate_chars`, so a 512-character object is 1536 bytes and the write
+    /// validator refused what the extractor had just produced — aborting the
+    /// entire compile for that utterance (audit C5).
+    /// Invariants: exactly the cap passes even in Chinese; one character past it
+    /// is rejected as "object"; the verb limit works the same way.
+    #[test]
+    fn length_limits_count_characters_not_bytes() {
+        let mut at_cap = sample_decision();
+        at_cap.object = "中".repeat(MAX_OBJECT_CHARS);
+        assert!(
+            at_cap.object.len() > MAX_OBJECT_CHARS,
+            "the fixture must exceed the cap in BYTES for this test to mean anything"
+        );
+        assert_eq!(
+            validate_decision(&at_cap),
+            None,
+            "a cap-length Chinese object must pass"
+        );
+
+        let mut over_cap = sample_decision();
+        over_cap.object = "中".repeat(MAX_OBJECT_CHARS + 1);
+        assert_eq!(
+            validate_decision(&over_cap),
+            Some("object"),
+            "one character past the cap must be rejected"
+        );
+
+        let mut long_verb = sample_decision();
+        long_verb.verb = "v".repeat(MAX_VERB_CHARS + 1);
+        assert_eq!(
+            validate_decision(&long_verb),
+            Some("verb"),
+            "the verb limit is enforced the same way"
+        );
     }
 }

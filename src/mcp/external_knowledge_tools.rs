@@ -24,7 +24,7 @@
 //! - `agent_fact_compile` defaults to `include_agent_facts=false` so the
 //!   agent channel is opt-in (plan §C2: "agent 不替用户表态").
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -144,6 +144,115 @@ fn rebuild_linker(
     *guard = fresh;
 }
 
+/// Whether `path` names engine configuration or state rather than source text.
+///
+/// The allowlist is the whole resource root, which is the installation
+/// directory — where `config/`, the SQLite databases and (in a real deployment)
+/// credentials live. A client could therefore attach `config/…` or a `.db` file
+/// and read it back out through the evidence tools, which is a file-read
+/// primitive rather than an attach (audit H1). These names are refused outright;
+/// corpus text is unaffected.
+fn is_denied_content_path(path: &Path) -> bool {
+    // A `config` component anywhere in the path is engine configuration: the
+    // shipped tables there describe the runtime, not the corpus.
+    if path
+        .components()
+        .any(|component| component.as_os_str() == "config")
+    {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        // A directory, or a name we cannot read: nothing to attach.
+        return true;
+    };
+    let name = name.to_ascii_lowercase();
+    if name.starts_with(".env") {
+        return true;
+    }
+    const DENIED_SUFFIXES: &[&str] = &[
+        ".db",
+        ".db-wal",
+        ".db-shm",
+        ".db-journal",
+        ".sqlite",
+        ".sqlite3",
+    ];
+    DENIED_SUFFIXES.iter().any(|suffix| name.ends_with(suffix))
+}
+
+/// Reject a file whose bytes are not text.
+///
+/// `detect_format` falls back to `Text` for an extension it does not know, so a
+/// binary file used to be decoded as text and stored as evidence — which turned
+/// attach into "read any host file and fetch it back through the evidence tool"
+/// (audit H1). A NUL byte is the classic binary marker and costs one pass over
+/// the first block. Recognised binary formats (PDF) are exempt: they have a real
+/// parser and are expected to contain NUL.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when the head of the file contains a NUL byte,
+/// or [`Error::Io`] when it cannot be read.
+fn reject_binary_content(path: &Path, original: &str) -> Result<(), Error> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(Error::Io)?;
+    let mut head = [0_u8; 8192];
+    let read = file.read(&mut head).map_err(Error::Io)?;
+    if head[..read].contains(&0) {
+        return Err(Error::InvalidInput(format!(
+            "`{original}` looks binary (NUL byte within the first {read} bytes); \
+             only text documents are attachable"
+        )));
+    }
+    Ok(())
+}
+
+/// Confirm that a normalized path is inside one of `roots` and names something
+/// the attach tool may read, then return its canonical form.
+///
+/// The lexical checks above are not sufficient on their own:
+///
+/// - **Symlinks.** `starts_with` compares the *text* of a path, so a link placed
+///   inside an allowlisted directory (`root/link -> /etc`) passed the check while
+///   the read followed it straight out of the sandbox. `canonicalize` resolves
+///   links, so the allowlist is applied to what the path actually *is*; the roots
+///   are canonicalized too, because on macOS the temp directory is `/var/…` while
+///   the resolved path is `/private/var/…` and comparing the two forms would
+///   reject legitimate files.
+/// - **Engine state**, see [`is_denied_content_path`] — checked before the read
+///   and again afterwards, because a link can point INTO `config/`.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when the path cannot be resolved, escapes
+/// every allowlisted root, or names engine configuration or a database.
+fn verify_attachable(path: PathBuf, roots: &[PathBuf], original: &str) -> Result<PathBuf, Error> {
+    if is_denied_content_path(&path) {
+        return Err(Error::InvalidInput(format!(
+            "engine configuration and database files are not attachable; rejected: {original}"
+        )));
+    }
+    let resolved = path
+        .canonicalize()
+        .map_err(|e| Error::InvalidInput(format!("cannot resolve `{original}`: {e}")))?;
+    let inside = roots.iter().any(|root| {
+        root.canonicalize()
+            .is_ok_and(|root| resolved.starts_with(root))
+    });
+    if !inside {
+        return Err(Error::InvalidInput(format!(
+            "path escapes the allowlisted roots; rejected: {original}"
+        )));
+    }
+    if is_denied_content_path(&resolved) {
+        return Err(Error::InvalidInput(format!(
+            "engine configuration and database files are not attachable; rejected: {original}"
+        )));
+    }
+    Ok(resolved)
+}
+
 /// Resolve a client-supplied knowledge path inside an allowlisted root.
 ///
 /// Policy (mirrors `memory_transfer_tools::resolve_transfer_path` for
@@ -180,12 +289,12 @@ fn resolve_knowledge_path(path: &str) -> Result<PathBuf, Error> {
                 other => normalized.push(other.as_os_str()),
             }
         }
-        if normalized.starts_with(&temp) || normalized.starts_with(&root) {
-            return Ok(normalized);
+        if !(normalized.starts_with(&temp) || normalized.starts_with(&root)) {
+            return Err(Error::InvalidInput(format!(
+                "absolute path must live under the resource root or the system temp directory; rejected: {path}"
+            )));
         }
-        return Err(Error::InvalidInput(format!(
-            "absolute path must live under the resource root or the system temp directory; rejected: {path}"
-        )));
+        return verify_attachable(normalized, &[temp, root], path);
     }
 
     // Relative: join onto the resource root and reject `..` escapes.
@@ -209,7 +318,7 @@ fn resolve_knowledge_path(path: &str) -> Result<PathBuf, Error> {
             "path escapes the resource root; rejected: {path}"
         )));
     }
-    Ok(normalized)
+    verify_attachable(normalized, &[root], path)
 }
 
 // ── knowledge_attach ────────────────────────────────────────────────────────
@@ -262,6 +371,18 @@ impl KnowledgeAttachHandler {
         // client could `knowledge_attach {path:"/etc/passwd"}` then
         // `knowledge_ingest` and read arbitrary host files through `evidence`.
         let load_path = resolve_knowledge_path(&path)?;
+        // The rule is "the loader is about to treat these bytes as prose": a
+        // `.txt` file promises to be text and a PDF is expected to be binary, but
+        // an extension the loader does not recognise (`notes.bin`, or none at
+        // all) falls back to `Text` and would be decoded as prose — which is the
+        // case that has to be checked.
+        let declared_text = load_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"));
+        if format::detect_format(&load_path) == FormatKind::Text && !declared_text {
+            reject_binary_content(&load_path, &path)?;
+        }
 
         // Load the file through the multi-format loader (PDF/JSON/TXT/MD).
         // File reads (and PDF inflation for large PDFs) are blocking, so the
