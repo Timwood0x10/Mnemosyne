@@ -114,7 +114,7 @@ sequenceDiagram
 | Implementation | Use case | Key points |
 |---|---|---|
 | `StdioTransport` | local IDE integration | line-delimited JSON-RPC over stdin/stdout |
-| `HttpTransport` | remote serving | per-session SSE isolation (`x-mcp-session-id`), mandatory `--http-token` auth, constant-time comparison |
+| `HttpTransport` | remote serving | server-issued session ids (`Mcp-Session-Id`, missing → 400 / unknown → 404), idle reclamation, mandatory `--http-token` auth, constant-time comparison |
 
 ## 4. Narrative compilation pipeline (compiler/)
 

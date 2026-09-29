@@ -111,6 +111,19 @@ impl ConflictResolver {
             // Different type: not a conflict for replacement purposes.
             return Resolution::KeepBoth;
         }
+        // Byte-identical content of the same type IS the same memory, so it is
+        // replaced rather than kept alongside: distillation is deterministic, so
+        // re-running it over the same conversation produced identical content and
+        // identical importance, the `>` test below failed, and the `KeepBoth` arm
+        // inserted another copy EVERY round — unbounded growth out of a repeatable
+        // operation (audit C7). The keyword path in `pipeline` already collapsed
+        // such duplicates; this is the same rule for the vector path.
+        if new_memory.content == existing.content {
+            return Resolution::ReplaceOld {
+                old_id: existing.id.clone(),
+                new_memory: Box::new(new_memory.clone()),
+            };
+        }
         if new_memory.importance > existing_confidence {
             Resolution::ReplaceOld {
                 old_id: existing.id.clone(),
@@ -296,20 +309,58 @@ mod tests {
         }
     }
 
-    /// Objective: Verify high-similarity but lower-importance new memory yields KeepBoth.
-    /// Invariants: Resolve yields KeepBoth when new importance <= existing confidence.
+    /// Objective: Verify high-similarity but lower-importance new memory yields
+    /// KeepBoth — the two are DIFFERENT phrasings of a similar thing, so both are
+    /// worth keeping. Identical content is the separate case (below).
+    /// Invariants: Resolve yields KeepBoth when the content differs and the new
+    /// importance <= existing confidence.
     #[test]
     fn resolve_keep_both_when_new_importance_lower() {
         let resolver = ConflictResolver::new(0.85);
         let v = vec![1.0_f32, 0.0, 0.0];
-        let existing = mem_with_vector("t1", MemoryType::Knowledge, v.clone(), 0.5);
-        let new_memory = mem_with_vector("t1", MemoryType::Knowledge, v.clone(), 0.3);
+        let mut existing = mem_with_vector("t1", MemoryType::Knowledge, v.clone(), 0.5);
+        existing.content = "problem: connection refused".to_string();
+        let mut new_memory = mem_with_vector("t1", MemoryType::Knowledge, v.clone(), 0.3);
+        new_memory.content = "the port was already in use".to_string();
         let resolution = resolver.resolve(&new_memory, &existing, 0.5);
         assert_eq!(
             resolution,
             Resolution::KeepBoth,
-            "lower importance -> KeepBoth"
+            "lower importance with different content -> KeepBoth"
         );
+    }
+
+    /// Objective: Verify byte-identical content is replaced even when the
+    /// importance TIES. Distillation is deterministic, so re-running it produced
+    /// identical content and identical importance; the `>` comparison then fell
+    /// through to `KeepBoth` and inserted another copy on every round — the memory
+    /// count grew without bound from a repeatable operation (audit C7).
+    /// Invariants: identical content → ReplaceOld regardless of importance, and a
+    /// lower-importance identical twin is replaced too.
+    #[test]
+    fn resolve_replaces_identical_content_even_when_importance_ties() {
+        let resolver = ConflictResolver::new(0.85);
+        let v = vec![1.0_f32, 0.0, 0.0];
+        for (new_importance, label) in [(0.5_f64, "tied"), (0.2, "lower")] {
+            let mut existing = mem_with_vector("t1", MemoryType::Knowledge, v.clone(), 0.5);
+            existing.content = "problem: connection refused".to_string();
+            existing.id = "old".to_string();
+            let mut new_memory =
+                mem_with_vector("t1", MemoryType::Knowledge, v.clone(), new_importance);
+            new_memory.content = "problem: connection refused".to_string();
+
+            match resolver.resolve(&new_memory, &existing, 0.5) {
+                Resolution::ReplaceOld { old_id, .. } => {
+                    assert_eq!(
+                        old_id, "old",
+                        "{label} importance: the old row is superseded"
+                    );
+                }
+                other => {
+                    panic!("{label} importance: identical content must be replaced, got {other:?}")
+                }
+            }
+        }
     }
 
     /// Objective: Verify low-similarity vectors yield NoConflict.

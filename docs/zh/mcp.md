@@ -120,8 +120,10 @@ flowchart LR
 ### 4.3 为什么 HTTP 要会话隔离 + 强制鉴权？
 
 **抉择**（`http_server.rs`）：
-- 每个客户端携带 `x-mcp-session-id`，`AppState` 维护
-  `session_id → broadcast::Sender` 映射；`HttpTransport::send` 按当前会话路由到专属频道。
+- **会话 id 由服务端签发**（`initialize` 的响应头 `Mcp-Session-Id`，兼容读取
+  `x-mcp-session-id`）；`AppState` 维护 `session_id → broadcast::Sender` 映射并回收空闲会话，
+  `HttpTransport::send` 按当前会话路由到专属频道。
+- 未带会话头 → 400、未签发的 id → 404；没有全局广播兜底，因此没有"不传就串台"的路径。
 - HTTP 模式未提供 `--http-token` 拒绝启动；token 比较用常量时间（XOR 全缓冲）。
 
 **为什么**：

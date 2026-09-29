@@ -111,7 +111,7 @@ sequenceDiagram
 | 实现 | 用途 | 关键点 |
 |---|---|---|
 | `StdioTransport` | 本地 IDE 接入 | stdin/stdout 逐行 JSON-RPC |
-| `HttpTransport` | 远程服务 | SSE 会话隔离（`x-mcp-session-id` 专属频道）、HTTP 强制 `--http-token` 鉴权、常量时间比较 |
+| `HttpTransport` | 远程服务 | 服务端签发会话 id（`Mcp-Session-Id` 专属频道，未带→400 / 未知→404）、空闲会话回收、HTTP 强制 `--http-token` 鉴权、常量时间比较 |
 
 ## 4. 叙事编译流水线（compiler/）
 

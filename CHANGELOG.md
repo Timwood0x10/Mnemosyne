@@ -585,6 +585,30 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   signal the producers do fill in, while an explicit payload value still wins.
   `access_count` has no producer either; that is safe (an unknown access history
   must not count as "never accessed") and is now documented where it is read.
+- **HTTP sessions were whatever the client called itself.** The server never
+  issued a session id and accepted any string, so presenting `"1"` or `"default"`
+  was enough to subscribe to another client's replies — and a client that sent no
+  header at all shared a global broadcast with every other subscriber, so two
+  clients received each other's responses. `initialize` now **mints** an
+  unguessable id and returns it in `Mcp-Session-Id` (the legacy
+  `x-mcp-session-id` spelling is still read); `POST /message` and `GET /sse`
+  refuse a request that presents none (400) or one this server did not issue
+  (404); and the global broadcast is gone, so a reply with no session to route to
+  is dropped and logged instead of being fanned out. **This changes the HTTP
+  contract**: a client must call `initialize` and then send the returned id on
+  every later request (both READMEs and `docs/{zh,en}/mcp.md` updated).
+- **Idle HTTP sessions were never reclaimed.** Nothing removed a session when a
+  client disconnected, so every client that went away left a 1024-slot broadcast
+  channel behind for the life of the process. Sessions idle for more than
+  `SESSION_TTL` (30 minutes) are dropped on the next session operation.
+- **Re-distilling the same conversation grew the store without bound.** Conflict
+  resolution compares importance and keeps both when the new memory is not
+  strictly more important — but distillation is deterministic, so a second pass
+  over the same messages produced identical content, identical importance, and
+  therefore another copy, every round. Byte-identical content of the same type is
+  now replaced: it IS the same memory, and the keyword path already collapsed
+  such duplicates.
+
 - **The tenant check on the id-addressed tools could be skipped by omitting
   the argument.** `tenant_scope::ensure_entity_tenant` returned `Ok(())` when the
   caller sent no `tenant_id`, so the guard only *looked* like isolation: a client
@@ -651,6 +675,11 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   tests moved to `src/fact_store/tests.rs`, which keeps access to the private
   schema helpers (`conversation_compiler/tests.rs` and
   `compiler/profile/tests.rs` use the same split).
+- **`src/mcp/http_server.rs` and `src/distiller/mod.rs` split** (http_server:
+  962 → 589 lines with `mcp/http_server_tests.rs`; distiller: 989 → 230 lines
+  with `src/distiller/tests.rs`), for the one-file-per-1000-lines rule. The HTTP
+  tests were also rewritten around the session contract and now cover issuance,
+  rejection of missing/unknown ids, and idle eviction.
 - **`src/store/mod.rs` split** (1024 → 424 lines, tests moved to
   `src/store/tests.rs`) for the one-file-per-1000-lines rule.
 - **The FK-safe transaction wrapper is public** (`with_foreign_keys_disabled`):

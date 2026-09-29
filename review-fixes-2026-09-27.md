@@ -311,3 +311,69 @@ H1（`knowledge_attach` 的路径穿越）、H5（AhoCorasick 匹配模式），
 
 **已关闭**：C1、C2、C3、C5、C6、C8、H1、H3、H4、H5、H6（含此前记在 §6/§7 的条目）。
 **仍未处理**：C4（http session 生命周期）、C7 的"平分重复被保留"那一半、H7–H21。
+
+## 9. 第五批修复（2026-09-27，C4 / C7 后半 / H8）
+
+### 9.1 C4 · HTTP 会话隔离靠客户端自封 + 无会话走全局广播
+
+**先纠正一个前提**：我此前以为 HTTP 传输是 0.1.3 移除 `--sse-addr` 后留下的死代码 —— **不是**。
+`main.rs:703` 在 `--transport http` 下调用 `serve_http_addr`，所以这是**真实可达**的网络暴露面。
+
+**问题（两条独立缺陷）**：
+
+1. 服务端**从不签发** session id，也**从不校验**：任何字符串都会 `entry().or_insert_with(...)` 新建频道，
+   于是猜到别人的 id（`"1"`、`"default"`）就能订阅到别人的全部响应；而规范拼写 `Mcp-Session-Id`
+   **根本没被读取**，被静默当成"无会话"。
+2. 两个客户端都**不带**头时，所有响应进全局广播 → 两个 SSE 订阅者**互相收到对方响应**。
+
+**修法**：
+
+- `initialize` 由服务端**签发** `uuid::Uuid::new_v4()`，放在响应头 `Mcp-Session-Id`（兼容读取旧拼写 `x-mcp-session-id`）；
+- `POST /message` 与 `GET /sse` 都**强制**：没带 → 400，带了但**不是服务端签发的** → 404；
+- **删除全局广播通道**（`AppState.response_tx` / `HttpTransport.response_tx` 一并移除），无会话的响应改为**丢弃 + warn**，
+  而不是扇出给所有订阅者；
+- `message_handler` 拆成"裁决会话 → `forward_message` 转发 → 回写签发头"三段，界限清晰可测。
+
+**行为变更**：HTTP 客户端现在必须 `initialize` 一次并携带返回的 id（两处 README、`docs/{zh,en}/mcp.md`、
+`docs/{zh,en}/architecture.md` 已同步）。
+
+### 9.2 C7 后半 · 平局重复被保留（堆数据）
+
+R9 已经修掉"跨事务先删后插"（`replace_batch` 单事务）。剩下的是另一半：`resolver` 比较 importance，
+"新的不严格大于旧的"就 `KeepBoth` —— 而蒸馏是**确定性**的，重复蒸馏同一批对话得到**字节相同**的内容与相同 importance，
+于是**每轮多插一份**，无限增长。而同一函数的 keyword 路径对同样的平局**是丢弃**的（两条路径行为相反）。
+
+**修法**：**同类型 + 内容字节相同**一律 `ReplaceOld`（它就是同一条记忆）✓ 两条路径语义一致。
+补两条测试：`resolver` 单元测试（平局/更低 importance 都替换，且旧行 id 正确）+ 端到端
+`repeated_distillation_does_not_grow_the_store`（跑两轮，记忆数不变）。
+
+### 9.3 H8 · session map 永不回收（内存耗尽）
+
+与 C4 同一处代码：客户端断开时没有任何清理，每个离场客户端给进程留下一个 1024 槽广播频道。
+
+**修法**：`SessionEntry { sender, last_seen }` + `SESSION_TTL`（30 分钟），每次会话操作时惰性回收
+（`evict_stale_sessions`），并加纯逻辑单元测试（过期被清、新的保留）。
+
+### 9.4 顺带的两处拆分
+
+| 文件 | 原因 | 结果 |
+|---|---|---|
+| `src/mcp/http_server.rs` | 加完会话逻辑后 962 行贴线 | 589 行 + `mcp/http_server_tests.rs`（610） |
+| `src/distiller/mod.rs` | 加完 C7 测试后 989 行贴线 | 230 行 + `src/distiller/tests.rs`（764） |
+
+HTTP 测试同时按新契约重写（签发 / 缺失 400 / 未知 404 / 空闲回收），并修掉一个被旧全局广播掩盖的真实测试缺陷：
+`post_message_returns_response_body_without_sse` 里 handler 与 transport 用**两个不同的 session map**。
+
+### 9.5 验证结果（第五批）
+
+| 检查 | 结果 |
+|---|---|
+| `make test` | ✅ **908 passed / 0 failed / 12 skipped** |
+| `cargo test --lib -- mcp::http_server --include-ignored` | ✅ **13 passed**（8 个 `#[ignore]` 的 HTTP 用例全部实跑通过） |
+| `make check` / clippy | ✅ 0 error / **0 warning** |
+| `cargo fmt --all --check` | ✅ 干净 |
+| `#[allow(...)]`（规则 5） | ✅ 0 处 |
+| 单文件 ≤1000 行（规则 1） | ✅ 最大 `src/ingest/characters/data.rs` 950 |
+
+**已关闭**：C1–C8（全部 Critical）、H1、H3、H4、H5、H6、H8。
+**仍未处理**：H2 的若干子项已修（见 §5）、H7、H9–H21。

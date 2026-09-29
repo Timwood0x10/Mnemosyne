@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::Router;
 use axum::body::Body;
@@ -37,6 +38,112 @@ use crate::mcp::types::JSONRPCMessage;
 /// Maximum accepted POST body size for a single JSON-RPC message (1 MiB).
 const MAX_BODY_BYTES: usize = 1_000_000;
 
+/// HTTP header carrying the session id.
+///
+/// The MCP spelling is checked first; the lowercase `x-mcp-session-id` this
+/// server used to advertise is still read, so existing clients keep working.
+const SESSION_HEADER: &str = "mcp-session-id";
+const LEGACY_SESSION_HEADER: &str = "x-mcp-session-id";
+
+/// How long a session may stay idle before its channel is dropped.
+const SESSION_TTL: Duration = Duration::from_secs(30 * 60);
+
+/// Per-session reply buffer, in messages. A subscriber that falls behind drops
+/// the oldest replies (the client re-requests); it never blocks the server.
+const SESSION_CHANNEL_CAPACITY: usize = 1024;
+
+/// One client's private reply channel, plus when it was last used.
+///
+/// `pub(crate)` only because [`HttpTransport::new`] takes the map of them and is
+/// itself `pub(crate)`; nothing outside the crate can name this type.
+pub(crate) struct SessionEntry {
+    sender: broadcast::Sender<JSONRPCMessage>,
+    last_seen: Instant,
+}
+
+/// The sessions this server has **issued**, keyed by an unguessable id.
+type SessionMap = Arc<std::sync::Mutex<HashMap<String, SessionEntry>>>;
+
+/// Read the session id a client presented, if any.
+fn session_header(headers: &HeaderMap) -> Option<String> {
+    [SESSION_HEADER, LEGACY_SESSION_HEADER]
+        .iter()
+        .find_map(|name| headers.get(*name).and_then(|value| value.to_str().ok()))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Mint a session id.
+///
+/// Unguessable on purpose: the server used to accept whatever string a client
+/// sent (and never issued one), so presenting `"1"` or `"default"` was enough to
+/// subscribe to another client's replies (audit C4).
+fn mint_session_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+/// Drop sessions idle for longer than [`SESSION_TTL`].
+///
+/// Nothing ever removed an entry when a client went away, so every disconnect
+/// left a 1024-slot broadcast channel behind for the life of the process
+/// (audit H8). Returns how many entries were dropped.
+fn evict_stale_sessions(sessions: &mut HashMap<String, SessionEntry>, now: Instant) -> usize {
+    let before = sessions.len();
+    sessions.retain(|_, entry| now.duration_since(entry.last_seen) < SESSION_TTL);
+    before - sessions.len()
+}
+
+/// Whether this POST body carries an `initialize` request.
+///
+/// Parsed leniently: anything unreadable is NOT an initialize, so it lands in the
+/// "present a session" branch and is refused there — the client then sees the
+/// session error rather than a JSON error, which is the order the protocol needs.
+fn is_initialize(bytes: &[u8]) -> bool {
+    #[derive(serde::Deserialize)]
+    struct MethodOnly {
+        method: Option<String>,
+    }
+    let is_init = |m: &MethodOnly| m.method.as_deref() == Some("initialize");
+    if bytes.starts_with(b"[") {
+        return serde_json::from_slice::<Vec<MethodOnly>>(bytes)
+            .is_ok_and(|batch| batch.iter().any(is_init));
+    }
+    serde_json::from_slice::<MethodOnly>(bytes).is_ok_and(|m| is_init(&m))
+}
+
+/// Decide which session a request runs as, or refuse it.
+///
+/// Returns the session id and, when this call minted it, the id to echo back in
+/// the response header.
+///
+/// # Errors
+///
+/// Returns `NOT_FOUND` for a session id this server did not issue, and
+/// `BAD_REQUEST` when none was presented — except `initialize`, which is how a
+/// session is obtained in the first place.
+fn resolve_session(
+    state: &AppState,
+    presented: Option<String>,
+    bytes: &[u8],
+) -> std::result::Result<(String, Option<String>), (StatusCode, String)> {
+    match presented {
+        Some(session_id) if state.knows_session(&session_id) => Ok((session_id, None)),
+        Some(session_id) => Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown session `{session_id}`; POST `initialize` to obtain one"),
+        )),
+        None if is_initialize(bytes) => {
+            let session_id = state.issue_session();
+            Ok((session_id.clone(), Some(session_id)))
+        }
+        None => Err((
+            StatusCode::BAD_REQUEST,
+            format!("missing `{SESSION_HEADER}`; POST `initialize` to obtain one"),
+        )),
+    }
+}
+
 /// How long `POST /message` waits for the matching JSON-RPC response before
 /// falling back to `202 Accepted`. When no `/sse` stream is open the spec
 /// ("respond in POST body when no stream is open") says the server SHOULD
@@ -53,26 +160,26 @@ const POST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// only as a fallback for clients that did not supply a session id).
 pub struct HttpTransport {
     request_rx: mpsc::Receiver<(Option<String>, JSONRPCMessage)>,
-    response_tx: broadcast::Sender<JSONRPCMessage>,
     /// session id → that session's private response channel.
-    sessions: Arc<std::sync::Mutex<HashMap<String, broadcast::Sender<JSONRPCMessage>>>>,
+    sessions: SessionMap,
     /// session of the request currently being processed.
     current_session: Option<String>,
 }
 
 impl HttpTransport {
-    /// Build a transport fed by `request_rx` (each item tagged with its
-    /// session id) and published onto `response_tx` (global fallback) or the
-    /// per-session channels in `sessions`.
+    /// Build a transport fed by `request_rx`, each item tagged with the session
+    /// it belongs to; replies go to that session's own channel.
+    ///
+    /// There is deliberately no global fallback: it existed to serve requests that
+    /// named no session, which meant every `/sse` subscriber could observe every
+    /// reply (audit C4).
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         request_rx: mpsc::Receiver<(Option<String>, JSONRPCMessage)>,
-        response_tx: broadcast::Sender<JSONRPCMessage>,
-        sessions: Arc<std::sync::Mutex<HashMap<String, broadcast::Sender<JSONRPCMessage>>>>,
+        sessions: SessionMap,
     ) -> Self {
         Self {
             request_rx,
-            response_tx,
             sessions,
             current_session: None,
         }
@@ -94,25 +201,27 @@ impl Transport for HttpTransport {
     }
 
     async fn send(&mut self, msg: &JSONRPCMessage) -> Result<()> {
-        // Route to the session's private channel when one exists; otherwise
-        // fall back to the global broadcast (legacy single-client behavior).
-        // Ignore a lagged/absent subscriber: responses for late joiners are
-        // not errors — the client drives the flow via POST anyway.
-        let target = match &self.current_session {
-            Some(sid) => self
-                .sessions
+        // Route to the session's private channel. A lagged/absent subscriber is
+        // not an error: the client drives the flow via POST anyway.
+        let target = self.current_session.as_ref().and_then(|sid| {
+            self.sessions
                 .lock()
                 .expect("session map lock is not poisoned")
                 .get(sid)
-                .cloned(),
-            None => None,
-        };
+                .map(|entry| entry.sender.clone())
+        });
         match target {
             Some(tx) => {
                 let _ = tx.send(msg.clone());
             }
             None => {
-                let _ = self.response_tx.send(msg.clone());
+                // Nothing to route to. Broadcasting instead would hand this reply
+                // to every `/sse` subscriber — the leak the session map exists to
+                // prevent (audit C4) — so it is dropped and reported.
+                tracing::warn!(
+                    session = self.current_session.as_deref().unwrap_or("<none>"),
+                    "dropping a response with no session channel to route it to"
+                );
             }
         }
         Ok(())
@@ -123,15 +232,61 @@ impl Transport for HttpTransport {
 #[derive(Clone)]
 pub struct AppState {
     request_tx: mpsc::Sender<(Option<String>, JSONRPCMessage)>,
-    response_tx: broadcast::Sender<JSONRPCMessage>,
-    /// session id → that session's private response channel (shared with the
-    /// transport so `POST /message` responses and `GET /sse` streams agree on
-    /// which channel carries a given session's replies).
-    sessions: Arc<std::sync::Mutex<HashMap<String, broadcast::Sender<JSONRPCMessage>>>>,
+    /// Sessions this server issued (shared with the transport so `POST /message`
+    /// responses and `GET /sse` streams agree on which channel carries a given
+    /// session's replies).
+    sessions: SessionMap,
     token: Option<String>,
 }
 
 impl AppState {
+    /// Whether `session_id` is one this server issued and has not dropped.
+    fn knows_session(&self, session_id: &str) -> bool {
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("session map lock is not poisoned");
+        evict_stale_sessions(&mut sessions, Instant::now());
+        sessions.contains_key(session_id)
+    }
+
+    /// The session's channel, refreshing its idle timer.
+    fn session_channel(&self, session_id: &str) -> broadcast::Sender<JSONRPCMessage> {
+        let now = Instant::now();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("session map lock is not poisoned");
+        evict_stale_sessions(&mut sessions, now);
+        let entry = sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionEntry {
+                sender: broadcast::channel(SESSION_CHANNEL_CAPACITY).0,
+                last_seen: now,
+            });
+        entry.last_seen = now;
+        entry.sender.clone()
+    }
+
+    /// Issue a session id and register its channel.
+    fn issue_session(&self) -> String {
+        let session_id = mint_session_id();
+        let now = Instant::now();
+        let mut sessions = self
+            .sessions
+            .lock()
+            .expect("session map lock is not poisoned");
+        evict_stale_sessions(&mut sessions, now);
+        sessions.insert(
+            session_id.clone(),
+            SessionEntry {
+                sender: broadcast::channel(SESSION_CHANNEL_CAPACITY).0,
+                last_seen: now,
+            },
+        );
+        session_id
+    }
+
     /// Verify the bearer token when one is configured.
     fn check_auth(&self, headers: &HeaderMap) -> std::result::Result<(), (StatusCode, String)> {
         let Some(expected) = &self.token else {
@@ -181,35 +336,40 @@ async fn message_handler(
 ) -> std::result::Result<axum::response::Response, (StatusCode, String)> {
     state.check_auth(&headers)?;
 
-    // Session isolation: a client that presents `x-mcp-session-id` gets its
-    // replies on its OWN channel, so concurrent clients never receive each
-    // other's responses (the old global broadcast leaked every reply to every
-    // /sse subscriber).
-    let session_id = headers
-        .get("x-mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
     let bytes = axum::body::to_bytes(body, MAX_BODY_BYTES)
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("read body: {e}")))?;
 
+    // A session id only means something when THIS server issued it. Accepting any
+    // string let a client subscribe to another client's replies by guessing one
+    // (`"1"`, `"default"`), and a request that named none was broadcast to every
+    // subscriber — the leak the session map exists to prevent (audit C4).
+    let (session_id, issued) = resolve_session(&state, session_header(&headers), &bytes)?;
+    let mut response = forward_message(&state, session_id, bytes).await?;
+    // Echo a freshly minted id so the client can name it from now on.
+    if let Some(session_id) = issued
+        && let Ok(value) = axum::http::HeaderValue::from_str(&session_id)
+    {
+        response.headers_mut().insert(SESSION_HEADER, value);
+    }
+    Ok(response)
+}
+
+/// Forward one authorized, session-resolved POST body to the protocol loop and
+/// collect the matching replies.
+///
+/// # Errors
+///
+/// Returns `BAD_REQUEST` for a malformed body and `INTERNAL_SERVER_ERROR` when the
+/// protocol loop has already shut down.
+async fn forward_message(
+    state: &AppState,
+    session_id: String,
+    bytes: axum::body::Bytes,
+) -> std::result::Result<axum::response::Response, (StatusCode, String)> {
     // Subscribe BEFORE forwarding so a fast response is not missed: the
     // protocol loop may answer before this handler awaits recv.
-    let mut response_rx = match &session_id {
-        Some(sid) => {
-            // Ensure the session's channel exists, then subscribe to it.
-            let sender = state
-                .sessions
-                .lock()
-                .expect("session map lock is not poisoned")
-                .entry(sid.clone())
-                .or_insert_with(|| broadcast::channel(1024).0)
-                .clone();
-            sender.subscribe()
-        }
-        None => state.response_tx.subscribe(),
-    };
+    let mut response_rx = state.session_channel(&session_id).subscribe();
     let mut expected_ids: Vec<serde_json::Value> = Vec::new();
 
     // MCP over HTTP+SSE: a POST body is a single JSON-RPC message, but be
@@ -229,7 +389,7 @@ async fn message_handler(
         for msg in batch {
             state
                 .request_tx
-                .send((session_id.clone(), msg))
+                .send((Some(session_id.clone()), msg))
                 .await
                 .map_err(|_| {
                     (
@@ -250,7 +410,7 @@ async fn message_handler(
         }
         state
             .request_tx
-            .send((session_id, msg))
+            .send((Some(session_id), msg))
             .await
             .map_err(|_| {
                 (
@@ -325,26 +485,24 @@ async fn sse_handler(
 > {
     state.check_auth(&headers)?;
 
-    let session_id = headers
-        .get("x-mcp-session-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_owned);
-
-    // Per-session stream: subscribe to the session's OWN channel so two
-    // concurrent clients never see each other's responses.
-    let rx = match &session_id {
-        Some(sid) => {
-            let sender = state
-                .sessions
-                .lock()
-                .expect("session map lock is not poisoned")
-                .entry(sid.clone())
-                .or_insert_with(|| broadcast::channel(1024).0)
-                .clone();
-            sender.subscribe()
-        }
-        None => state.response_tx.subscribe(),
-    };
+    // A session must be presented AND must be one this server issued: a stream
+    // keyed by a guessed id let a client watch another client's replies, and the
+    // no-session fallback streamed a global broadcast to every subscriber — so two
+    // clients that both omitted the header received each other's responses
+    // (audit C4).
+    let session_id = session_header(&headers).ok_or((
+        StatusCode::BAD_REQUEST,
+        format!("missing `{SESSION_HEADER}`; POST `initialize` to obtain one"),
+    ))?;
+    if !state.knows_session(&session_id) {
+        return Err((
+            StatusCode::NOT_FOUND,
+            format!("unknown session `{session_id}`; POST `initialize` to obtain one"),
+        ));
+    }
+    // Per-session stream: subscribe to the session's OWN channel so concurrent
+    // clients never see each other's responses.
+    let rx = state.session_channel(&session_id).subscribe();
 
     let stream = BroadcastStream::new(rx).filter_map(|item| {
         let msg = match item {
@@ -381,15 +539,12 @@ pub async fn serve_http(
     token: Option<String>,
 ) -> Result<()> {
     let (request_tx, request_rx) = mpsc::channel(256);
-    let (response_tx, _) = broadcast::channel(1024);
     // Session map shared by the transport (routing replies) and the handlers
-    // (creating/subscribing per-session channels).
-    let sessions: Arc<std::sync::Mutex<HashMap<String, broadcast::Sender<JSONRPCMessage>>>> =
-        Arc::new(std::sync::Mutex::new(HashMap::new()));
+    // (issuing/subscribing per-session channels).
+    let sessions: SessionMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
     let state = AppState {
         request_tx,
-        response_tx: response_tx.clone(),
         sessions: sessions.clone(),
         token,
     };
@@ -397,7 +552,7 @@ pub async fn serve_http(
     // Drive the protocol loop on a background task; it terminates when the
     // request channel closes (all POST senders dropped, i.e. server shutdown).
     tokio::spawn(async move {
-        let mut transport = HttpTransport::new(request_rx, response_tx, sessions);
+        let mut transport = HttpTransport::new(request_rx, sessions);
         if let Err(e) = server.serve(&mut transport).await {
             tracing::error!("http transport serve: {e}");
         }
@@ -433,378 +588,5 @@ pub async fn serve_http_addr(
 // ───────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::mcp::server::MCPServer;
-    use crate::mcp::types::{Implementation, JSONRPCRequest, JSONRPCResponse};
-    use axum::body::Body;
-    use axum::http::Request as HttpRequest;
-    use serde_json::json;
-    use tower::ServiceExt;
-
-    fn request_msg(id: i64, method: &str) -> JSONRPCMessage {
-        JSONRPCMessage::Request(JSONRPCRequest {
-            jsonrpc: "2.0".into(),
-            id: json!(id),
-            method: method.into(),
-            params: None,
-        })
-    }
-
-    /// Build an empty shared session map for tests.
-    fn test_sessions() -> Arc<std::sync::Mutex<HashMap<String, broadcast::Sender<JSONRPCMessage>>>>
-    {
-        Arc::new(std::sync::Mutex::new(HashMap::new()))
-    }
-
-    /// Objective: Verify HttpTransport forwards a request to `recv` and
-    /// broadcasts a response to `send`, round-tripping over channels.
-    /// Invariants: request arrives intact; sent response is observed by a
-    /// subscriber.
-    // NOTE: HTTP transport tests are #[ignore] so the fast `make test` inner
-    // loop skips them; run with `cargo nextest run --run-ignored all`.
-    #[ignore]
-    #[tokio::test]
-    async fn transport_round_trips_over_channels() {
-        let (request_tx, request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, mut response_rx) = broadcast::channel(8);
-        let mut transport = HttpTransport::new(request_rx, response_tx.clone(), test_sessions());
-
-        request_tx
-            .send((None, request_msg(1, "tools/list")))
-            .await
-            .expect("send request");
-        let got = transport.recv().await.expect("recv").expect("some");
-        match got {
-            JSONRPCMessage::Request(r) => assert_eq!(r.method, "tools/list", "method preserved"),
-            other => panic!("expected Request, got {other:?}"),
-        }
-
-        let resp = JSONRPCMessage::Response(JSONRPCResponse {
-            jsonrpc: "2.0".into(),
-            id: json!(1),
-            result: Some(json!({"ok": true})),
-            error: None,
-        });
-        transport.send(&resp).await.expect("send response");
-        let observed = response_rx.recv().await.expect("response received");
-        match observed {
-            JSONRPCMessage::Response(r) => {
-                assert_eq!(r.result, Some(json!({"ok": true})), "result preserved")
-            }
-            other => panic!("expected Response, got {other:?}"),
-        }
-    }
-
-    /// Objective: Verify HttpTransport yields `None` (EOF) when the request
-    /// channel is fully closed.
-    /// Invariants: dropping all senders → recv → Ok(None).
-    #[ignore]
-    #[tokio::test]
-    async fn transport_eof_on_closed_channel() {
-        let (request_tx, request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, _) = broadcast::channel(8);
-        let mut transport = HttpTransport::new(request_rx, response_tx, test_sessions());
-        drop(request_tx); // no senders → EOF
-        let got = transport.recv().await.expect("recv");
-        assert!(got.is_none(), "closed request channel → clean EOF");
-    }
-
-    /// Objective: Verify `POST /message` accepts a well-formed JSON-RPC
-    /// message and replies 202 Accepted.
-    /// Invariants: status 202; the forwarded message reaches the request
-    /// channel.
-    #[ignore]
-    #[tokio::test]
-    async fn post_message_accepts_and_returns_202() {
-        let (request_tx, mut request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, _) = broadcast::channel(8);
-        let state = AppState {
-            request_tx,
-            response_tx,
-            sessions: test_sessions(),
-            token: None,
-        };
-        let app = router(state);
-
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/message")
-                    .header("content-type", "application/json")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(response.status(), StatusCode::ACCEPTED, "202 on accepted");
-
-        let (session, msg) = request_rx.recv().await.expect("message forwarded");
-        assert!(session.is_none(), "no session id supplied by this client");
-        match msg {
-            JSONRPCMessage::Request(r) => assert_eq!(r.method, "ping", "message forwarded"),
-            other => panic!("expected Request, got {other:?}"),
-        }
-    }
-
-    /// Objective: Verify authentication is enforced when a token is set.
-    /// Invariants: wrong/missing bearer → 401; correct bearer → 202.
-    #[ignore]
-    #[tokio::test]
-    async fn auth_enforced_when_token_set() {
-        let (request_tx, _request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, _) = broadcast::channel(8);
-        let state = AppState {
-            request_tx,
-            response_tx,
-            sessions: test_sessions(),
-            token: Some("secret".into()),
-        };
-        let app = router(state);
-
-        // No token → 401.
-        let no_auth = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/message")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(
-            no_auth.status(),
-            StatusCode::UNAUTHORIZED,
-            "missing token → 401"
-        );
-
-        // Wrong token → 401.
-        let wrong = app
-            .clone()
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/message")
-                    .header("authorization", "Bearer wrong")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(
-            wrong.status(),
-            StatusCode::UNAUTHORIZED,
-            "wrong token → 401"
-        );
-
-        // Correct token → 202.
-        let ok = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/message")
-                    .header("authorization", "Bearer secret")
-                    .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(ok.status(), StatusCode::ACCEPTED, "correct token → 202");
-    }
-
-    /// Objective: Verify `GET /sse` returns 200 with the correct content-type
-    /// when no token is configured.
-    /// Invariants: status 200; `content-type` is `text/event-stream`.
-    #[ignore]
-    #[tokio::test]
-    async fn sse_endpoint_serves_stream_without_token() {
-        let (request_tx, _request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, _) = broadcast::channel(8);
-        let state = AppState {
-            request_tx,
-            response_tx,
-            sessions: test_sessions(),
-            token: None,
-        };
-        let app = router(state);
-
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("GET")
-                    .uri("/sse")
-                    .body(Body::empty())
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(response.status(), StatusCode::OK, "SSE stream opens");
-        let ct = response
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        assert!(
-            ct.contains("text/event-stream"),
-            "SSE content-type, got {ct:?}"
-        );
-    }
-
-    /// Objective: Verify a malformed JSON-RPC body on POST is rejected with
-    /// 400, not accepted.
-    /// Invariants: invalid JSON → 400 Bad Request.
-    #[ignore]
-    #[tokio::test]
-    async fn malformed_body_rejected_400() {
-        let (request_tx, _request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, _) = broadcast::channel(8);
-        let state = AppState {
-            request_tx,
-            response_tx,
-            sessions: test_sessions(),
-            token: None,
-        };
-        let app = router(state);
-
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/message")
-                    .body(Body::from("not json"))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "bad JSON → 400");
-    }
-
-    /// Objective: End-to-end — verify the real [`MCPServer::serve`] loop,
-    /// driven through [`HttpTransport`], answers a JSON-RPC `initialize`
-    /// request and broadcasts the response.
-    /// Invariants: a request posted to the channel yields a broadcast response
-    /// carrying the server `implementation`.
-    #[ignore]
-    #[tokio::test]
-    async fn server_serves_and_broadcasts_response() {
-        let (request_tx, request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, mut response_rx) = broadcast::channel(8);
-        let server = MCPServer::new(Implementation {
-            name: "lorescope-test".into(),
-            version: "0.0.1".into(),
-        });
-
-        let handle = tokio::spawn(async move {
-            let mut transport = HttpTransport::new(request_rx, response_tx, test_sessions());
-            server.serve(&mut transport).await.expect("serve")
-        });
-
-        request_tx
-            .send((
-                None,
-                JSONRPCMessage::Request(JSONRPCRequest {
-                    jsonrpc: "2.0".into(),
-                    id: json!(1),
-                    method: "initialize".into(),
-                    params: Some(json!({
-                        "protocolVersion": "2024-11-05",
-                        "capabilities": {},
-                        "clientInfo": {"name": "test", "version": "0.0.1"}
-                    })),
-                }),
-            ))
-            .await
-            .expect("send initialize");
-
-        let observed = tokio::time::timeout(std::time::Duration::from_secs(5), response_rx.recv())
-            .await
-            .expect("timeout waiting for response")
-            .expect("response received");
-
-        match observed {
-            JSONRPCMessage::Response(r) => {
-                assert!(r.error.is_none(), "initialize succeeds, got {r:?}");
-                let result = r.result.expect("result present");
-                let server_name = result["serverInfo"]["name"].as_str().unwrap_or("");
-                assert_eq!(server_name, "lorescope-test", "server identifies itself");
-            }
-            other => panic!("expected Response, got {other:?}"),
-        }
-
-        // Shut down cleanly and await the serve task.
-        drop(request_tx);
-        let _ = handle.await;
-    }
-
-    /// Objective: Verify a `POST /message` with NO `/sse` subscriber still
-    /// receives its JSON-RPC response — the spec's "respond in POST body when
-    /// no stream is open" fallback. Previously the response was broadcast to
-    /// zero subscribers and silently lost (202 forever).
-    /// Invariants: HTTP 200; body is the JSON-RPC response echoing the id.
-    #[ignore]
-    #[tokio::test]
-    async fn post_message_returns_response_body_without_sse() {
-        let (request_tx, request_rx) = mpsc::channel::<(Option<String>, JSONRPCMessage)>(8);
-        let (response_tx, _) = broadcast::channel(8);
-        let response_tx_serve = response_tx.clone();
-        let sessions = test_sessions();
-        let server = MCPServer::new(Implementation {
-            name: "lorescope-test".into(),
-            version: "0.0.1".into(),
-        });
-        let handle = tokio::spawn(async move {
-            let mut transport = HttpTransport::new(request_rx, response_tx_serve, sessions);
-            server.serve(&mut transport).await.expect("serve")
-        });
-
-        // No SSE subscriber is ever created — the response must come back in
-        // the POST body (the regression this test locks in). The original
-        // `request_tx` is kept outside so the test can drop it at the end to
-        // signal EOF to the serve loop.
-        let state = AppState {
-            request_tx: request_tx.clone(),
-            response_tx,
-            sessions: test_sessions(),
-            token: None,
-        };
-        let app = router(state);
-
-        let response = app
-            .oneshot(
-                HttpRequest::builder()
-                    .method("POST")
-                    .uri("/message")
-                    .header("content-type", "application/json")
-                    .body(Body::from(
-                        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.0.1"}}}"#,
-                    ))
-                    .expect("request"),
-            )
-            .await
-            .expect("oneshot");
-
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "response must come back in the POST body, not be lost"
-        );
-        let bytes = axum::body::to_bytes(response.into_body(), MAX_BODY_BYTES)
-            .await
-            .expect("read body");
-        let resp: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON response");
-        assert_eq!(resp["id"], json!(1), "response echoes the request id");
-        assert!(
-            resp["result"]["serverInfo"]["name"]
-                .as_str()
-                .is_some_and(|n| n == "lorescope-test"),
-            "initialize result present in POST body, got {resp}"
-        );
-
-        // Shut down cleanly and await the serve task.
-        drop(request_tx);
-        let _ = handle.await;
-    }
-}
+#[path = "http_server_tests.rs"]
+mod tests;

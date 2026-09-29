@@ -236,7 +236,14 @@ Claude Desktop、Cursor、VS Code、JetBrains 或自定义 Agent 框架。
 ### HTTP+SSE（远程，需 token）
 
 HTTP 传输暴露两个端点：`GET /sse`（Server-Sent Events 流）与 `POST /message`
-（JSON-RPC）。MCP 客户端请配置 SSE 端点 URL：
+（JSON-RPC）。**会话 id 由服务端签发**，客户端不能自封：
+
+1. 先 `POST /message` 一个 `initialize` 请求（此时不带会话头）；
+2. 从响应的 `Mcp-Session-Id` 头取回 id（旧拼写 `x-mcp-session-id` 仍被读取）；
+3. 此后每个请求（包括 `GET /sse`）都带上它。
+
+服务端只承认自己签发的 id：未带会话头的请求返回 400，未知 id 返回 404，因此两个
+客户端不会互相收到对方的响应；空闲 30 分钟的会话会被回收。
 
 ```jsonc
 {
@@ -245,15 +252,14 @@ HTTP 传输暴露两个端点：`GET /sse`（Server-Sent Events 流）与 `POST 
       "url": "http://host:5609/sse",
       "headers": {
         "Authorization": "Bearer <your-token>",
-        "x-mcp-session-id": "<stable-id-per-client>"
+        "Mcp-Session-Id": "<由 initialize 响应签发>"
       }
     }
   }
 }
 ```
 
-HTTP 服务未提供 `--http-token` 时拒绝启动（见 [配置](#配置)）；每个并发客户端
-应发送稳定的 `x-mcp-session-id`，使其 SSE 流只收到自己的响应。远程部署请使用
+HTTP 服务未提供 `--http-token` 时拒绝启动（见 [配置](#配置)）。远程部署请使用
 `https://`——否则 bearer token 将以明文在网络上传送。
 
 ### 接入后 AI 能做什么

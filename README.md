@@ -266,8 +266,18 @@ JetBrains, or a custom agent framework.
 ### HTTP+SSE (remote, requires token)
 
 The HTTP transport exposes two endpoints: `GET /sse` (Server-Sent Events
-stream) and `POST /message` (JSON-RPC). Configure the MCP client with the SSE
-endpoint URL:
+stream) and `POST /message` (JSON-RPC). The **session id is issued by the
+server** — a client cannot name its own:
+
+1. `POST /message` an `initialize` request (no session header yet);
+2. read the id from the response's `Mcp-Session-Id` header (the legacy
+   `x-mcp-session-id` spelling is still accepted);
+3. send it on every later request, `GET /sse` included.
+
+Only ids this server issued are honoured: a request without one is refused with
+400 and an unknown one with 404, so two clients never receive each other's
+responses. Idle sessions are reclaimed after 30 minutes. Configure the client
+with the SSE endpoint URL:
 
 ```jsonc
 {
@@ -276,7 +286,7 @@ endpoint URL:
       "url": "http://host:5609/sse",
       "headers": {
         "Authorization": "Bearer <your-token>",
-        "x-mcp-session-id": "<stable-id-per-client>"
+        "Mcp-Session-Id": "<issued by the initialize response>"
       }
     }
   }
@@ -284,10 +294,8 @@ endpoint URL:
 ```
 
 HTTP serving refuses to start without `--http-token` (see
-[Configuration](#configuration)); each concurrent client should send a stable
-`x-mcp-session-id` so its SSE stream only receives its own responses. For
-remote deployments use `https://` — the bearer token would otherwise travel in
-cleartext.
+[Configuration](#configuration)). For remote deployments use `https://` — the
+bearer token would otherwise travel in cleartext.
 
 ### What the AI can do once connected
 

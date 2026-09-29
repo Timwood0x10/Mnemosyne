@@ -126,9 +126,12 @@ is transport-agnostic.
 ### 4.3 Why session isolation + mandatory auth over HTTP?
 
 **Decision** (`http_server.rs`):
-- each client sends `x-mcp-session-id`; `AppState` keeps a
-  `session_id → broadcast::Sender` map; `HttpTransport::send` routes replies
-  to the session's own channel.
+- the **server issues** the session id (`Mcp-Session-Id` on the `initialize`
+  response, with the legacy `x-mcp-session-id` still read); `AppState` keeps a
+  `session_id → broadcast::Sender` map, reclaims idle sessions, and
+  `HttpTransport::send` routes replies to the session's own channel.
+- no header → 400, an unissued id → 404; there is no global-broadcast fallback,
+  so "leave the header out and receive everything" is not a path any more.
 - HTTP refuses to start without `--http-token`; token comparison is
   constant-time (XOR full buffer).
 
