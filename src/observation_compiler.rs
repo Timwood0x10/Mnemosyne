@@ -12,8 +12,6 @@
 //! Every step is language-agnostic. Language-specific behaviour comes from
 //! the [`LanguageFrontend`] trait.
 
-use aho_corasick::AhoCorasick;
-
 use crate::cognition::{Fact, FactType, Mention, Observation, Rule};
 
 /// Compile text into Observations (universal IR).
@@ -40,7 +38,15 @@ pub fn compile_observations(
         return observations;
     }
     let verb_refs: Vec<&str> = verbs.iter().map(|s| s.as_str()).collect();
-    let ac = match AhoCorasick::new(&verb_refs) {
+    // `MatchKind::LeftmostLongest`, NOT the default `Standard`: Standard
+    // reports the match that ENDS earliest, so a shorter verb shadows the
+    // longer extension of it (`杀` swallows `杀害`) and the observation records
+    // the wrong action. LeftmostLongest resolves the longest form instead.
+    // Failure keeps the existing behaviour of returning no observations.
+    let ac = match aho_corasick::AhoCorasickBuilder::new()
+        .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+        .build(&verb_refs)
+    {
         Ok(ac) => ac,
         Err(_) => return observations,
     };
@@ -426,6 +432,51 @@ mod tests {
                 .map(|mention| mention.canonical_name.as_str()),
             Some("诸葛亮"),
             "Chinese object should remain intact"
+        );
+    }
+
+    /// Objective: Verify the observation verb automaton reports the LONGER verb
+    /// form (`杀害`) instead of the shorter prefix `杀` that shadows it under
+    /// `MatchKind::Standard`.
+    /// Invariants: the single compiled observation's action is `杀害`.
+    #[test]
+    fn verb_automaton_prefers_longer_form() {
+        let observations = compile_observations(
+            &["刘备杀害了他"],
+            &["杀".to_string(), "杀害".to_string()],
+            &resolver,
+        );
+
+        assert_eq!(
+            observations.len(),
+            1,
+            "One action sentence should emit exactly one observation"
+        );
+        assert_eq!(
+            observations[0].action, "杀害",
+            "the longer verb must win over its shorter prefix"
+        );
+    }
+
+    /// Objective: Verify the shorter verb is still matched when its longer
+    /// extension is absent from the text.
+    /// Invariants: the observation's action is `杀`.
+    #[test]
+    fn shorter_verb_matches_when_longer_absent() {
+        let observations = compile_observations(
+            &["刘备杀了他"],
+            &["杀".to_string(), "杀害".to_string()],
+            &resolver,
+        );
+
+        assert_eq!(
+            observations.len(),
+            1,
+            "One action sentence should emit exactly one observation"
+        );
+        assert_eq!(
+            observations[0].action, "杀",
+            "the shorter verb must still match on its own"
         );
     }
 }

@@ -339,7 +339,7 @@ impl PipelineDistiller {
     ///
     /// Only `Knowledge` memories are capped (matching the source project's
     /// `MaxSolutionsPerTenant`). When the count exceeds the cap, the
-    /// lowest-confidence records are evicted.
+    /// lowest-confidence records are evicted; ties are broken oldest-first.
     ///
     /// # Scope
     ///
@@ -353,7 +353,17 @@ impl PipelineDistiller {
     /// a generic old row is housekeeping, while deleting somebody's only record
     /// of a decision is data loss. Every eviction is logged, so it is never
     /// invisible.
-    async fn phase_enforce_capacity(&self, tenant_id: &str) -> Result<()> {
+    ///
+    /// `protected` holds the ids this round just created. They are excluded
+    /// from the eviction candidates because eviction runs *after* the inserts,
+    /// so the freshly-created rows are normally both the lowest-confidence and
+    /// the newest: without the exclusion a round could delete its own output
+    /// and still return it to the caller as a persisted memory (09-26/H9).
+    async fn phase_enforce_capacity(
+        &self,
+        tenant_id: &str,
+        protected: &std::collections::HashSet<String>,
+    ) -> Result<()> {
         let k_count = self
             .store
             .count_by_memory_type(tenant_id, MemoryType::Knowledge)
@@ -362,8 +372,12 @@ impl PipelineDistiller {
             return Ok(());
         }
         let excess = k_count as usize - self.cfg.max_solutions_per_tenant;
-        // Fetch all Knowledge memories for the tenant, sort by confidence asc,
-        // and delete the bottom `excess`.
+        // Fetch all Knowledge memories for the tenant, sort by
+        // `(confidence asc, created_at asc)`, and delete the bottom `excess`
+        // among the non-protected rows. Sorting oldest-first is what makes the
+        // tie-break drop the OLDEST row: the query returns newest-first, and a
+        // stable sort on confidence alone therefore evicted the newest member
+        // of every tied group (09-26/H9).
         let all = self
             .store
             .get_by_memory_type(tenant_id, MemoryType::Knowledge)
@@ -373,9 +387,14 @@ impl PipelineDistiller {
             a.confidence
                 .partial_cmp(&b.confidence)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.created_at.cmp(&b.created_at))
         });
-        let evicted: Vec<&Experience> = sorted.iter().take(excess).collect();
-        let ids_to_delete: Vec<String> = evicted.iter().map(|e| e.id.clone()).collect();
+        let ids_to_delete: Vec<String> = sorted
+            .iter()
+            .filter(|e| !protected.contains(&e.id))
+            .take(excess)
+            .map(|e| e.id.clone())
+            .collect();
         if !ids_to_delete.is_empty() {
             // Say what is about to disappear and why: an eviction the operator
             // only notices when a memory is missing is indistinguishable from a
@@ -503,7 +522,10 @@ impl Distiller for PipelineDistiller {
                 self.metrics.failures.fetch_add(1, Ordering::Relaxed);
                 return Err(e);
             }
-            if let Err(e) = self.phase_enforce_capacity(tenant_id).await {
+            if let Err(e) = self
+                .phase_enforce_capacity(tenant_id, &std::collections::HashSet::new())
+                .await
+            {
                 self.metrics.failures.fetch_add(1, Ordering::Relaxed);
                 return Err(e);
             }
@@ -552,7 +574,11 @@ impl Distiller for PipelineDistiller {
 
         // Phase 8 (continued): enforce capacity control after the new
         // records land, so the cap accounts for this distillation's output.
-        if let Err(e) = self.phase_enforce_capacity(tenant_id).await {
+        // The rows this round just wrote are protected: eviction must never
+        // delete the very memories we are about to return.
+        let protected: std::collections::HashSet<String> =
+            memories.iter().map(|m| m.id.clone()).collect();
+        if let Err(e) = self.phase_enforce_capacity(tenant_id, &protected).await {
             self.metrics.failures.fetch_add(1, Ordering::Relaxed);
             return Err(e);
         }

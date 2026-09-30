@@ -250,6 +250,11 @@ impl RelationshipStore {
     /// - Every user positive-emotion message raises `intimacy` by `+0.02`;
     ///   every user negative-emotion message lowers it by `-0.02`, clamped to
     ///   `[0.0, 1.0]`.
+    /// - The bond is mutual: the agent's own positive/negative-emotion
+    ///   messages also move `intimacy`, but with the lighter
+    ///   [`AGENT_POSITIVE_DELTA`] / [`AGENT_NEGATIVE_DELTA`] (`0.01`) so the
+    ///   user's emotions remain the primary driver. System/tool messages never
+    ///   move it.
     /// - `stage` is re-derived from `intimacy` via the stage thresholds.
     /// - `emotion_trend` is the direction of the latest intimacy change.
     /// - `recent_topics` are the recurring keywords across the messages.
@@ -339,11 +344,32 @@ impl RelationshipStore {
     }
 }
 
+/// Chinese negation cues that flip an emotion keyword.
+///
+/// The six documented single-character cues (不/没/别/未/无/非) plus the two
+/// common compounds whose head cue is separated from the keyword by its own
+/// suffix (没有 = 没 + 有, 无所谓 = 无 + 所谓). Under the adjacency rule below
+/// the compounds are NOT redundant with their head character — the old
+/// whole-clause `contains("没有")` was redundant with `contains('没')`, but an
+/// adjacency match needs the full word.
+const NEGATION_CUES: &[&str] = &["不", "没", "别", "未", "无", "非", "没有", "无所谓"];
+
+/// Two-character words that END with a single-character cue but are NOT
+/// negations, so suffix matching must not read them as one. Without this the
+/// emphatic "特别喜欢" would treat 别 as negating 喜欢 and silence a real
+/// positive signal (adjacent-cue review finding).
+const NON_NEGATION_TAILS: &[&str] = &[
+    "特别", "分别", "区别", "个别", "性别", "识别", "辨别", "鉴别", "派别", "类别", "级别", "告别",
+    "离别", "道别", "惜别", "送别", "阔别", "诀别", "辞别", "作别", "淹没", "沉没", "埋没", "隐没",
+    "吞没", "除非", "是非", "莫非",
+];
+
 /// Whether a message carries a positive-emotion keyword.
 ///
-/// A clause-level negation cue (不/没/别/未/无/非 immediately before the
-/// keyword, with no clause break between) suppresses the hit: "没有压力，
-/// 一点都不烦" is reassuring and must not fire the negative delta.
+/// A negation cue immediately before the keyword suppresses the hit (see
+/// [`negated_before`]): "没有压力，一点都不烦" is reassuring and must not fire
+/// the negative delta, while "我没想到这么开心" still registers the positive
+/// 开心 because 没 there qualifies 想到, not 开心.
 fn has_positive_emotion(content: &str) -> bool {
     POSITIVE_EMOTION_KEYWORDS
         .iter()
@@ -357,24 +383,46 @@ fn has_negative_emotion(content: &str) -> bool {
         .any(|kw| !negated_before(content, kw) && content.contains(kw))
 }
 
-/// True when a single-char Chinese negation cue sits in the same clause
-/// immediately before `kw` (no clause break between them).
+/// True when EVERY occurrence of `kw` in `content` is negated.
+///
+/// A cue negates an occurrence only when it sits **immediately before** the
+/// keyword within the same clause: the text between them must be whitespace
+/// (or, for the 没有/无所谓 compounds, part of the cue word itself). Scanning
+/// the whole clause over-suppressed real emotion — "我没想到这么开心" lost its
+/// positive 开心. Because `has_positive_emotion` uses `contains` (ANY
+/// occurrence), this returns `false` as soon as one occurrence is un-negated,
+/// so a message whose keyword appears twice with only one negation still
+/// registers as positive.
 fn negated_before(content: &str, kw: &str) -> bool {
     const BREAKS: &[char] = &[
         '，', '。', '！', '？', '；', '、', '：', ',', '.', '!', '?', ';', ':',
     ];
-    let Some(at) = content.find(kw) else {
-        return false;
-    };
-    let prefix = &content[..at];
-    let clause_start = prefix
-        .rfind(|c: char| BREAKS.contains(&c))
-        .map_or(0, |index| {
-            let ch = prefix[index..].chars().next().unwrap_or(' ');
-            index + ch.len_utf8()
-        });
-    let clause = &prefix[clause_start..];
-    clause.contains('不') || clause.contains("没有") || clause.contains('没')
+    let mut found = false;
+    let mut start = 0usize;
+    while let Some(relative) = content[start..].find(kw) {
+        let at = start + relative;
+        found = true;
+        let prefix = &content[..at];
+        let clause_start = prefix
+            .rfind(|c: char| BREAKS.contains(&c))
+            .map_or(0, |index| {
+                let ch = prefix[index..].chars().next().unwrap_or(' ');
+                index + ch.len_utf8()
+            });
+        // Trailing whitespace may sit between the cue and the keyword; the
+        // cue word itself must end exactly where the keyword begins.
+        let clause = prefix[clause_start..].trim_end();
+        // A single-character cue can also be the tail of an unrelated word
+        // (特别, 告别, 淹没, 除非 ...); suffix matching alone would suppress
+        // genuine emotion, so such tails must not count as a negation cue.
+        let cue_present = NEGATION_CUES.iter().any(|cue| clause.ends_with(cue))
+            && !NON_NEGATION_TAILS.iter().any(|tail| clause.ends_with(tail));
+        if !cue_present {
+            return false;
+        }
+        start = at + kw.len();
+    }
+    found
 }
 
 /// Extract recurring topics (keywords appearing in ≥2 distinct turns), capped.
@@ -606,5 +654,187 @@ mod tests {
             EmotionTrend::Declining,
             "a negative update after a positive one must be declining"
         );
+    }
+
+    /// Objective: Verify the documented "each positive user message +0.02"
+    /// contract exactly, independent of how many positive keywords one message
+    /// carries (the increment is per message, not per keyword).
+    /// Invariants: one positive user message → intimacy 0.02; a second yields
+    /// 0.04.
+    #[test]
+    fn each_positive_user_message_adds_exactly_002() {
+        let store = store();
+        let one = msgs(&[("user", "谢谢你，今天真的很开心，很温暖！")]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "alice", &one)
+            .expect("apply messages");
+        assert!(
+            (state.intimacy - POSITIVE_DELTA).abs() < 1e-9,
+            "one positive user message must add exactly {} per message (not per keyword), got {}",
+            POSITIVE_DELTA,
+            state.intimacy
+        );
+    }
+
+    /// Objective: Verify every documented negation cue (不/没/别/未/无/非) is
+    /// honoured when it sits immediately before the keyword, and that a cue
+    /// elsewhere in the clause does NOT suppress a hit.
+    /// Invariants: each adjacency-negated form is `true`; "我没想到这么开心"
+    /// (没 qualifies 想到) is `false`; whitespace between cue and keyword is
+    /// tolerated.
+    #[test]
+    fn all_negation_cues_are_adjacency_checked() {
+        assert!(negated_before("别害怕", "害怕"), "别 must negate 害怕");
+        assert!(
+            negated_before("不 开心", "开心"),
+            "whitespace may sit between"
+        );
+        assert!(negated_before("未开心", "开心"), "未 must negate 开心");
+        assert!(negated_before("无压力", "压力"), "无 must negate 压力");
+        assert!(negated_before("非乐", "乐"), "非 must negate 乐");
+        assert!(
+            !negated_before("我没想到这么开心", "开心"),
+            "没 qualifying 想到 must not suppress 开心"
+        );
+        assert!(
+            !negated_before("我不知道为什么这么开心", "开心"),
+            "a distant 不 must not suppress 开心"
+        );
+    }
+
+    /// Objective: Verify a single-character cue that is merely the tail of an
+    /// unrelated word does not negate the keyword. Suffix matching alone read
+    /// the 别 of 特别 as a negation cue.
+    /// Invariants: 特别喜欢 is NOT negated; 告别/淹没/除非 tails likewise do
+    /// not negate; a real 别 immediately before the keyword still does.
+    #[test]
+    fn non_negation_tails_are_not_cues() {
+        assert!(
+            !negated_before("我特别喜欢这个", "喜欢"),
+            "the 别 of 特别 must not negate 喜欢"
+        );
+        assert!(
+            !negated_before("我特别开心", "开心"),
+            "the 别 of 特别 must not negate 开心"
+        );
+        assert!(
+            negated_before("我一点也不讨厌应酬", "讨厌"),
+            "an adjacent 不 must still negate 讨厌 (indifference, not distress)"
+        );
+        assert!(
+            negated_before("别喜欢他", "喜欢"),
+            "an adjacent 别 must still negate 喜欢"
+        );
+    }
+
+    /// Objective: Verify the semantic-inversion fix for "别害怕": the
+    /// consolation cue 别 negates the negative keyword 害怕, so the message
+    /// must NOT lower intimacy.
+    /// Invariants: intimacy stays 0.0; trend Stable.
+    #[test]
+    fn negation_cue_prevents_negative_delta_for_bie() {
+        let store = store();
+        let messages = msgs(&[("user", "别害怕，我在这儿陪你。")]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "alice", &messages)
+            .expect("apply messages");
+        assert!(
+            state.intimacy.abs() < 1e-9,
+            "别害怕 is reassurance, not distress: intimacy must stay 0.0, got {}",
+            state.intimacy
+        );
+        assert_eq!(state.emotion_trend, EmotionTrend::Stable);
+    }
+
+    /// Objective: Verify "我无所谓压力" no longer fires the negative delta —
+    /// the 无所谓 cue negates 压力, so indifference is not distress.
+    /// Invariants: intimacy stays 0.0; trend Stable.
+    #[test]
+    fn negation_cue_prevents_negative_delta_for_wusuowei() {
+        let store = store();
+        let messages = msgs(&[("user", "我无所谓压力，早就看开了。")]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "alice", &messages)
+            .expect("apply messages");
+        assert!(
+            state.intimacy.abs() < 1e-9,
+            "无所谓压力 must not lower intimacy, got {}",
+            state.intimacy
+        );
+        assert_eq!(state.emotion_trend, EmotionTrend::Stable);
+    }
+
+    /// Objective: Verify a clause-internal negation of a different verb does
+    /// NOT suppress a genuine positive keyword ("我没想到这么开心").
+    /// Invariants: intimacy rises by one positive user delta (0.02).
+    #[test]
+    fn distant_negation_does_not_suppress_positive() {
+        let store = store();
+        let messages = msgs(&[("user", "我没想到这么开心")]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "alice", &messages)
+            .expect("apply messages");
+        assert!(
+            (state.intimacy - POSITIVE_DELTA).abs() < 1e-9,
+            "开心 is not negated by 没 (which qualifies 想到); expected {}, got {}",
+            POSITIVE_DELTA,
+            state.intimacy
+        );
+        assert_eq!(state.emotion_trend, EmotionTrend::Rising);
+    }
+
+    /// Objective: Verify per-occurrence negation: a keyword appearing twice
+    /// with only ONE occurrence negated still counts as positive (the old
+    /// first-occurrence-only check mis-classified such messages).
+    /// Invariants: intimacy rises by one positive user delta (0.02).
+    #[test]
+    fn keyword_with_one_negated_occurrence_is_positive() {
+        let store = store();
+        let messages = msgs(&[("user", "我不开心，但其实很开心")]);
+        let state = store
+            .apply_messages("tenant-a", "agent-bailiusu", "alice", &messages)
+            .expect("apply messages");
+        assert!(
+            (state.intimacy - POSITIVE_DELTA).abs() < 1e-9,
+            "one un-negated 开心 occurrence must register as positive, got {}",
+            state.intimacy
+        );
+        assert_eq!(state.emotion_trend, EmotionTrend::Rising);
+    }
+
+    /// Objective: Verify the chosen two-way contract (C2): the agent's own
+    /// negative-emotion message lowers intimacy with the lighter agent delta,
+    /// exactly mirroring `assistant_emotion_drives_intimacy`.
+    /// Invariants: three positive user messages (0.06) then one agent negative
+    /// message → 0.05.
+    #[test]
+    fn assistant_negative_emotion_lowers_intimacy() {
+        let store = store();
+        let warm = msgs(&[
+            ("user", "谢谢你，我很开心"),
+            ("user", "谢谢你的陪伴"),
+            ("user", "我很温暖"),
+        ]);
+        let first = store
+            .apply_messages("tenant-a", "agent-bailiusu", "dave", &warm)
+            .expect("warm apply");
+        assert!(
+            (first.intimacy - 0.06).abs() < 1e-9,
+            "three positive user messages → 0.06, got {}",
+            first.intimacy
+        );
+
+        let sad = msgs(&[("assistant", "我也很难过，感觉压力很大。")]);
+        let second = store
+            .apply_messages("tenant-a", "agent-bailiusu", "dave", &sad)
+            .expect("sad apply");
+        let expected = 0.06 - AGENT_NEGATIVE_DELTA;
+        assert!(
+            (second.intimacy - expected).abs() < 1e-9,
+            "one agent negative message lowers by {} → expected {expected}, got {}",
+            AGENT_NEGATIVE_DELTA,
+            second.intimacy
+        );
+        assert_eq!(second.emotion_trend, EmotionTrend::Declining);
     }
 }

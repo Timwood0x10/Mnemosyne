@@ -27,6 +27,7 @@ use crate::error::Result;
 use crate::persona::embedding_extractor::EmbeddingPersonaExtractor;
 use crate::persona::keyword_extractor::KeywordPersonaExtractor;
 use crate::persona::prototype::{PersonaThresholds, PrototypeVectorCache};
+use crate::persona::timeline::STANCE_FLIP_MIN_SHARED_BIGRAMS;
 use crate::persona::{PersonaSignal, PersonaSignalExtractor};
 
 /// A detected contradiction between the draft and an established persona fact.
@@ -287,13 +288,14 @@ impl PersonaCheckEngine {
                 .unwrap_or(false);
             let overlap = shared_bigrams(&signal.text, content);
 
-            // A single shared bigram is enough to confirm the two statements
-            // touch the same topic: the marker verbs differ between a
-            // stance-against signal and its stored affirmative twin (e.g.
-            // "我讨厌" vs "我喜欢"), so the shared content is often just the
-            // 2-char topic ("应酬"). Requiring two shared bigrams would miss
-            // genuine contradictions on short topics.
-            if stored_negated != signal.negated && overlap >= 1 {
+            // A conflict must touch the SAME TOPIC, not merely share a stray
+            // bigram: the stance markers differ between a stance-against
+            // signal and its stored affirmative twin ("我讨厌" vs "我喜欢"),
+            // so an unrelated pair can coincidentally overlap on one bigram.
+            // Require the same ≥2-shared-bigram topic guard the timeline uses
+            // ([`STANCE_FLIP_MIN_SHARED_BIGRAMS`]) so a single shared bigram
+            // no longer produces a false conflict.
+            if stored_negated != signal.negated && overlap >= STANCE_FLIP_MIN_SHARED_BIGRAMS {
                 let candidate = PersonaConflict {
                     fact_type: signal.fact_type,
                     draft_signal: signal.clone(),
@@ -612,21 +614,87 @@ mod tests {
     }
 
     /// Objective: Verify the keyword fallback path detects an opposite-stance
-    /// conflict through shared-bigram overlap.
-    /// Invariants: cache=None; stored "我喜欢应酬" + draft "我讨厌应酬" → conflict.
+    /// conflict through shared-bigram overlap once the pair shares at least
+    /// [`STANCE_FLIP_MIN_SHARED_BIGRAMS`] bigrams.
+    /// Invariants: cache=None; stored "我喜欢应酬活动" + draft
+    /// "我讨厌应酬活动，太累了。" (3 shared bigrams) → conflict.
     #[tokio::test]
     async fn keyword_fallback_detects_conflict() {
         let embedder = Arc::new(StubEmbedder);
         let engine = PersonaCheckEngine::new(None, embedder, thresholds());
-        let stored = vec![persona_fact(1, FactType::Preference, false, "我喜欢应酬")];
+        let stored = vec![persona_fact(
+            1,
+            FactType::Preference,
+            false,
+            "我喜欢应酬活动",
+        )];
         let result = engine
-            .check("我讨厌应酬，太累了。", &stored)
+            .check("我讨厌应酬活动，太累了。", &stored)
             .await
             .expect("check");
         assert_eq!(result.conflicts.len(), 1, "keyword path flags the flip");
         assert_eq!(
             result.conflicts[0].stored_fact_id, 1,
             "references stored fact"
+        );
+    }
+
+    /// Objective: Verify the keyword path applies the documented ≥2 shared
+    /// bigram topic guard, so a single stray shared bigram no longer produces
+    /// a false conflict (the old `overlap >= 1` was too loose).
+    /// Invariants: 1 shared bigram ("应酬") → NO conflict; 2+ → conflict.
+    #[tokio::test]
+    async fn keyword_conflict_requires_two_shared_bigrams() {
+        let embedder = Arc::new(StubEmbedder);
+        let engine = PersonaCheckEngine::new(None, embedder, thresholds());
+
+        // 1 shared bigram: "我讨厌应酬，太累了。" vs "我喜欢应酬" overlap == 1.
+        let one = vec![persona_fact(1, FactType::Preference, false, "我喜欢应酬")];
+        let result = engine
+            .check("我讨厌应酬，太累了。", &one)
+            .await
+            .expect("check");
+        assert!(
+            result.conflicts.is_empty(),
+            "a single shared bigram must not be a topic match, got {:?}",
+            result.conflicts
+        );
+
+        // ≥2 shared bigrams: "我讨厌应酬活动…" vs "我喜欢应酬活动" overlap == 3.
+        let two = vec![persona_fact(
+            2,
+            FactType::Preference,
+            false,
+            "我喜欢应酬活动",
+        )];
+        let result = engine
+            .check("我讨厌应酬活动，太累了。", &two)
+            .await
+            .expect("check");
+        assert_eq!(
+            result.conflicts.len(),
+            1,
+            "two or more shared bigrams must be a topic match"
+        );
+        assert_eq!(result.conflicts[0].stored_fact_id, 2);
+    }
+
+    /// Objective: Verify unrelated same-type facts are never a conflict (the
+    /// documented "我讨厌应酬" vs "我喜欢安稳" example): they share 0 bigrams.
+    /// Invariants: 0 shared bigrams → no conflict (drift instead).
+    #[tokio::test]
+    async fn keyword_unrelated_topic_is_not_conflict() {
+        let embedder = Arc::new(StubEmbedder);
+        let engine = PersonaCheckEngine::new(None, embedder, thresholds());
+        let stored = vec![persona_fact(1, FactType::Preference, false, "我喜欢安稳")];
+        let result = engine
+            .check("我讨厌应酬，太累了。", &stored)
+            .await
+            .expect("check");
+        assert!(
+            result.conflicts.is_empty(),
+            "unrelated topic must not be flagged as a conflict, got {:?}",
+            result.conflicts
         );
     }
 

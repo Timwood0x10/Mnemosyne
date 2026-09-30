@@ -238,6 +238,18 @@ impl Experience {
             .insert(key.to_string(), serde_json::Value::from(votes));
         votes
     }
+
+    /// Returns `true` if this stored experience has expired relative to `now`.
+    ///
+    /// The store-side twin of [`Memory::is_expired`], kept deliberately
+    /// identical: an expiry exactly at `now` counts as expired (`<=`), and a
+    /// `None` expiry means the row never expires. Storage read paths enforce
+    /// this boundary (both in SQL and as a final in-memory gate), so this is
+    /// the single definition of the expiry boundary on the stored row.
+    #[must_use]
+    pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
+        matches!(self.expires_at, Some(t) if t <= now)
+    }
 }
 
 /// Origin of a memory, used for traceability and Evolution feedback.

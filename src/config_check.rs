@@ -8,7 +8,7 @@
 //!
 //! Read-only: it never rewrites a config file, and it never starts the server.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::config::resolve_resource_path;
 use crate::conversation_compiler::{MarkerReport, inspect_markers};
@@ -60,6 +60,30 @@ const RESOURCE_FILES: &[(&str, &str)] = &[
         "decay policy (absent = built-in defaults)",
     ),
     ("lexicon/packs", "lexicon packs directory"),
+    (
+        "lexicon/user.json",
+        "your own lexicon overlay (merged last; disables via `disabled`)",
+    ),
+];
+
+/// JSON resources the checker parses, so a malformed file is caught HERE rather
+/// than silently degrading the first request that needs it (audit H16).
+///
+/// The marker tables are deliberately absent: `inspect_markers` already parses
+/// them with richer bucket-level validation, so re-listing them would duplicate
+/// work. Every other resource is checked for JSON well-formedness — the loader
+/// level schema checks still run (and keep their own fallbacks) at first use.
+const JSON_RESOURCES: &[&str] = &[
+    "config/dictionary.json",
+    "config/emotion_lexicon.json",
+    "config/relation_rules.json",
+    "config/name_validation.json",
+    "config/faction_map.json",
+    "config/anchor_seeds.json",
+    "config/persona_prototypes.json",
+    "config/persona_cards.json",
+    "config/decay_config.json",
+    "lexicon/user.json",
 ];
 
 /// The result of a configuration check.
@@ -84,11 +108,90 @@ pub fn exit_code(report: &MarkerReport) -> i32 {
 /// Check the configuration and return the report plus an exit code.
 #[must_use]
 pub fn config_check() -> ConfigCheck {
+    config_check_at(&resolve_resource_path(""))
+}
+
+/// Check the configuration rooted at `root`.
+///
+/// Split from [`config_check`] so the resource-parsing behaviour is testable
+/// against a fixture tree without touching process-global state.
+#[must_use]
+fn config_check_at(root: &Path) -> ConfigCheck {
     let report = inspect_markers();
-    ConfigCheck {
-        lines: marker_report_lines(report),
-        exit_code: exit_code(report),
+    let failures = resource_parse_failures(root);
+    let mut lines = marker_report_lines(report);
+    if !failures.is_empty() {
+        lines.push(String::new());
+        lines.push("errors (fix these: a resource file is not valid JSON)".to_string());
+        for (relative, reason) in &failures {
+            lines.push(format!("  {relative}: {reason}"));
+        }
     }
+    ConfigCheck {
+        lines,
+        // A marker failure OR an unparsable resource fails the check.
+        exit_code: exit_code(report).max(i32::from(!failures.is_empty())),
+    }
+}
+
+/// Every `lexicon/packs/*.json` under `root`, sorted by name.
+fn domain_pack_paths(root: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(root.join("lexicon/packs")) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Parse every JSON resource under `root`; return `(relative path, reason)` for
+/// the ones that EXIST but are not valid JSON.
+///
+/// Absence is never a failure: the engine has built-in fallbacks and a minimal
+/// deployment may ship none of these files. The case the old checker missed is
+/// a file that is present and corrupt — it used to surface only at first use.
+fn resource_parse_failures(root: &Path) -> Vec<(String, String)> {
+    let config_files = JSON_RESOURCES
+        .iter()
+        .map(|relative| ((*relative).to_string(), root.join(relative)));
+    let pack_files = domain_pack_paths(root).into_iter().filter_map(|path| {
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .map(|name| (format!("lexicon/packs/{name}"), path))
+    });
+
+    let mut failures = Vec::new();
+    for (relative, path) in config_files.chain(pack_files) {
+        // Unreadable-as-missing is treated like absent, matching the loaders.
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Err(error) = serde_json::from_str::<serde_json::Value>(&text) {
+            failures.push((relative, error.to_string()));
+        }
+    }
+    failures
+}
+
+/// Ensure the built-in vocabulary is usable, mapping a broken resource to a
+/// startup error.
+///
+/// Called by `main` before it starts serving. A resource that EXISTS but cannot
+/// be parsed is a hard error — an operator who broke the file must not think it
+/// loaded (audit H18). An absent resource is fine, so a minimal deployment with
+/// no `config/` still starts.
+pub fn verify_vocabulary() -> Result<(), String> {
+    crate::lexicon::try_init()?;
+    crate::dictionary::try_init()?;
+    Ok(())
 }
 
 /// Format a marker-table report as printable lines.
@@ -386,6 +489,93 @@ mod tests {
         assert!(
             text.contains("resource files"),
             "the listing needs a heading, got:\n{text}"
+        );
+    }
+
+    /// Objective: Verify a resource file that exists but is not valid JSON is
+    /// reported by the checker and fails it. Before the fix only the marker
+    /// tables were parsed, so a broken `dictionary.json` passed `config-check`
+    /// and surfaced only at first use (audit H16).
+    /// Invariants: exit code 1; the error section names the file and states it
+    /// is not valid JSON.
+    #[test]
+    fn malformed_resource_is_reported_by_the_checker() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("config")).expect("create config dir");
+        std::fs::write(root.join("config/dictionary.json"), "{ this is not json")
+            .expect("write a broken resource");
+
+        let check = config_check_at(root);
+        assert_eq!(
+            check.exit_code, 1,
+            "an unparsable resource must fail the check"
+        );
+        let text = check.lines.join("\n");
+        assert!(
+            text.contains("is not valid JSON"),
+            "the checker must open a JSON error section, got:\n{text}"
+        );
+        assert!(
+            text.contains("config/dictionary.json"),
+            "the offending file must be named, got:\n{text}"
+        );
+    }
+
+    /// Objective: Verify the `lexicon/packs/*.json` overlay is parsed too, so a
+    /// corrupt pack is caught here rather than by the lexicon loader at first
+    /// use.
+    /// Invariants: the broken pack is named in the failure list.
+    #[test]
+    fn malformed_pack_is_reported_by_the_checker() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("lexicon/packs")).expect("create packs dir");
+        std::fs::write(root.join("lexicon/packs/broken.json"), "{ nope")
+            .expect("write a broken pack");
+
+        let failures = resource_parse_failures(root);
+        assert!(
+            failures
+                .iter()
+                .any(|(path, _)| path == "lexicon/packs/broken.json"),
+            "a broken pack must be reported, got {failures:?}"
+        );
+    }
+
+    /// Objective: Verify an absent resource is NOT reported: a minimal
+    /// deployment with no `config/` directory must still pass the check.
+    /// Invariants: an empty resource tree yields no failures.
+    #[test]
+    fn absent_resources_are_not_failures() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        assert!(
+            resource_parse_failures(dir.path()).is_empty(),
+            "an empty resource root must not report failures"
+        );
+    }
+
+    /// Objective: Verify every shipped resource parses: this is the regression
+    /// gate for `config/` and `lexicon/packs/` themselves, so a malformed
+    /// shipped file cannot reach a release (audit H16).
+    /// Invariants: no resource under the real root fails to parse.
+    #[test]
+    fn shipped_resources_all_parse() {
+        let failures = resource_parse_failures(&resolve_resource_path(""));
+        assert!(
+            failures.is_empty(),
+            "every shipped resource must be valid JSON, got {failures:?}"
+        );
+    }
+
+    /// Objective: Verify the startup vocabulary check accepts the shipped
+    /// config, so the new hard-failure wiring does not break the normal case.
+    /// Invariants: `verify_vocabulary()` returns `Ok(())`.
+    #[test]
+    fn verify_vocabulary_accepts_the_shipped_config() {
+        assert!(
+            verify_vocabulary().is_ok(),
+            "the shipped vocabulary must pass the startup check"
         );
     }
 }

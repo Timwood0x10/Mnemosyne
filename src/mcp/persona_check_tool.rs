@@ -254,23 +254,31 @@ mod tests {
     }
 
     /// Objective: Verify the tool flags a draft that contradicts a stored
-    /// persona fact (opposite negated, shared-bigram overlap) as a conflict.
-    /// Invariants: stored "我喜欢应酬" (negated=false) + draft "我讨厌应酬" →
-    /// one conflict, clean=false, no drift.
+    /// persona fact (opposite negated, ≥2 shared-bigram topic overlap) as a
+    /// conflict.
+    /// Invariants: stored "我喜欢应酬活动" (negated=false) + draft
+    /// "我讨厌应酬活动，太累了。" (3 shared bigrams) → one conflict, clean=false,
+    /// no drift.
     #[tokio::test]
     async fn contradictory_draft_reports_conflict() {
         let store = Arc::new(SqliteFactStore::open_in_memory().expect("fact store"));
         let entity_id = store
             .resolve_agent("tenant-a", "agent-bailiusu")
             .expect("resolve agent");
-        seed_persona_fact(&store, entity_id, FactType::Preference, false, "我喜欢应酬");
+        seed_persona_fact(
+            &store,
+            entity_id,
+            FactType::Preference,
+            false,
+            "我喜欢应酬活动",
+        );
         let tool = keyword_tool(store).await;
 
         let result = tool
             .call(&json!({
                 "tenant_id": "tenant-a",
                 "agent_id": "agent-bailiusu",
-                "draft": "我讨厌应酬，太累了。"
+                "draft": "我讨厌应酬活动，太累了。"
             }))
             .await
             .expect("call succeeds");

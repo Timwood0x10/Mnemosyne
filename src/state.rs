@@ -24,12 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cognition::{Fact, FactType};
 use crate::persona::check::shared_bigrams;
-
-/// Minimum number of shared character-bigrams required for two same-type,
-/// opposite-negated facts to count as a `StanceFlip` transition. Mirrors
-/// `persona/timeline.rs::STANCE_FLIP_MIN_SHARED_BIGRAMS` so the cognitive
-/// layer and the persona layer agree on what counts as a stance change.
-const STANCE_FLIP_MIN_SHARED_BIGRAMS: usize = 2;
+use crate::persona::timeline::STANCE_FLIP_MIN_SHARED_BIGRAMS;
 
 /// Payload fields that identify the *topic* two states have in common.
 ///

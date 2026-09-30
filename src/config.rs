@@ -504,6 +504,10 @@ impl CliArgs {
     ///
     /// Returns [`Error::Config`] if the resulting config fails validation.
     pub fn into_config(self) -> Result<Config> {
+        // Reject an empty/whitespace bearer token before anything else: an
+        // operator who set `--http-token ""` must not believe auth is on while
+        // the HTTP server is effectively open (audit L9).
+        validate_http_token(self.http_token.as_deref())?;
         let embedding_provider = self
             .embedding_provider
             .parse::<EmbeddingProvider>()
@@ -533,6 +537,29 @@ impl CliArgs {
         }
         cfg.validate()?;
         Ok(cfg)
+    }
+}
+
+/// Reject an empty or whitespace-only bearer token.
+///
+/// `Some("")` passes every other check but makes the token comparison match an
+/// almost-unauthenticated client, so the operator is misled into thinking the
+/// HTTP transport is protected. Only `None` (no auth, trusted local use) or a
+/// non-empty token are legal; this is enforced both here (startup, via
+/// [`CliArgs::into_config`]) and again in `mcp::http_server::serve_http` so a
+/// direct caller cannot bypass it.
+///
+/// # Errors
+///
+/// Returns [`Error::Config`] when a token is present but blank after trimming.
+pub(crate) fn validate_http_token(token: Option<&str>) -> Result<()> {
+    match token {
+        Some(t) if t.trim().is_empty() => Err(Error::Config(
+            "http_token must not be empty or whitespace-only: an empty token leaves \
+             the HTTP server effectively unauthenticated"
+                .into(),
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -642,6 +669,66 @@ mod tests {
         assert!(
             err.contains("retrieval_mode=vector"),
             "error must mention the retrieval mode mismatch, got: {err}"
+        );
+    }
+
+    /// Objective: Verify an empty/whitespace bearer token is rejected while a
+    /// real token or no token is accepted (audit L9).
+    /// Invariants: `None` and a non-empty token pass; `""` and `"   \t"` fail
+    /// with an error naming the `http_token` field.
+    #[test]
+    fn validate_http_token_rejects_blank() {
+        assert!(
+            validate_http_token(None).is_ok(),
+            "no token (local trust mode) must be accepted"
+        );
+        assert!(
+            validate_http_token(Some("s3cret")).is_ok(),
+            "a non-empty token must be accepted"
+        );
+        let empty = validate_http_token(Some(""));
+        assert!(empty.is_err(), "an empty token must be rejected");
+        assert!(
+            empty.unwrap_err().to_string().contains("http_token"),
+            "the error must name the offending field"
+        );
+        assert!(
+            validate_http_token(Some("   \t")).is_err(),
+            "a whitespace-only token must be rejected"
+        );
+    }
+
+    /// Objective: Verify the startup path (`CliArgs::into_config`) refuses to
+    /// build a config from a blank HTTP token (audit L9).
+    /// Invariants: `into_config` returns `Error::Config` when the token is
+    /// blank, so the operator learns auth is off at startup.
+    #[test]
+    fn into_config_rejects_blank_http_token() {
+        let args = CliArgs {
+            command: None,
+            db_path: "/tmp/test.db".into(),
+            vector_dim: 0,
+            embedding_url: "http://localhost:8000".into(),
+            embedding_model: "e5-large".into(),
+            embedding_timeout_ms: 60_000,
+            min_importance: 0.5,
+            conflict_threshold: 0.9,
+            max_memories_per_distillation: 5,
+            max_solutions_per_tenant: 1000,
+            disable_cross_turn: false,
+            embedding_provider: "none".into(),
+            retrieval_mode: "keyword".into(),
+            openai_api_key: None,
+            transport: "http".into(),
+            http_addr: "127.0.0.1:5609".into(),
+            http_token: Some("   ".into()),
+        };
+        let err = args
+            .into_config()
+            .expect_err("a blank HTTP token must fail config construction");
+        assert!(
+            matches!(err, Error::Config(_)),
+            "expected a Config error, got {err:?}"
         );
     }
 

@@ -16,8 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::LazyLock;
-use std::sync::RwLock;
+use std::sync::{LazyLock, Mutex, RwLock};
 
 use serde::{Deserialize, Serialize};
 
@@ -185,14 +184,20 @@ impl Dictionary {
     }
 
     /// Load the dictionary from a custom JSON path.
+    ///
+    /// Lexemes whose `status` is [`LexemeStatus::Disabled`] are dropped here,
+    /// so they contribute neither to the lemma/class indexes nor to the flat
+    /// verb sets. `Disabled` documents itself as "excluded from matchers
+    /// entirely" (ELITE_LEXICON_PLAN §10) and is the only user-facing way to
+    /// turn a shipped word off, so `is_active` must gate every consumer.
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let text = std::fs::read_to_string(path)?;
         let file: DictionaryFile = serde_json::from_str(&text)?;
 
-        // Index lexemes.
+        // Index lexemes (skipping disabled ones entirely).
         let mut lexemes_by_lemma: HashMap<String, Vec<Lexeme>> = HashMap::new();
         let mut lexemes_by_class: HashMap<String, Vec<Lexeme>> = HashMap::new();
-        for lex in &file.lexemes {
+        for lex in file.lexemes.iter().filter(|lex| lex.status.is_active()) {
             let lemma = lex.lemma.to_lowercase();
             lexemes_by_lemma.entry(lemma).or_default().push(lex.clone());
             lexemes_by_class
@@ -221,7 +226,7 @@ impl Dictionary {
         let mut zh_hostile = HashSet::new();
         let mut zh_friendly = HashSet::new();
 
-        for lex in &file.lexemes {
+        for lex in file.lexemes.iter().filter(|lex| lex.status.is_active()) {
             let all_forms = std::iter::once(&lex.lemma)
                 .chain(lex.forms.iter())
                 .map(|f| f.to_lowercase())
@@ -364,23 +369,74 @@ impl Dictionary {
 // ── Global singleton ────────────────────────────────────────────────────────
 
 static DICT: LazyLock<RwLock<Dictionary>> = LazyLock::new(|| {
-    // Fail soft instead of panicking on first use: a missing/corrupt
-    // `config/dictionary.json` used to abort the process the moment any
-    // caller touched the global dictionary. Degrade to an EMPTY dictionary
-    // (stop-word/verb lookups just miss) and log the cause, so a deployment
-    // without the config stays alive and diagnosable.
-    let dict = match Dictionary::load_default() {
+    // Two different situations, two different severities:
+    //
+    // - ABSENT: a legitimate minimal deployment with no vocabulary at all. The
+    //   engine still runs, so this is a warning, NOT a startup error.
+    // - PRESENT BUT UNPARSABLE: the operator edited the file and broke it. We
+    //   still degrade to an EMPTY dictionary (stop-word/verb lookups just miss)
+    //   so a request never panics, but the cause is logged at ERROR level AND
+    //   stashed in `LOAD_ERROR` so startup code turns it into a hard failure
+    //   via [`try_init`] — a broken file must not "think it loaded" (H18).
+    let path = crate::config::resolve_resource_path("config/dictionary.json");
+    if !path.exists() {
+        tracing::warn!(
+            path = %path.display(),
+            "config/dictionary.json is absent; using an empty dictionary"
+        );
+        return RwLock::new(Dictionary::default());
+    }
+    let dict = match Dictionary::load(&path) {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!(
+            let msg = format!("config/dictionary.json exists but failed to load: {e}");
+            tracing::error!(
                 error = %e,
-                "config/dictionary.json failed to load; using an empty dictionary"
+                path = %path.display(),
+                "config/dictionary.json exists but failed to load; using an empty dictionary"
             );
+            record_load_error(msg);
             Dictionary::default()
         }
     };
     RwLock::new(dict)
 });
+
+/// The load failure recorded by the [`DICT`] initializer, if any.
+static LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Stash the singleton's load failure so [`try_init`] can surface it.
+fn record_load_error(message: String) {
+    // The slot is written once, during `DICT` initialization, and only read
+    // afterwards; no user code runs while the guard is held, so it cannot be
+    // poisoned. A poisoned lock is treated as "no recorded error".
+    if let Ok(mut slot) = LOAD_ERROR.lock() {
+        *slot = Some(message);
+    }
+}
+
+/// Force the global dictionary to load and report whether it succeeded.
+///
+/// Startup code calls this so a broken dictionary becomes a visible startup
+/// failure instead of a silent one. Returns `Err(reason)` only when
+/// `config/dictionary.json` EXISTS but could not be parsed; an absent file is a
+/// legitimate minimal deployment and returns `Ok(())`.
+pub fn try_init() -> Result<(), String> {
+    // Touch the LazyLock so the load happens now, not on the first request.
+    let loaded = DICT.read().is_ok();
+    if !loaded {
+        return Err("global dictionary read lock is poisoned".to_string());
+    }
+    match LOAD_ERROR.lock() {
+        Ok(slot) => match slot.as_ref() {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(()),
+        },
+        // A poisoned slot means another thread panicked mid-write; the
+        // dictionary itself loaded (see above), so do not fail the process.
+        Err(_) => Ok(()),
+    }
+}
 
 /// Reload the global dictionary from its default path (for hot-reload or testing).
 pub fn reload() -> Result<(), Box<dyn std::error::Error>> {
@@ -539,6 +595,78 @@ mod tests {
             experimental_round_trip,
             LexemeStatus::Deprecated,
             "Experimental demote+rollback lands on Deprecated, never Core"
+        );
+    }
+
+    /// A minimal attack lexeme JSON object with the given id/lemma/status.
+    fn lexeme_json(id: &str, lemma: &str, status: &str) -> String {
+        format!(
+            r#"{{"id":"{id}","language":"en","lemma":"{lemma}","pos":"verb","semantic_class":"attack","effects":[],"polarity":"neutral","priority":500,"constraints":{{"word_boundary":true,"allow_single":false,"requires_participant":false,"requires_subject":false}},"source":{{"kind":"builtin","name":"test"}},"status":"{status}"}}"#
+        )
+    }
+
+    /// Objective: Verify a `Disabled` lexeme contributes to no index or verb set,
+    /// so marking a shipped word `"status": "disabled"` really turns it off.
+    /// `is_active` had no production caller, so the flag documented as
+    /// "excluded from matchers entirely" did nothing (audit H17).
+    /// Invariants: the active lemma is visible; the disabled one is absent from
+    /// both `lookup` and the hostile-verb set.
+    #[test]
+    fn disabled_lexemes_are_excluded_from_the_dictionary() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("dictionary.json");
+        let body = format!(
+            r#"{{"lexemes":[{},{}]}}"#,
+            lexeme_json("en.test.active", "zzzactiveverb", "core"),
+            lexeme_json("en.test.disabled", "zzzdisabledverb", "disabled")
+        );
+        std::fs::write(&path, body).expect("write fixture");
+
+        let dict = Dictionary::load(&path).expect("fixture must load");
+
+        assert!(
+            !dict.lookup("zzzactiveverb").is_empty(),
+            "an active lexeme must be indexed"
+        );
+        assert!(
+            dict.lookup("zzzdisabledverb").is_empty(),
+            "a disabled lexeme must not be indexed"
+        );
+        assert!(
+            dict.english_hostile_verbs().contains("zzzactiveverb"),
+            "an active attack lexeme must reach the hostile verb set"
+        );
+        assert!(
+            !dict.english_hostile_verbs().contains("zzzdisabledverb"),
+            "a disabled attack lexeme must not reach the hostile verb set"
+        );
+    }
+
+    /// Objective: Verify the failure path `try_init` surfaces — a malformed
+    /// dictionary file is reported as an error rather than silently becoming an
+    /// empty table (audit H18).
+    /// Invariants: `Dictionary::load` returns `Err` for invalid JSON.
+    #[test]
+    fn load_reports_malformed_json() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let path = dir.path().join("broken.json");
+        std::fs::write(&path, r#"{"lexemes": [ this is not json"#).expect("write broken fixture");
+
+        let result = Dictionary::load(&path);
+        assert!(
+            result.is_err(),
+            "malformed JSON must surface as an Err, got {result:?}"
+        );
+    }
+
+    /// Objective: Verify the global singleton reports a clean load when the
+    /// shipped config is present, so `try_init` is `Ok` in the normal case.
+    /// Invariants: `try_init()` returns `Ok(())`.
+    #[test]
+    fn try_init_succeeds_with_the_shipped_config() {
+        assert!(
+            try_init().is_ok(),
+            "the shipped config/dictionary.json must load cleanly"
         );
     }
 }

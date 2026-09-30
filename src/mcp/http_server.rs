@@ -309,15 +309,35 @@ impl AppState {
     }
 }
 
-/// Compare two byte slices without early exit, so a timing side channel
-/// cannot leak the expected token's content or length.
+/// Compare two byte slices without a length-based early exit, so a timing side
+/// channel cannot leak the expected token's length (audit L9 / review L3).
+///
+/// Both inputs are folded into a fixed-width digest with a per-process random
+/// key, and the digests are compared with a fixed 8-iteration loop. The old
+/// implementation returned `false` immediately when the lengths differed,
+/// letting an attacker measure how long the expected token was; the digest
+/// step also keeps the loop count independent of input length. The random key
+/// (rather than `DefaultHasher`'s fixed keys) prevents an offline attacker from
+/// crafting a collision that would pass authentication.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hash, Hasher};
+
+    // One random state → both digests share the same key, so equal inputs
+    // produce equal digests while a different process key defeats precomputed
+    // collisions.
+    let state = RandomState::new();
+    let mut ha = state.build_hasher();
+    a.hash(&mut ha);
+    let mut hb = state.build_hasher();
+    b.hash(&mut hb);
+    let x = ha.finish().to_le_bytes();
+    let y = hb.finish().to_le_bytes();
+
+    // Fixed 8-iteration loop: the count never depends on input length.
+    let mut diff = 0u8;
+    for (xa, ya) in x.iter().zip(y.iter()) {
+        diff |= xa ^ ya;
     }
     diff == 0
 }
@@ -538,6 +558,12 @@ pub async fn serve_http(
     listener: tokio::net::TcpListener,
     token: Option<String>,
 ) -> Result<()> {
+    // Refuse to start with a blank token: it looks like authentication is on
+    // while the server effectively accepts an empty credential (audit L9).
+    // Validated here (not only in `CliArgs::into_config`) so a direct caller
+    // cannot bypass the check.
+    crate::config::validate_http_token(token.as_deref())?;
+
     let (request_tx, request_rx) = mpsc::channel(256);
     // Session map shared by the transport (routing replies) and the handlers
     // (issuing/subscribing per-session channels).
@@ -586,6 +612,70 @@ pub async fn serve_http_addr(
 // ───────────────────────────────────────────────────────────────────────────
 // Tests
 // ───────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+
+    /// Objective: Verify the constant-time comparison accepts identical byte
+    /// sequences, including the empty sequence.
+    /// Invariants: equal inputs compare equal.
+    #[test]
+    fn constant_time_eq_accepts_identical_bytes() {
+        assert!(
+            constant_time_eq(b"sekrit-token", b"sekrit-token"),
+            "equal byte strings must compare equal"
+        );
+        assert!(
+            constant_time_eq(b"", b""),
+            "two empty byte strings must compare equal"
+        );
+    }
+
+    /// Objective: Verify a single differing byte is rejected (the comparison
+    /// does not silently accept near-matches).
+    /// Invariants: one differing byte → false.
+    #[test]
+    fn constant_time_eq_rejects_different_bytes() {
+        assert!(
+            !constant_time_eq(b"sekrit-token", b"sekrit-tokee"),
+            "a single differing byte must compare unequal"
+        );
+    }
+
+    /// Objective: Verify unequal lengths are rejected. The old implementation
+    /// returned early on a length mismatch, letting an attacker measure the
+    /// expected token's length; the digest path must not (audit L9).
+    /// Invariants: a length mismatch → false, without a length-based early
+    /// return.
+    #[test]
+    fn constant_time_eq_rejects_unequal_lengths() {
+        assert!(
+            !constant_time_eq(b"sekrit", b"sekrit-token"),
+            "a length mismatch must compare unequal"
+        );
+    }
+
+    /// Objective: Verify `serve_http` refuses a blank token so a direct caller
+    /// cannot start an effectively unauthenticated server even when the CLI
+    /// path was bypassed (audit L9).
+    /// Invariants: `serve_http(.., Some("   "))` returns `Err`.
+    #[tokio::test]
+    async fn serve_http_rejects_a_blank_token() {
+        let server = MCPServer::new(crate::mcp::types::Implementation {
+            name: "auth-test".into(),
+            version: "0.0.1".into(),
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind an ephemeral port");
+        let result = serve_http(server, listener, Some("   ".to_string())).await;
+        assert!(
+            result.is_err(),
+            "a whitespace-only token must be refused before serving, got {result:?}"
+        );
+    }
+}
 
 #[cfg(test)]
 #[path = "http_server_tests.rs"]

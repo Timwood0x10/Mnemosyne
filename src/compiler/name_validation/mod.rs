@@ -15,6 +15,7 @@
 //! unparseable — they keep the validator functional, never the primary
 //! configuration.
 
+use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use serde::Deserialize;
@@ -30,17 +31,54 @@ pub struct NameValidationConfig {
     pub noun_tails: Vec<String>,
 }
 
-/// Load the config: resource root `config/name_validation.json` → fallback.
-fn load_config() -> NameValidationConfig {
-    let path = crate::config::resolve_resource_path("config/name_validation.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(fallback_config)
+/// Resolve the config path: `NAME_VALIDATION_PATH` (explicit) → resource root.
+///
+/// An explicit env override is how a user points the validator at their own
+/// table; the bundled default is only used when the variable is unset.
+fn resolve_config_path() -> PathBuf {
+    match std::env::var("NAME_VALIDATION_PATH") {
+        Ok(p) if !p.trim().is_empty() => PathBuf::from(p),
+        _ => crate::config::resolve_resource_path("config/name_validation.json"),
+    }
+}
+
+/// Parse the validation tables from an explicit path.
+///
+/// A caller that was handed a path (via `NAME_VALIDATION_PATH`) uses this to
+/// surface a broken config instead of silently running on the built-in tables.
+///
+/// # Errors
+///
+/// Returns a description naming the offending path when the file cannot be
+/// read or is not valid JSON.
+pub fn load_config_from_path(path: &Path) -> Result<NameValidationConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("invalid JSON in `{}`: {e}", path.display()))
+}
+
+/// Load the config, or report why it failed.
+///
+/// The old `.ok()` chain folded I/O and syntax errors into the fallback with
+/// zero logging, so a stray comma silently swapped the whole table set
+/// (audit H16); the error is now returned so the caller can log it loudly.
+fn load_config() -> Result<NameValidationConfig, String> {
+    load_config_from_path(&resolve_config_path())
 }
 
 /// Cached, process-wide config (P3: never re-read the file per line).
-static CONFIG: LazyLock<NameValidationConfig> = LazyLock::new(load_config);
+static CONFIG: LazyLock<NameValidationConfig> = LazyLock::new(|| match load_config() {
+    Ok(cfg) => cfg,
+    Err(e) => {
+        // Make the fallback VISIBLE so a broken user table is diagnosable
+        // (audit H16).
+        tracing::warn!(
+            error = %e,
+            "name_validation config could not be loaded; using the built-in fallback tables"
+        );
+        fallback_config()
+    }
+});
 
 mod fallback;
 
@@ -176,6 +214,33 @@ mod tests {
         assert!(
             !is_plausible_person_name("牛角"),
             "noun tail still rejected"
+        );
+    }
+
+    /// Objective: Verify a malformed validation table is reported as an error
+    /// instead of silently swapping in the built-in fallback (audit H16).
+    /// Invariants: `load_config_from_path` returns `Err` naming the file for
+    /// invalid JSON, and the fallback tables still keep the validator usable.
+    #[test]
+    fn malformed_name_validation_config_is_reported() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let bad = dir.path().join("name_validation.json");
+        std::fs::write(&bad, "{ \"surnames\": [ , ] }").expect("write malformed");
+        let err = load_config_from_path(&bad).expect_err("malformed JSON must be an error");
+        assert!(
+            err.contains("invalid JSON"),
+            "error must mention the parse failure, got: {err}"
+        );
+        assert!(
+            err.contains("name_validation.json"),
+            "error must name the offending file, got: {err}"
+        );
+        // The built-in fallback still validates names, so a bad file degrades
+        // to working defaults rather than a dead validator.
+        let fallback = fallback_config();
+        assert!(
+            fallback.surnames.iter().any(|s| s == "公孙"),
+            "fallback tables must still carry compound surnames"
         );
     }
 }

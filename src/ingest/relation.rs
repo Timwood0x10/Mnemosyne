@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::LazyLock;
 
 use super::characters::{NOVELS, get_novel_characters};
@@ -9,35 +10,66 @@ use serde::Deserialize;
 // JSON config types
 // ═══════════════════════════════════════════════════════════════
 
-#[derive(Deserialize, Clone)]
-struct RelationRulesConfig {
+#[derive(Debug, Deserialize, Clone)]
+pub struct RelationRulesConfig {
     relation_type_rules: Vec<RelationTypeRuleConfig>,
     dialog_address_rules: Vec<DialogAddressRuleConfig>,
 }
 
-#[derive(Deserialize, Clone)]
-struct RelationTypeRuleConfig {
+#[derive(Debug, Deserialize, Clone)]
+pub struct RelationTypeRuleConfig {
     #[serde(rename = "type")]
     r#type: String,
     keywords: Vec<String>,
     faction_constraint: String,
 }
 
-#[derive(Deserialize, Clone)]
-struct DialogAddressRuleConfig {
+#[derive(Debug, Deserialize, Clone)]
+pub struct DialogAddressRuleConfig {
     keywords: Vec<String>,
     relation_type: String,
 }
 
-fn load_config() -> RelationRulesConfig {
-    let path = crate::config::resolve_resource_path("config/relation_rules.json");
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(fallback_config)
+/// Parse relation rules from an explicit path.
+///
+/// Callers that were handed a path by the operator (rather than falling back
+/// to the bundled default) use this to surface a broken config as an error
+/// instead of silently running with a different rule set.
+///
+/// # Errors
+///
+/// Returns a description naming the offending path when the file cannot be
+/// read or is not valid JSON.
+pub fn load_config_from_path(path: &Path) -> Result<RelationRulesConfig, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("invalid JSON in `{}`: {e}", path.display()))
 }
 
-static CONFIG: LazyLock<RelationRulesConfig> = LazyLock::new(load_config);
+/// Load the config from the resource root, or report why it failed.
+///
+/// A parse failure used to be folded into `.ok()` with zero logging, so a
+/// stray comma silently swapped the entire rule set for the built-in fallback
+/// (audit H16); the error is now returned so the caller can log it.
+fn load_config() -> Result<RelationRulesConfig, String> {
+    let path = crate::config::resolve_resource_path("config/relation_rules.json");
+    load_config_from_path(&path)
+}
+
+static CONFIG: LazyLock<RelationRulesConfig> = LazyLock::new(|| {
+    match load_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // Make the fallback VISIBLE: a malformed user config must not look
+            // like a clean start (audit H16).
+            tracing::warn!(
+                error = %e,
+                "config/relation_rules.json could not be loaded; using the built-in relation rules"
+            );
+            fallback_config()
+        }
+    }
+});
 
 /// Builtin fallback rules used when no JSON config is found.
 fn fallback_config() -> RelationRulesConfig {
@@ -628,5 +660,45 @@ mod tests {
                 assert!(!kw.is_empty(), "empty keyword in rule {rtype}");
             }
         }
+    }
+
+    /// Objective: Verify a malformed relation-rules file is reported as an
+    /// error instead of being silently swapped for the built-in rules
+    /// (audit H16: the old `.ok()` chain hid every parse failure).
+    /// Invariants: `load_config_from_path` returns `Err` naming the offending
+    /// file for invalid JSON.
+    #[test]
+    fn malformed_relation_rules_are_reported() {
+        let dir = tempfile::TempDir::new().expect("temp dir");
+        let bad = dir.path().join("relation_rules.json");
+        std::fs::write(&bad, "{ \"relation_type_rules\": [ , ] }").expect("write malformed");
+        let err = load_config_from_path(&bad).expect_err("malformed JSON must be an error");
+        assert!(
+            err.contains("invalid JSON"),
+            "error must mention the parse failure, got: {err}"
+        );
+        assert!(
+            err.contains("relation_rules.json"),
+            "error must name the offending file, got: {err}"
+        );
+    }
+
+    /// Objective: Verify the shipped `config/relation_rules.json` actually
+    /// parses, so the runtime never silently falls back to the built-in rules.
+    /// Invariants: Parsing the bundled file succeeds and yields a non-empty
+    /// rule set.
+    #[test]
+    fn shipped_relation_rules_parse() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/relation_rules.json");
+        let cfg = load_config_from_path(&path)
+            .unwrap_or_else(|e| panic!("shipped relation_rules.json must parse: {e}"));
+        assert!(
+            !cfg.relation_type_rules.is_empty(),
+            "shipped relation rules must define at least one relation type"
+        );
+        assert!(
+            !cfg.dialog_address_rules.is_empty(),
+            "shipped relation rules must define at least one dialog address rule"
+        );
     }
 }

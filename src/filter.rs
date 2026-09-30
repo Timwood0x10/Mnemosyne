@@ -86,6 +86,14 @@ impl NoiseFilter {
     /// - content shorter than [`MIN_MEANINGFUL_LENGTH`], or
     /// - content starting with a known chatter phrase, or
     /// - content longer than [`MAX_MESSAGE_LENGTH`] (likely a transcript).
+    ///
+    /// The chatter check is *subordinate* to [`crate::detector::is_problem`]:
+    /// when the detector already recognised a real problem indicator, the
+    /// message survives even if it opens with a chatter word. Without this the
+    /// two gates disagreed on the same string — `"Sure, how do I fix the
+    /// ECONNRESET connection error"` is a problem (contains `how do i`) but was
+    /// still discarded as chatter because it opens with `sure` and carries no
+    /// `?` (audit H13).
     #[must_use]
     pub fn is_noise(&self, msg: &Message) -> bool {
         let trimmed = msg.content.trim();
@@ -99,6 +107,10 @@ impl NoiseFilter {
         }
         if trimmed.len() > MAX_MESSAGE_LENGTH {
             return true;
+        }
+        // A detector-confirmed problem is never chatter, whatever its opening.
+        if crate::detector::is_problem(msg) {
+            return false;
         }
         let lower = trimmed.to_lowercase();
         if CHATTER_PHRASES
@@ -159,7 +171,11 @@ impl SecurityFilter {
     ///
     /// # Arguments
     ///
-    /// * `msg` - The message to scan. Case-insensitive substring match is used.
+    /// * `msg` - The message to scan. Case-insensitive match is used.
+    ///
+    /// The built-in set recognises both bare credential markers and the
+    /// `name` + optional-whitespace + `:`/`=` assignments that ordinary prose
+    /// would otherwise hide (see [`contains_secret`]).
     #[must_use]
     pub fn is_sensitive(&self, msg: &Message) -> bool {
         let lower = msg.content.to_lowercase();
@@ -170,11 +186,15 @@ impl SecurityFilter {
                 .iter()
                 .any(|p| lower.contains(&p.to_lowercase()));
         }
-        SECRET_INDICATORS.iter().any(|p| lower.contains(p))
+        contains_secret(&lower)
     }
 }
 
-/// Built-in secret-indicator substrings, lowercase.
+/// Unambiguous secret markers, lowercase, matched as bare substrings.
+///
+/// These are specific enough that a bare mention already indicates a
+/// credential (an underscore/dash key name, a PEM header, or a vendor prefix),
+/// so no separator is required.
 const SECRET_INDICATORS: &[&str] = &[
     "api_key",
     "api-key",
@@ -185,18 +205,78 @@ const SECRET_INDICATORS: &[&str] = &[
     "access-token",
     "auth_token",
     "auth-token",
-    "bearer ",
-    "password=",
-    "password: ",
-    "passwd=",
     "private_key",
     "private-key",
+    "aws_secret_access_key",
+    "client_secret",
     "begin rsa private key",
     "begin openvpn static key",
     "begin private key",
-    "aws_secret_access_key",
-    "client_secret",
 ];
+
+/// Key names that are ordinary English words, so a bare mention is NOT a
+/// secret (`"I forgot my password"`). They only count when followed by
+/// optional whitespace and an assignment separator (`:` / `=`) — the shape a
+/// pasted credential takes (`password:hunter2`, `passwd = x`, `pwd=`).
+const SECRET_ASSIGNMENT_NAMES: &[&str] = &["password", "passwd", "pwd", "secret", "token"];
+
+/// High-entropy vendor prefixes, paired with the minimum number of trailing
+/// key characters required. The length floor keeps `sk-` from flagging prose
+/// like `"risk-averse"` or `"task-list"`.
+const CREDENTIAL_PREFIXES: &[(&str, usize)] = &[("sk-", 8), ("ghp_", 8), ("akia", 12)];
+
+/// True when `lower` contains `name` + optional whitespace + `:`/`=`.
+///
+/// The whitespace is trimmed from the text after the name so both
+/// `password:hunter2` and `password = x` are caught without depending on the
+/// exact byte after the name (audit H14).
+fn has_assignment_secret(lower: &str) -> bool {
+    SECRET_ASSIGNMENT_NAMES.iter().any(|name| {
+        lower.match_indices(name).any(|(i, _)| {
+            let rest = lower[i + name.len()..].trim_start();
+            rest.starts_with(':') || rest.starts_with('=')
+        })
+    })
+}
+
+/// True when `lower` contains an `Authorization: Bearer <value>` shape.
+///
+/// The scheme must be followed by whitespace and then a non-empty value, so
+/// `"bearers of good news"` and a bare `"bearer"` do not match.
+fn has_bearer_value(lower: &str) -> bool {
+    lower.match_indices("bearer").any(|(i, _)| {
+        let rest = &lower[i + "bearer".len()..];
+        (rest.starts_with(' ') || rest.starts_with('\t')) && !rest.trim_start().is_empty()
+    })
+}
+
+/// True when `lower` contains a vendor credential prefix with enough trailing
+/// key material. The prefix must sit on a word boundary so `sk-` inside
+/// `"risk-averse"` is not mistaken for a leaked key.
+fn has_credential_prefix(lower: &str) -> bool {
+    CREDENTIAL_PREFIXES.iter().any(|(prefix, min_len)| {
+        lower.match_indices(prefix).any(|(i, _)| {
+            let boundary_ok = i == 0
+                || !lower[..i]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|c| c.is_alphanumeric());
+            let trailing = lower[i + prefix.len()..]
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .count();
+            boundary_ok && trailing >= *min_len
+        })
+    })
+}
+
+/// True when `lower` contains any recognised secret shape.
+fn contains_secret(lower: &str) -> bool {
+    SECRET_INDICATORS.iter().any(|p| lower.contains(p))
+        || has_assignment_secret(lower)
+        || has_bearer_value(lower)
+        || has_credential_prefix(lower)
+}
 
 #[cfg(test)]
 mod tests {
@@ -306,5 +386,96 @@ mod tests {
         let lower = Message::new("user", "my api_key is leaked");
         assert!(f.is_sensitive(&upper), "uppercase indicator matches");
         assert!(f.is_sensitive(&lower), "lowercase indicator matches");
+    }
+
+    /// Objective: Verify the no-space and whitespace-variant secret shapes are
+    /// all caught (audit H14: `password:` without a space, `pwd=`, `token=`,
+    /// `secret=` at end of line, `passwd: x`, `password = x`).
+    /// Invariants: Every listed credential shape is flagged sensitive.
+    #[test]
+    fn security_filter_catches_no_space_shapes() {
+        let f = SecurityFilter::new();
+        let cases = [
+            "export password:hunter2",
+            "password:sk-abcdefghij",
+            "passwd: hunter2",
+            "passwd=hunter2",
+            "pwd=hunter2",
+            "pwd = hunter2",
+            "token=sk-abcdefghij",
+            "access_token=sk-abcdefghij",
+            "secret=xyz",
+            "api_key=sk-abcdefghij",
+            "apikey=sk-abcdefghij",
+            "Authorization: Bearer abc123",
+            "AKIAABCDEFGHIJKLMNOP",
+            "ghp_abcdefghijklmnop",
+            "sk-abcdefghijklmnop",
+            "line ends with secret:",
+        ];
+        for text in cases {
+            let msg = Message::new("user", text);
+            assert!(
+                f.is_sensitive(&msg),
+                "input `{text}` should be flagged as sensitive"
+            );
+        }
+    }
+
+    /// Objective: Verify ordinary prose about secrets is NOT over-matched —
+    /// the guarded matchers must not degrade the filter into a keyword blocker
+    /// (audit H14 explicitly warns against over-matching).
+    /// Invariants: None of the negative cases is flagged sensitive.
+    #[test]
+    fn security_filter_does_not_overmatch_prose() {
+        let f = SecurityFilter::new();
+        let cases = [
+            "I forgot my password again",
+            "please reset the password for my account",
+            "the token bucket refills every hour",
+            "token ring networking explained",
+            "bearers of good news arrived",
+            "this is a secret I want to share with you",
+            "what is the secret to a long life",
+            "risk-averse investors avoid volatility",
+            "task-list apps help me stay organised",
+            "I know the password to success is hard work",
+        ];
+        for text in cases {
+            let msg = Message::new("user", text);
+            assert!(
+                !f.is_sensitive(&msg),
+                "input `{text}` must NOT be flagged as sensitive"
+            );
+        }
+    }
+
+    /// Objective: Verify the noise gate defers to the problem detector (audit
+    /// H13): a message that opens with chatter but carries a real problem
+    /// indicator must survive, while plain chatter is still dropped.
+    /// Invariants: `is_problem`-positive messages are never noise, regardless
+    /// of their chatter prefix or absence of `?`.
+    #[test]
+    fn noise_filter_defers_to_problem_detector() {
+        let f = NoiseFilter::new();
+        let real_problem =
+            Message::new("user", "Sure, how do I fix the ECONNRESET connection error");
+        assert!(
+            crate::detector::is_problem(&real_problem),
+            "precondition: detector flags the message as a real problem"
+        );
+        assert!(
+            !f.is_noise(&real_problem),
+            "a detector-confirmed problem must survive the noise gate"
+        );
+        let plain_chatter = Message::new("user", "sure, that works for me");
+        assert!(
+            !crate::detector::is_problem(&plain_chatter),
+            "precondition: plain chatter is not a problem"
+        );
+        assert!(
+            f.is_noise(&plain_chatter),
+            "plain chatter without a problem indicator is still noise"
+        );
     }
 }

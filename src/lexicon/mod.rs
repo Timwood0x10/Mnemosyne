@@ -13,7 +13,7 @@
 //! |---|---|---|
 //! | `Core` | `config/dictionary.json` | Compiled-in / `include_bytes!` |
 //! | `Domain` | `lexicon/packs/*.json` | Runtime file load |
-//! | `User` | User-specified JSON | Runtime file or string |
+//! | `User` | `lexicon/user.json` | Runtime file |
 //!
 //! ## Lifecycle
 //!
@@ -23,7 +23,7 @@
 //! 4. Registry exposes `.lexemes()`, `.lookup()`, `.by_class()`.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 
@@ -247,36 +247,188 @@ pub struct LexiconMatch {
     pub language: String,
 }
 
+/// User-override lexicon, applied on top of core + domain packs.
+const USER_LEXICON_FILE: &str = "lexicon/user.json";
+
+/// The `lexicon/packs/*.json` overlay files under `root`, sorted by name.
+///
+/// Sorted so the merged registry is deterministic regardless of directory
+/// iteration order. A missing directory is not an error (packs are optional).
+fn list_domain_pack_paths(root: &Path) -> Vec<PathBuf> {
+    let dir = root.join("lexicon/packs");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        })
+        .collect();
+    paths.sort();
+    paths
+}
+
+/// Parse a user-override lexicon file (a flat array or `{"lexemes": [...]}`).
+fn load_user_lexemes(path: &Path) -> Result<Vec<Lexeme>, LexiconError> {
+    let text = std::fs::read_to_string(path).map_err(|e| LexiconError::FileLoad {
+        path: path.display().to_string(),
+        cause: e.to_string(),
+    })?;
+    if let Ok(arr) = serde_json::from_str::<Vec<Lexeme>>(&text) {
+        return Ok(arr);
+    }
+    #[derive(Deserialize)]
+    struct Wrapper {
+        lexemes: Vec<Lexeme>,
+    }
+    if let Ok(w) = serde_json::from_str::<Wrapper>(&text) {
+        return Ok(w.lexemes);
+    }
+    Err(LexiconError::Parse {
+        detail: format!(
+            "expected JSON array or object with `lexemes` key in `{}`",
+            path.display()
+        ),
+    })
+}
+
+/// Build the fully layered registry under `root`, excluding `disabled` ids.
+///
+/// Layer order (lowest → highest priority) matches the module docs:
+/// `config/dictionary.json` → `lexicon/packs/*.json` → `lexicon/user.json`.
+fn build_layers(root: &Path, disabled: &[String]) -> Result<LexiconRegistry, LexiconError> {
+    let core_path = root.join("config/dictionary.json");
+    let mut builder = RegistryBuilder::new().load_core(&core_path)?;
+
+    for pack_path in list_domain_pack_paths(root) {
+        let name = pack_path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "domain".to_string());
+        // Probe-parse first: an optional pack that is broken must be skipped
+        // (and logged) rather than take the whole lexicon down, and the probe
+        // lets us keep the partially built `builder` — `load_domain_pack`
+        // consumes it, so an error would otherwise lose the core layer.
+        if let Err(e) = RegistryBuilder::new().load_domain_pack(&name, &pack_path) {
+            tracing::error!(
+                error = %e,
+                pack = %name,
+                "lexicon pack failed to load; skipping it"
+            );
+            continue;
+        }
+        builder = builder.load_domain_pack(&name, &pack_path)?;
+    }
+
+    let user_path = root.join(USER_LEXICON_FILE);
+    if user_path.exists() {
+        builder = builder.load_user(load_user_lexemes(&user_path)?);
+    }
+
+    if !disabled.is_empty() {
+        builder = builder.disable(disabled.to_vec());
+    }
+    builder.build()
+}
+
+/// Build the layered registry under `root`, honouring `Disabled` lexemes.
+///
+/// `LexemeStatus::Disabled` is documented as "excluded from matchers entirely"
+/// and is the only user-facing way to turn a shipped word off, but nothing
+/// acted on it: `LexiconMatcher::from_lexemes` never inspected `status`, and
+/// `.disable(..)` was only ever called from tests (audit H17). We therefore
+/// resolve the disabled ids from a first pass and rebuild with them removed —
+/// the matcher then simply never sees them.
+fn build_registry_at(root: &Path) -> Result<LexiconRegistry, LexiconError> {
+    let first = build_layers(root, &[])?;
+    let disabled = first.disabled_ids();
+    if disabled.is_empty() {
+        return Ok(first);
+    }
+    build_layers(root, &disabled)
+}
+
+/// Build the layered registry from the configured resource root.
+fn build_registry() -> Result<LexiconRegistry, LexiconError> {
+    build_registry_at(&crate::config::resolve_resource_path(""))
+}
+
 static REGISTRY: LazyLock<RwLock<LexiconRegistry>> = LazyLock::new(|| {
     // Resolve the core lexicon at runtime from the resource root
     // (MNEMOSYNE_HOME override, else the install root) instead of baking a
     // compile-time `env!("CARGO_MANIFEST_DIR")` into the binary — a baked
     // path made every release fail with FileLoad except on the CI builder.
     //
-    // Fail soft instead of panicking on first use (mirrors `dictionary::DICT`):
-    // a missing/corrupt core lexicon used to abort the process the moment any
-    // caller touched the global registry. Degrade to an EMPTY registry
-    // (lookups just miss) and log the cause, so a deployment without the
-    // config stays alive and diagnosable.
+    // The full three-layer build (core + packs + user + disable) now actually
+    // runs in production, not only in tests (audit H17).
+    //
+    // Two different situations, two different severities:
+    // - ABSENT core: a legitimate minimal deployment; warn, do not fail.
+    // - PRESENT BUT UNPARSABLE core: the operator broke the file. We still
+    //   degrade to an EMPTY registry (lookups just miss) so a request never
+    //   panics, but the cause is logged at ERROR level AND stashed so startup
+    //   code turns it into a hard failure via [`try_init`] (audit H18).
     let core_path = crate::config::resolve_resource_path("config/dictionary.json");
-    let registry = match RegistryBuilder::new().load_core(&core_path) {
-        Ok(builder) => match builder.build() {
-            Ok(reg) => reg,
-            Err(e) => {
-                tracing::warn!(error = %e, "core lexicon validation failed; using an empty registry");
-                empty_registry()
-            }
-        },
+    if !core_path.exists() {
+        tracing::warn!(
+            path = %core_path.display(),
+            "core lexicon is absent; using an empty registry"
+        );
+        return RwLock::new(empty_registry());
+    }
+    let registry = match build_registry() {
+        Ok(reg) => reg,
         Err(e) => {
-            tracing::warn!(
+            let msg = format!("core lexicon failed to load: {e}");
+            tracing::error!(
                 error = %e,
-                "config/dictionary.json failed to load; using an empty registry"
+                path = %core_path.display(),
+                "core lexicon failed to load; using an empty registry"
             );
+            record_load_error(msg);
             empty_registry()
         }
     };
     RwLock::new(registry)
 });
+
+/// The load failure recorded by the [`REGISTRY`] initializer, if any.
+static LOAD_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// Stash the singleton's load failure so [`try_init`] can surface it.
+fn record_load_error(message: String) {
+    // Written once during `REGISTRY` initialization, read afterwards; no user
+    // code runs while the guard is held, so it cannot be poisoned.
+    if let Ok(mut slot) = LOAD_ERROR.lock() {
+        *slot = Some(message);
+    }
+}
+
+/// Force the global registry to load and report whether it succeeded.
+///
+/// Startup code calls this so a broken lexicon becomes a visible startup
+/// failure instead of a silent one. Returns `Err(reason)` only when the core
+/// lexicon EXISTS but could not be parsed; an absent core is a legitimate
+/// minimal deployment and returns `Ok(())`.
+pub fn try_init() -> Result<(), String> {
+    // Touch the LazyLock so the load happens now, not on the first request.
+    if REGISTRY.read().is_err() {
+        return Err("global lexicon registry read lock is poisoned".to_string());
+    }
+    match LOAD_ERROR.lock() {
+        Ok(slot) => match slot.as_ref() {
+            Some(reason) => Err(reason.clone()),
+            None => Ok(()),
+        },
+        // A poisoned slot means another thread panicked mid-write; the
+        // registry itself built (see above), so do not fail the process.
+        Err(_) => Ok(()),
+    }
+}
 
 /// Access the global registry.
 pub fn global() -> std::sync::RwLockReadGuard<'static, LexiconRegistry> {
@@ -288,10 +440,12 @@ pub fn global() -> std::sync::RwLockReadGuard<'static, LexiconRegistry> {
         .expect("global lexicon registry read lock is not poisoned")
 }
 
-/// Reload the global registry from the default core path.
+/// Reload the global registry from the default resource root.
+///
+/// Mirrors the singleton's layered build (core + packs + user + disable), so a
+/// reload never silently drops the overlay layers.
 pub fn reload() -> Result<(), LexiconError> {
-    let core_path = crate::config::resolve_resource_path("config/dictionary.json");
-    let registry = RegistryBuilder::new().load_core(&core_path)?.build()?;
+    let registry = build_registry()?;
     // The assignment below cannot panic while holding the write guard, so
     // this expect never fires.
     *REGISTRY
@@ -303,583 +457,5 @@ pub fn reload() -> Result<(), LexiconError> {
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Objective: Load core lexicon from the real config file.
-    /// Invariants: At least 50 lexemes are loaded (core EN + ZH minimal set).
-    #[test]
-    fn core_lexicon_loads_and_contains_entries() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core lexicon must load")
-            .build()
-            .expect("Registry build must succeed");
-        assert!(
-            registry.lexemes().len() >= 50,
-            "Core lexicon should contain at least 50 lexemes, got {}",
-            registry.lexemes().len()
-        );
-        assert!(
-            !registry.content_hash().is_empty(),
-            "Content hash must be non-empty"
-        );
-    }
-
-    /// Objective: Verify the matcher build counter increments on construction.
-    /// Invariants: Building a matcher increases `matcher_build_count()`; the
-    /// global functional matcher (LazyLock) is built exactly once per process.
-    #[test]
-    fn matcher_build_count_tracks_constructions() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        let before = matcher_build_count();
-        let _m1 = LexiconMatcher::from_lexemes(registry.lexemes());
-        let _m2 = LexiconMatcher::from_lexemes(registry.lexemes());
-        let after = matcher_build_count();
-        // The counter is process-global and other tests build matchers in
-        // parallel, so only an at-least assertion is deterministic here.
-        assert!(
-            after - before >= 2,
-            "Two explicit matcher constructions must bump the counter by at least 2 (got {})",
-            after - before
-        );
-
-        // Global matcher is lazily built once; force it and ensure the count
-        // does not explode when reused (it is a LazyLock singleton).
-        let _g = crate::lexicon::LexiconMatcher::from_global_registry();
-        let _g2 = crate::lexicon::LexiconMatcher::from_global_registry();
-        assert!(
-            matcher_build_count() >= after,
-            "Global matcher construction must also be counted"
-        );
-    }
-
-    /// Objective: Verify duplicate IDs are rejected.
-    /// Invariants: Two lexemes with the same ID in the same layer produce an error.
-    #[test]
-    fn duplicate_id_is_detected() {
-        let lexemes = vec![
-            make_test_lexeme("en.test.dup", "test_a"),
-            make_test_lexeme("en.test.dup", "test_b"),
-        ];
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        // This should fail because we have dup IDs in the user layer
-        let result = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_user(lexemes)
-            .build();
-        assert!(
-            result.is_err(),
-            "Duplicate IDs in the same layer should be rejected"
-        );
-    }
-
-    /// Objective: Verify duplicate forms (same language + same lemma) are rejected.
-    /// Invariants: Same lemma+language in the same layer produces an error.
-    #[test]
-    fn duplicate_form_is_detected() {
-        let lexemes = vec![
-            Lexeme {
-                id: "en.test.first".into(),
-                language: "en".into(),
-                lemma: "testword".into(),
-                forms: vec![],
-                pos: "verb".into(),
-                semantic_class: "speech".into(),
-                effects: vec![],
-                polarity: "neutral".into(),
-                priority: 500,
-                constraints: crate::dictionary::MatchConstraints {
-                    word_boundary: true,
-                    allow_single: false,
-                    requires_participant: false,
-                    requires_subject: false,
-                },
-                source: crate::dictionary::LexiconSource {
-                    kind: "builtin".into(),
-                    name: "test".into(),
-                },
-                status: crate::dictionary::LexemeStatus::Core,
-            },
-            Lexeme {
-                id: "en.test.second".into(),
-                language: "en".into(),
-                lemma: "testword".into(),
-                forms: vec![],
-                pos: "verb".into(),
-                semantic_class: "speech".into(),
-                effects: vec![],
-                polarity: "neutral".into(),
-                priority: 500,
-                constraints: crate::dictionary::MatchConstraints {
-                    word_boundary: true,
-                    allow_single: false,
-                    requires_participant: false,
-                    requires_subject: false,
-                },
-                source: crate::dictionary::LexiconSource {
-                    kind: "builtin".into(),
-                    name: "test".into(),
-                },
-                status: crate::dictionary::LexemeStatus::Core,
-            },
-        ];
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let result = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_user(lexemes)
-            .build();
-        assert!(
-            result.is_err(),
-            "Duplicate forms (same lemma+language) in the same layer should be rejected"
-        );
-    }
-
-    /// Objective: Verify the global singleton initializes without panic.
-    /// Invariants: Calling `global()` returns a valid registry.
-    #[test]
-    fn global_registry_initializes() {
-        let r = global();
-        assert!(
-            r.lexemes().len() >= 50,
-            "Global registry should have >= 50 lexemes"
-        );
-    }
-
-    /// Objective: Verify a domain pack merges on top of the core lexicon.
-    /// Invariants: The merged registry contains conversation lexemes from the
-    /// pack in addition to the core set, without duplicate-ID errors.
-    #[test]
-    fn domain_pack_merges_with_core() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let pack_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/conversation_memory.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain(&pack_path)
-            .expect("conversation_memory pack must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        // The pack adds "喜欢" (zh preference) and "want" (en goal).
-        assert!(
-            registry
-                .by_id("zh.conversation.preference.xihuan")
-                .is_some(),
-            "Domain pack lexeme 喜欢 must be present"
-        );
-        assert!(
-            registry.by_id("en.conversation.goal.want").is_some(),
-            "Domain pack lexeme want must be present"
-        );
-        assert!(
-            registry.by_id("en.action.speech.said").is_some(),
-            "Core lexeme must still be present after merge"
-        );
-    }
-
-    /// Objective: Verify the english_narrative domain pack merges on top of core.
-    /// Invariants: Narrative lexemes (e.g. murmured, invaded) are present;
-    /// core entries remain; no cross-layer duplicate-ID errors.
-    #[test]
-    fn english_narrative_pack_merges_with_core() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let pack_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/english_narrative.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain(&pack_path)
-            .expect("english_narrative pack must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        assert!(
-            registry.by_id("en.narrative.speech.murmured").is_some(),
-            "Narrative lexeme murmured must be present"
-        );
-        assert!(
-            registry.by_id("en.narrative.attack.invaded").is_some(),
-            "Narrative lexeme invaded must be present"
-        );
-        assert!(
-            registry.by_id("en.action.speech.said").is_some(),
-            "Core lexeme said must still be present after merge"
-        );
-    }
-
-    /// Objective: Verify the sanguo work-specific pack merges and is isolated.
-    /// Invariants: Work-specific lexemes (青龙偃月刀, 结义) come from the pack,
-    /// not from Core; core remains free of work-specific terms.
-    #[test]
-    fn sanguo_pack_merges_and_core_stays_clean() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let pack_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/sanguo.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain(&pack_path)
-            .expect("sanguo pack must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        assert!(
-            registry.by_id("zh.sanguo.weapon.qinglong").is_some(),
-            "Work-specific lexeme 青龙偃月刀 must be present via the pack"
-        );
-        assert!(
-            registry.by_id("zh.sanguo.event.jieyi").is_some(),
-            "Work-specific lexeme 结义 must be present via the pack"
-        );
-
-        // P4 isolation guard: Core alone must NOT contain work-specific terms.
-        let core_only = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .build()
-            .expect("Core-only build must succeed");
-        for work_specific in ["青龙偃月刀", "丈八蛇矛", "结义", "出茅庐", "奸雄"] {
-            assert!(
-                core_only.lookup(work_specific).is_empty(),
-                "Core must not contain work-specific lexeme `{work_specific}`"
-            );
-        }
-    }
-    /// Invariants: Selecting only `conversation_memory` excludes classical
-    /// lexemes while keeping core + the selected pack.
-    #[test]
-    fn per_request_pack_selection_filters_packs() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let conversation =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/conversation_memory.json");
-        let classical =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/classical_chinese.json");
-
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain_pack("conversation_memory", &conversation)
-            .expect("conversation pack must load")
-            .load_domain_pack("classical_chinese", &classical)
-            .expect("classical pack must load")
-            .select_packs(&["conversation_memory"])
-            .build()
-            .expect("Registry build must succeed");
-
-        assert!(
-            registry
-                .by_id("zh.conversation.preference.xihuan")
-                .is_some(),
-            "Selected pack lexeme must be present"
-        );
-        assert!(
-            registry.by_id("zh.classical.attack.fa").is_none(),
-            "Unselected pack lexeme must be excluded"
-        );
-        assert!(
-            registry.by_id("en.action.speech.said").is_some(),
-            "Core lexeme must always be present"
-        );
-    }
-
-    /// Objective: Verify cross-pack duplicate IDs are diagnosed.
-    /// Invariants: Two packs defining the same lexeme ID produce a
-    /// `CrossPackDuplicateId` error at build time.
-    #[test]
-    fn cross_pack_duplicate_id_is_detected() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let dir = tempfile::TempDir::new().expect("temp dir for cross-pack test");
-        let pack_a_path = dir.path().join("pack_a.json");
-        let pack_b_path = dir.path().join("pack_b.json");
-
-        let lexeme_a = make_test_lexeme("en.test.shared", "shared_a");
-        let lexeme_b = make_test_lexeme("en.test.shared", "shared_b");
-        std::fs::write(
-            &pack_a_path,
-            serde_json::to_string(&vec![lexeme_a]).expect("serialize pack_a"),
-        )
-        .expect("write pack_a");
-        std::fs::write(
-            &pack_b_path,
-            serde_json::to_string(&vec![lexeme_b]).expect("serialize pack_b"),
-        )
-        .expect("write pack_b");
-
-        let err = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain_pack("pack_a", &pack_a_path)
-            .expect("pack_a must load")
-            .load_domain_pack("pack_b", &pack_b_path)
-            .expect("pack_b must load")
-            .build()
-            .expect_err("cross-pack duplicate ID must fail");
-
-        match err {
-            LexiconError::CrossPackDuplicateId { id, pack_a, pack_b } => {
-                assert_eq!(id, "en.test.shared", "conflicting ID must be reported");
-                assert_eq!(pack_a, "pack_a", "first pack name must be reported");
-                assert_eq!(pack_b, "pack_b", "second pack name must be reported");
-            }
-            other => panic!("expected CrossPackDuplicateId, got {other:?}"),
-        }
-    }
-
-    /// Objective: Verify the manifest reports entry counts and status lists.
-    /// Invariants: Manifest has the same total as `lexemes()`; en/zh counts sum
-    /// to the total; with core+classical packs the counts are non-zero.
-    #[test]
-    fn manifest_reports_counts_and_statuses() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let pack_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/classical_chinese.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain(&pack_path)
-            .expect("Pack must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        let manifest = registry.manifest();
-        assert_eq!(
-            manifest.total_entries,
-            registry.lexemes().len(),
-            "Manifest total must match registry lexeme count"
-        );
-        assert_eq!(
-            manifest.en_entries + manifest.zh_entries,
-            manifest.total_entries,
-            "en+zh counts must sum to the total"
-        );
-        assert!(manifest.en_entries > 0, "English entries must exist");
-        assert!(manifest.zh_entries > 0, "Chinese entries must exist");
-        assert!(
-            !manifest.content_hash.is_empty(),
-            "Manifest must carry the content hash"
-        );
-    }
-
-    /// Objective: Verify the manifest serializes to stable JSON (P6 inventory).
-    /// Invariants: `to_json()` output parses back and contains the hash and
-    /// entry counts; the output is deterministic.
-    #[test]
-    fn manifest_serializes_to_json() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        let json = registry.manifest().to_json();
-        let parsed: serde_json::Value =
-            serde_json::from_str(&json).expect("manifest JSON must parse");
-        assert!(
-            parsed["content_hash"]
-                .as_str()
-                .is_some_and(|s| !s.is_empty()),
-            "manifest JSON must carry the content hash"
-        );
-        assert!(
-            parsed["total_entries"].as_u64().is_some(),
-            "manifest JSON must carry total_entries"
-        );
-        assert_eq!(
-            registry.manifest().to_json(),
-            json,
-            "manifest JSON must be deterministic"
-        );
-    }
-
-    /// Objective: Verify deprecated/disabled ID reporting.
-    /// Invariants: A Disabled user lexeme appears in `disabled_ids()` but not
-    /// in matchers; a Core lexeme is not reported.
-    #[test]
-    fn manifest_lists_disabled_and_deprecated() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let mut disabled_lex = make_test_lexeme("en.test.to_disable", "tobedisabled");
-        disabled_lex.status = crate::dictionary::LexemeStatus::Disabled;
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_user(vec![disabled_lex])
-            .build()
-            .expect("Registry build must succeed");
-
-        assert!(
-            registry
-                .disabled_ids()
-                .contains(&"en.test.to_disable".to_string()),
-            "Disabled lexeme must be reported by disabled_ids()"
-        );
-        assert!(
-            !registry
-                .deprecated_ids()
-                .contains(&"en.test.to_disable".to_string()),
-            "Disabled lexeme must not be reported as deprecated"
-        );
-        assert!(
-            registry.by_id("en.action.speech.said").is_some(),
-            "Core lexeme must remain present"
-        );
-    }
-
-    /// Objective: Verify the classical_chinese domain pack merges on top of core.
-    /// Invariants: Classical lexemes (e.g. 伐, 弑) are present; core entries
-    /// remain; duplicate-ID validation does not trip across layers.
-    #[test]
-    fn classical_chinese_pack_merges_with_core() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let pack_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/classical_chinese.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain(&pack_path)
-            .expect("classical_chinese pack must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        assert!(
-            registry.by_id("zh.classical.attack.fa").is_some(),
-            "Classical lexeme 伐 must be present"
-        );
-        assert!(
-            registry.by_id("zh.classical.attack.shishi").is_some(),
-            "Classical lexeme 弑 must be present"
-        );
-        assert!(
-            registry.by_id("zh.action.attack.sha").is_some(),
-            "Core lexeme 杀 must still be present after merge"
-        );
-    }
-
-    /// Objective: Verify hit metrics accumulate and snapshot deterministically.
-    /// Invariants: Total hits and per-id/class counts reflect recorded hits;
-    /// the snapshot is sorted so repeated snapshots are identical.
-    #[test]
-    fn metrics_record_and_snapshot() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        registry.record_hit("en.action.speech.said", "speech");
-        registry.record_hit("en.action.speech.said", "speech");
-        registry.record_hit("zh.action.attack.sha", "attack");
-        registry.record_rejection();
-
-        let snap = registry.metrics();
-        assert_eq!(snap.total_hits, 3, "Three hits must be recorded");
-        assert_eq!(snap.total_rejections, 1, "One rejection must be recorded");
-        assert_eq!(
-            snap.hits_by_id,
-            vec![
-                ("en.action.speech.said".to_string(), 2),
-                ("zh.action.attack.sha".to_string(), 1),
-            ],
-            "Per-id counts must be deterministic and sorted"
-        );
-        assert_eq!(
-            snap.hits_by_class,
-            vec![("attack".to_string(), 1), ("speech".to_string(), 2),],
-            "Per-class counts must be deterministic and sorted"
-        );
-        // Snapshot twice: must be identical (deterministic).
-        assert_eq!(snap, registry.metrics(), "Snapshots must be deterministic");
-    }
-
-    /// Objective: Verify the matcher finds lexeme forms with word boundaries.
-    /// Invariants: "plan" matches but "planet" does not (word boundary); the
-    /// matcher reports the correct lexeme ID and semantic class.
-    #[test]
-    fn matcher_honors_word_boundaries() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let pack_path =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("lexicon/packs/conversation_memory.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .load_domain(&pack_path)
-            .expect("Pack must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        let matcher = LexiconMatcher::from_lexemes(registry.lexemes());
-        assert!(matcher.pattern_count() > 0, "Matcher must contain patterns");
-
-        // "I plan to rewrite the parser." — "plan" is a goal lexeme.
-        let text = "I plan to rewrite the parser.";
-        let matches: Vec<LexiconMatch> = matcher.find_iter(text).collect();
-        assert!(
-            matches.iter().any(|m| m.semantic_class == "intention"),
-            "`plan` should match an intention lexeme; got {matches:?}"
-        );
-
-        // "planet" must NOT match the `plan` pattern (word boundary).
-        let planet_matches: Vec<LexiconMatch> = matcher.find_iter("explore the planet").collect();
-        assert!(
-            !planet_matches.iter().any(|m| m.matched == "plan"),
-            "`plan` inside `planet` must be rejected by word boundary; got {planet_matches:?}"
-        );
-    }
-
-    /// Objective: Verify Chinese single-character matching works.
-    /// Invariants: "杀" in 三国演义 text matches an attack lexeme.
-    #[test]
-    fn matcher_finds_chinese_single_char() {
-        let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");
-        let registry = RegistryBuilder::new()
-            .load_core(&core_path)
-            .expect("Core must load")
-            .build()
-            .expect("Registry build must succeed");
-
-        let matcher = LexiconMatcher::from_lexemes(registry.lexemes());
-        let matches: Vec<LexiconMatch> = matcher.find_iter("吕布杀董卓").collect();
-        assert!(
-            matches
-                .iter()
-                .any(|m| m.matched == "杀" && m.semantic_class == "attack"),
-            "`杀` should match an attack lexeme; got {matches:?}"
-        );
-    }
-
-    fn make_test_lexeme(id: &str, lemma: &str) -> Lexeme {
-        Lexeme {
-            id: id.into(),
-            language: "en".into(),
-            lemma: lemma.into(),
-            forms: vec![],
-            pos: "verb".into(),
-            semantic_class: "speech".into(),
-            effects: vec![],
-            polarity: "neutral".into(),
-            priority: 500,
-            constraints: crate::dictionary::MatchConstraints {
-                word_boundary: true,
-                allow_single: false,
-                requires_participant: false,
-                requires_subject: false,
-            },
-            source: crate::dictionary::LexiconSource {
-                kind: "builtin".into(),
-                name: "test".into(),
-            },
-            status: crate::dictionary::LexemeStatus::Core,
-        }
-    }
-}
+#[path = "mod_tests.rs"]
+mod tests;

@@ -214,40 +214,42 @@ fn collect(clause: &Clause<'_>, message: &str, entity_id: i64, time: i64, facts:
             facts,
             "age",
             &age,
-            &Anchor::new(clause, at, &[]),
+            &Anchor::value(clause, at, age.len()),
             message,
             entity_id,
             time,
         );
     }
-    if let Some((place, craft, at)) = place_and_craft(text) {
+    if let Some((place, craft)) = place_and_craft(text) {
         push_identity(
             facts,
             "location",
             place,
-            &Anchor::new(clause, at, &[]),
+            &Anchor::fragment(message, place, place),
             message,
             entity_id,
             time,
         );
-        if let Some(occupation) = craft.and_then(normalise_role) {
-            push_identity(
-                facts,
-                "occupation",
-                &occupation,
-                &Anchor::new(clause, at, &[]),
-                message,
-                entity_id,
-                time,
-            );
+        if let Some(role_src) = craft {
+            if let Some(occupation) = normalise_role(role_src) {
+                push_identity(
+                    facts,
+                    "occupation",
+                    &occupation,
+                    &Anchor::fragment(message, role_src, &occupation),
+                    message,
+                    entity_id,
+                    time,
+                );
+            }
         }
-    } else if let Some((value, at)) = after_cue(text, &["我是", "我做", "我从事"]) {
+    } else if let Some((value, _)) = after_cue(text, &["我是", "我做", "我从事"]) {
         if let Some(occupation) = normalise_role(value) {
             push_identity(
                 facts,
                 "occupation",
                 &occupation,
-                &Anchor::new(clause, at, &[]),
+                &Anchor::fragment(message, value, &occupation),
                 message,
                 entity_id,
                 time,
@@ -301,8 +303,13 @@ fn collect(clause: &Clause<'_>, message: &str, entity_id: i64, time: i64, facts:
     }
 }
 
-/// Where a fact came from: the message, the byte offset of its cue, and the
-/// matched marker for the `length` field.
+/// Where a fact came from: the message, the byte offset of the disclosed
+/// fragment, and its length in bytes.
+///
+/// `offset + length` must slice the ORIGINAL message back to the disclosed
+/// value, so a reader can reproduce the fragment exactly. Name / possession /
+/// interest / habit anchors point at their cue word; value-only disclosures
+/// (age / location / occupation) carry the real span of the value.
 struct Anchor {
     offset: usize,
     length: usize,
@@ -318,6 +325,29 @@ impl Anchor {
         Anchor {
             offset: clause.start + at,
             length: matched.max(1),
+        }
+    }
+
+    /// Build an anchor covering `length` bytes from `at` inside the clause.
+    ///
+    /// Used by value-only disclosures (a bare age) that have no cue word to
+    /// measure, so the anchor must be sized from the value itself instead of
+    /// the old `&[]` cue list that collapsed every such span to one byte.
+    fn value(clause: &Clause<'_>, at: usize, length: usize) -> Self {
+        Anchor {
+            offset: clause.start + at,
+            length: length.max(1),
+        }
+    }
+
+    /// Build an anchor covering `sub`, a fragment inside `base` — which must be
+    /// a sub-slice of `message`. Both offsets are derived from the actual
+    /// slices, so the anchor reproduces exactly the disclosed value.
+    fn fragment(message: &str, base: &str, sub: &str) -> Self {
+        let base_at = base.as_ptr() as usize - message.as_ptr() as usize;
+        Anchor {
+            offset: base_at + base.find(sub).unwrap_or(0),
+            length: sub.len().max(1),
         }
     }
 }
@@ -365,16 +395,18 @@ fn age_of(text: &str) -> Option<(String, usize)> {
     Some((digits.clone(), trimmed.len() - digits.len()))
 }
 
-/// Split "我在杭州做后端开发" / "在杭州工作" into `(place, craft, offset)`.
+/// Split "我在杭州做后端开发" / "在杭州工作" into `(place, craft)`.
 ///
 /// The bare "在" form exists because Chinese elides the subject across clauses:
 /// "我叫小林，在杭州做后端开发" puts the 我 in the previous clause, so a rule that
-/// demanded "我在" would lose the city and the job.
-fn place_and_craft(text: &str) -> Option<(&str, Option<&str>, usize)> {
-    let (at, rest) = match text.find("我在") {
-        Some(at) => (at, &text[at + "我在".len()..]),
+/// demanded "我在" would lose the city and the job. `craft` is `Some` only for
+/// the "做/从事/干" form; offsets are derived later from the returned slices so
+/// the evidence anchor covers the real value.
+fn place_and_craft(text: &str) -> Option<(&str, Option<&str>)> {
+    let rest = match text.find("我在") {
+        Some(at) => &text[at + "我在".len()..],
         // A sub-clause may start with 在 and inherit its subject.
-        None => (0, text.strip_prefix('在')?),
+        None => text.strip_prefix('在')?,
     };
     let mut split: Option<(usize, bool)> = None;
     for verb in CRAFT_VERBS {
@@ -404,7 +436,7 @@ fn place_and_craft(text: &str) -> Option<(&str, Option<&str>, usize)> {
     } else {
         None
     };
-    Some((place, craft, at))
+    Some((place, craft))
 }
 
 /// Accept a role only when it ends with a known suffix (after stripping a
@@ -566,7 +598,79 @@ mod tests {
                 fact.payload["evidence"]["text"],
                 "你好呀，我叫小林，26 岁，在杭州做后端开发"
             );
-            assert!(fact.payload["evidence"]["length"].as_u64().unwrap_or(0) > 0);
+            let offset = fact.payload["evidence"]["offset"]
+                .as_u64()
+                .expect("an offset") as usize;
+            let length = fact.payload["evidence"]["length"]
+                .as_u64()
+                .expect("a length") as usize;
+            assert!(
+                offset + length <= "你好呀，我叫小林，26 岁，在杭州做后端开发".len(),
+                "the evidence span must stay inside the message, got {offset}+{length}"
+            );
+            assert!(
+                "你好呀，我叫小林，26 岁，在杭州做后端开发".is_char_boundary(offset)
+                    && "你好呀，我叫小林，26 岁，在杭州做后端开发"
+                        .is_char_boundary(offset + length),
+                "the evidence span must sit on char boundaries"
+            );
+        }
+    }
+
+    /// Objective: Verify the evidence anchor for a value-only disclosure
+    /// (age / location / occupation) covers the WHOLE disclosed value, so
+    /// slicing the message by `offset..offset+length` reproduces the fragment.
+    /// These branches used to pass an empty cue list, collapsing every span to
+    /// a single byte and corrupting `fact_provenance`.
+    /// Invariants: age "26" → offset/length slice "26"; location "杭州" → "杭州";
+    /// occupation "后端开发" → "后端开发".
+    #[test]
+    fn evidence_span_reproduces_disclosed_value() {
+        let message = "你好呀，我叫小林，26 岁，在杭州做后端开发";
+        let facts = disclosures(message);
+        let span = |attribute: &str| {
+            let fact = facts
+                .iter()
+                .find(|fact| fact.payload["attribute"] == attribute)
+                .unwrap_or_else(|| panic!("missing `{attribute}` disclosure: {facts:?}"));
+            let offset = fact.payload["evidence"]["offset"]
+                .as_u64()
+                .expect("an offset") as usize;
+            let length = fact.payload["evidence"]["length"]
+                .as_u64()
+                .expect("a length") as usize;
+            (
+                offset,
+                length,
+                &message[offset..offset + length],
+                fact.payload["content"].as_str().unwrap_or("").to_string(),
+            )
+        };
+
+        for (attribute, value) in [
+            ("age", "26"),
+            ("location", "杭州"),
+            ("occupation", "后端开发"),
+        ] {
+            let (offset, length, slice, content) = span(attribute);
+            assert_eq!(
+                offset,
+                message.find(value).expect("value present"),
+                "{attribute} anchor must point at the start of {value}"
+            );
+            assert_eq!(
+                length,
+                value.len(),
+                "{attribute} anchor must span the whole {value} value"
+            );
+            assert_eq!(
+                slice, value,
+                "{attribute} evidence slice must reproduce the disclosed value"
+            );
+            assert_eq!(
+                slice, content,
+                "{attribute} evidence slice must equal the stored content"
+            );
         }
     }
 

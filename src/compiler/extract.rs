@@ -9,8 +9,6 @@
 //! Sentences → Mention Scan → Observation (SPO) → Event → Relation
 //! ```
 //!
-use aho_corasick::AhoCorasick;
-
 use crate::compiler::entity::EntityDictionary;
 use crate::compiler::{CompileContext, Event, EventParticipant, Mention, Relation};
 use crate::entity_resolver::EntityResolver;
@@ -113,7 +111,15 @@ pub fn compile(
     let verb_ac = if all_verbs.is_empty() {
         None
     } else {
-        match AhoCorasick::new(&all_verbs) {
+        // `MatchKind::LeftmostLongest`, NOT the default `Standard`: Standard
+        // reports the match that ENDS earliest, so a shorter verb shadows the
+        // longer extension of it (`杀` swallows `杀害`) — the wrong verb, the
+        // wrong span and the wrong FactType. LeftmostLongest resolves the
+        // longest form at a position instead. Mirrors `lexicon::matcher`.
+        match aho_corasick::AhoCorasickBuilder::new()
+            .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+            .build(&all_verbs)
+        {
             Ok(ac) => Some(ac),
             Err(e) => {
                 tracing::warn!(error = %e, "verb automaton build failed; skipping verb scan");
@@ -392,7 +398,14 @@ impl AliasIndex {
         let ac = match patterns.is_empty() {
             true => None,
             false => {
-                match aho_corasick::AhoCorasick::new(&patterns) {
+                // `LeftmostLongest` makes the long alias win over a prefix of
+                // it (`诸葛亮` over `诸葛`) — the reason the reverse-length
+                // sort above exists. Under the default `Standard` the shorter
+                // prefix ends earliest and resolves the WRONG entity.
+                match aho_corasick::AhoCorasickBuilder::new()
+                    .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                    .build(&patterns)
+                {
                     Ok(ac) => Some(ac),
                     Err(e) => {
                         // Empty-string aliases are filtered above, but a
@@ -455,7 +468,13 @@ fn scan_mentions(
         aliases.sort_by_key(|(k, _)| std::cmp::Reverse(k.len()));
         if !aliases.is_empty() {
             let patterns: Vec<&str> = aliases.iter().map(|(k, _)| k.as_str()).collect();
-            if let Ok(ac) = aho_corasick::AhoCorasick::new(&patterns) {
+            // `LeftmostLongest` for the same reason as the indexed path: the
+            // longest alias must win over a prefix of it. Failure keeps the
+            // legacy behaviour of skipping the scan (`if let Ok`).
+            if let Ok(ac) = aho_corasick::AhoCorasickBuilder::new()
+                .match_kind(aho_corasick::MatchKind::LeftmostLongest)
+                .build(&patterns)
+            {
                 for m in ac.find_iter(text) {
                     let alias = &patterns[m.pattern()];
                     let pos = m.start();
@@ -777,5 +796,89 @@ mod tests {
             (r.source == "刘备" && r.target == "关羽") || (r.source == "关羽" && r.target == "刘备")
         });
         assert!(has_rel, "co-occurrence should create a relation");
+    }
+
+    /// Objective: Verify the alias automaton reports the LONGER alias when one
+    /// alias is a prefix of another (`诸葛` vs `诸葛亮`) — the production
+    /// failure under `MatchKind::Standard`.
+    /// Invariants: scanning `诸葛亮` yields the 3-char pattern, never its prefix.
+    #[test]
+    fn alias_automaton_prefers_longer_prefix() {
+        let mut dict = EntityDictionary::default();
+        dict.alias_to_canonical.insert("诸葛".into(), "诸葛".into());
+        dict.alias_to_canonical
+            .insert("诸葛亮".into(), "诸葛亮".into());
+        let idx = AliasIndex::build(&dict);
+        let ac = idx.ac.as_ref().expect("alias automaton must build");
+        let m = ac.find_iter("诸葛亮").next().expect("a match must exist");
+        assert_eq!(
+            idx.aliases[m.pattern()].0,
+            "诸葛亮",
+            "the longest alias must win over its prefix"
+        );
+    }
+
+    /// Objective: Verify the production verb automaton reports the LONGER verb
+    /// form (`杀害`) when the shorter `杀` is also a pattern.
+    /// Invariants: the action event title carries `杀害` and its recorded span
+    /// length equals the 2-char verb, not the 1-char prefix.
+    #[test]
+    fn verb_automaton_prefers_longer_form() {
+        let dict = make_dict();
+        let config = Config {
+            strong_verbs: vec!["杀".into(), "杀害".into()],
+            action_verbs: vec![],
+            dialog_markers: vec![],
+            proximity_chars: 50,
+        };
+        let mut ctx = CompileContext::default();
+        let text = "刘备杀害了他";
+        compile(&mut ctx, &[(text, 0, text.len())], &dict, &config, None);
+        let ev = ctx
+            .events
+            .iter()
+            .find(|e| e.event_type == "action")
+            .expect("an action event must be produced");
+        assert!(
+            ev.title.contains("杀害"),
+            "the longer verb must win, got title {}",
+            ev.title
+        );
+        let (Some(s), Some(e)) = (ev.start_offset, ev.end_offset) else {
+            panic!("action event must carry a verb span");
+        };
+        assert_eq!(e - s, "杀害".len(), "span must cover the full longer verb");
+    }
+
+    /// Objective: Verify the shorter verb still matches when the longer form is
+    /// absent from the text/pattern set.
+    /// Invariants: `杀` alone still yields an action event whose span equals the
+    /// 1-char verb.
+    #[test]
+    fn shorter_verb_matches_when_longer_absent() {
+        let dict = make_dict();
+        let config = Config {
+            strong_verbs: vec!["杀".into(), "杀害".into()],
+            action_verbs: vec![],
+            dialog_markers: vec![],
+            proximity_chars: 50,
+        };
+        let mut ctx = CompileContext::default();
+        let text = "刘备杀了他";
+        compile(&mut ctx, &[(text, 0, text.len())], &dict, &config, None);
+        let ev = ctx
+            .events
+            .iter()
+            .find(|e| e.event_type == "action")
+            .expect("an action event must be produced");
+        assert!(
+            ev.title.contains("杀") && !ev.title.contains("杀害"),
+            "the shorter verb must match when the longer is absent, got {}",
+            ev.title
+        );
+        let (Some(s), Some(e)) = (ev.start_offset, ev.end_offset) else {
+            panic!("action event must carry a verb span");
+        };
+        assert_eq!(e - s, "杀".len(), "span must cover the shorter verb");
     }
 }

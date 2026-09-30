@@ -28,16 +28,29 @@ impl Default for BruteForceIndex {
 
 impl VectorIndex for BruteForceIndex {
     fn build(&mut self, items: &[(i64, Vec<f32>)]) -> Result<(), Error> {
-        // Validate dimensions are consistent
+        // Same boundary as `HnswIndex::validate_items`: zero-dimension vectors
+        // and non-finite values are rejected before anything is stored. The
+        // brute-force index is documented as HNSW's ground-truth reference, so
+        // accepting inputs HNSW rejects made the two disagree on exactly the
+        // degenerate cases the reference exists to explain (09-27/M7, M8).
         if let Some((_, first)) = items.first() {
             let dim = first.len();
+            if dim == 0 {
+                return Err(Error::InvalidInput(
+                    "BruteForce vectors must have at least one dimension".to_string(),
+                ));
+            }
             for (_, v) in items {
                 if v.len() != dim {
-                    return Err(Error::InvalidInput(format!(
-                        "dimension mismatch: expected {}, got {}",
-                        dim,
-                        v.len()
-                    )));
+                    return Err(Error::Storage(StorageError::DimensionMismatch {
+                        expected: dim,
+                        actual: v.len(),
+                    }));
+                }
+                if v.iter().any(|value| !value.is_finite()) {
+                    return Err(Error::InvalidInput(
+                        "BruteForce vectors must contain only finite values".to_string(),
+                    ));
                 }
             }
         }
@@ -62,6 +75,15 @@ impl VectorIndex for BruteForceIndex {
                 actual: query.len(),
             }));
         }
+        // Non-finite queries would make `cosine_similarity` produce NaN, and
+        // `f32::partial_cmp` reports NaN as unordered against everything, so
+        // the ranking below would not be a total order. HNSW rejects them at
+        // the same point.
+        if query.iter().any(|value| !value.is_finite()) {
+            return Err(Error::InvalidInput(
+                "BruteForce query must contain only finite values".to_string(),
+            ));
+        }
 
         // Compute cosine similarity against every item
         let mut scored: Vec<(i64, f32)> = self
@@ -70,8 +92,15 @@ impl VectorIndex for BruteForceIndex {
             .map(|(id, vec)| (*id, cosine_similarity(query, vec)))
             .collect();
 
-        // Sort by descending similarity
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Sort by descending similarity. `unwrap_or(Ordering::Equal)` keeps the
+        // comparison NaN-safe, and the `id` tie-break makes equal scores a
+        // deterministic total order (independent of insertion order) instead of
+        // leaving their relative rank to the sort implementation.
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
         scored.truncate(top_k);
         Ok(scored)
     }
@@ -177,5 +206,114 @@ mod tests {
         assert_eq!(results[0].0, 1, "closest should be first");
         assert_eq!(results[1].0, 2, "second closest should be second");
         assert_eq!(results[2].0, 3, "farthest should be last");
+    }
+
+    /// Objective: Verify zero-dimension vectors are rejected at build time, the
+    /// same boundary HNSW enforces (09-27/M8).
+    /// Invariants: An empty vector returns `InvalidInput`; HNSW returns an error
+    /// for the identical input, so the two indexes agree.
+    #[test]
+    fn zero_dimension_build_rejected() {
+        let mut index = BruteForceIndex::new();
+        let error = index
+            .build(&[(1, Vec::new())])
+            .expect_err("an empty (zero-dimension) vector must be rejected");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "zero-dimension input must return a typed InvalidInput error, got {error:?}"
+        );
+        assert!(
+            index.items.is_empty(),
+            "a rejected build must not store any items"
+        );
+
+        // HNSW rejects the same input, so the two reference implementations agree.
+        let mut hnsw = crate::vector::HnswIndex::new();
+        assert!(
+            hnsw.build(&[(1, Vec::new())]).is_err(),
+            "HNSW must reject zero-dimension vectors too, keeping the indexes consistent"
+        );
+    }
+
+    /// Objective: Verify NaN / infinite component values are rejected at build
+    /// time, matching HNSW (09-27/M7).
+    /// Invariants: Every non-finite vector returns `InvalidInput` and nothing is stored.
+    #[test]
+    fn non_finite_build_rejected() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let mut index = BruteForceIndex::new();
+            let error = index
+                .build(&[(1, vec![1.0, bad, 0.0])])
+                .expect_err("non-finite vector components must be rejected");
+            assert!(
+                matches!(error, Error::InvalidInput(_)),
+                "non-finite component {bad} must return InvalidInput, got {error:?}"
+            );
+            assert!(
+                index.items.is_empty(),
+                "a rejected build must not store any items"
+            );
+        }
+    }
+
+    /// Objective: Verify a non-finite query is rejected rather than producing
+    /// NaN scores with an unordered ranking (09-27/M7).
+    /// Invariants: A NaN query returns `InvalidInput`; HNSW agrees on the same input.
+    #[test]
+    fn non_finite_query_rejected() {
+        let items = [(1, vec3(1.0, 0.0, 0.0))];
+        let mut index = BruteForceIndex::new();
+        index.build(&items).unwrap();
+        let error = index
+            .search(&vec3(f32::NAN, 0.0, 0.0), 1)
+            .expect_err("a NaN query must be rejected");
+        assert!(
+            matches!(error, Error::InvalidInput(_)),
+            "NaN query must return InvalidInput, got {error:?}"
+        );
+
+        let mut hnsw = crate::vector::HnswIndex::new();
+        hnsw.build(&items).unwrap();
+        assert!(
+            hnsw.search(&vec3(f32::NAN, 0.0, 0.0), 1).is_err(),
+            "HNSW must reject the same NaN query, keeping the indexes consistent"
+        );
+    }
+
+    /// Objective: Verify search ordering is a deterministic total order when
+    /// scores tie, independent of insertion order.
+    /// Invariants: Tied scores are ordered by ascending entity id, and reversing
+    /// the build order yields the identical ranking.
+    #[test]
+    fn tied_scores_ordering_is_deterministic() {
+        let ascending = [
+            (3, vec3(1.0, 0.0, 0.0)),
+            (5, vec3(1.0, 0.0, 0.0)),
+            (9, vec3(1.0, 0.0, 0.0)),
+        ];
+        let descending = [
+            (9, vec3(1.0, 0.0, 0.0)),
+            (5, vec3(1.0, 0.0, 0.0)),
+            (3, vec3(1.0, 0.0, 0.0)),
+        ];
+
+        let mut a = BruteForceIndex::new();
+        a.build(&ascending).unwrap();
+        let mut b = BruteForceIndex::new();
+        b.build(&descending).unwrap();
+
+        let query = vec3(1.0, 0.0, 0.0);
+        let first = a.search(&query, 3).unwrap();
+        let second = b.search(&query, 3).unwrap();
+        assert_eq!(
+            first, second,
+            "reverse insertion order must produce the identical ranking for tied scores"
+        );
+        let ids: Vec<i64> = first.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![3, 5, 9],
+            "tied scores must be ordered by ascending id, got {ids:?}"
+        );
     }
 }

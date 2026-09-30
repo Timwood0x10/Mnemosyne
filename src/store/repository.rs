@@ -19,10 +19,19 @@ impl ExperienceRepository for SQLiteVecStore {
 
     async fn get(&self, id: &str) -> Result<Option<Experience>> {
         let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
-        let mut rows = stmt.query_map(params![id], row_to_experience)?;
+        // Expiry gate: an expired row must not be readable (it used to be
+        // returned forever and even served as a `memory_compile` dedup
+        // baseline). `expires_at` is an RFC3339 TEXT column, so a lexical
+        // comparison against an RFC3339 `now` is chronologically correct; the
+        // boundary matches `Experience::is_expired` (`expires_at <= now`).
+        let now = Utc::now();
+        let mut stmt = conn.prepare(
+            "SELECT * FROM memories WHERE id = ?1 AND (expires_at = '' OR expires_at > ?2)",
+        )?;
+        let mut rows = stmt.query_map(params![id, now.to_rfc3339()], row_to_experience)?;
         match rows.next() {
-            Some(Ok(exp)) => Ok(Some(exp)),
+            Some(Ok(exp)) if !exp.is_expired(now) => Ok(Some(exp)),
+            Some(Ok(_)) => Ok(None),
             Some(Err(e)) => Err(StorageError::Sqlite(format!("get row: {e}")).into()),
             None => Ok(None),
         }
@@ -135,7 +144,7 @@ impl ExperienceRepository for SQLiteVecStore {
         let tx = conn.transaction()?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare(
-                "SELECT id FROM memories WHERE tenant_id = ?1 AND expires_at <> '' AND expires_at < ?2",
+                "SELECT id FROM memories WHERE tenant_id = ?1 AND expires_at <> '' AND expires_at <= ?2",
             )?;
             let rows =
                 stmt.query_map(params![tenant_id, now_str], |row| row.get::<_, String>(0))?;
@@ -177,15 +186,25 @@ impl ExperienceRepository for SQLiteVecStore {
         // to `limit * 16` (capped) nearest neighbors, then filter by tenant
         // and truncate to `limit`.
         let overfetch = (limit as i64).saturating_mul(16).max(limit as i64);
+        // Expiry gate (see `get`): filter out rows whose `expires_at` is at or
+        // before `now` so vector search never resurfaces expired memories.
+        let now = Utc::now();
         let sql = "SELECT m.*, distance FROM memories m
                    JOIN (SELECT id, distance FROM vec_memories
                          WHERE vector MATCH ?1 AND k = ?2) v ON m.id = v.id
                    WHERE m.tenant_id = ?3
+                     AND (m.expires_at = '' OR m.expires_at > ?5)
                    ORDER BY v.distance ASC
                    LIMIT ?4";
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(
-            params![vec_json, overfetch, tenant_id, limit as i64],
+            params![
+                vec_json,
+                overfetch,
+                tenant_id,
+                limit as i64,
+                now.to_rfc3339()
+            ],
             row_to_experience,
         )?;
 
@@ -193,6 +212,9 @@ impl ExperienceRepository for SQLiteVecStore {
         for row in rows {
             results.push(row?);
         }
+        // `is_expired` is the authoritative boundary; the SQL predicate is the
+        // index-friendly prefilter and the two must agree.
+        results.retain(|e| !e.is_expired(now));
         // SQL already ordered by distance ASC and limited to `limit`.
         Ok(results)
     }
@@ -207,22 +229,32 @@ impl ExperienceRepository for SQLiteVecStore {
         if self.dim == 0 {
             // FTS5 path with LIKE fallback for CJK.
             let conn = self.conn.lock().await;
-            let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+            // Escape the backslash FIRST: escaping `%`/`_` before it would
+            // leave a lone `\` in the pattern to combine with the following
+            // escape, so a query ending in `\` silently turned the trailing
+            // `%` wildcard into a literal percent sign.
+            let like = like_pattern(query);
+            let now = Utc::now();
+            let now_str = now.to_rfc3339();
             let has_type_filter = memory_type.is_some();
             let sql = if has_type_filter {
                 "SELECT m.* FROM memories m \
                  WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
                         OR m.content LIKE ?3 ESCAPE '\\' \
-                        OR m.problem LIKE ?3 ESCAPE '\\') \
+                        OR m.problem LIKE ?3 ESCAPE '\\' \
+                        OR m.solution LIKE ?3 ESCAPE '\\') \
                    AND m.tenant_id = ?2 AND m.memory_type = ?4 \
+                   AND (m.expires_at = '' OR m.expires_at > ?6) \
                  ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
                  LIMIT ?5"
             } else {
                 "SELECT m.* FROM memories m \
                  WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
                         OR m.content LIKE ?3 ESCAPE '\\' \
-                        OR m.problem LIKE ?3 ESCAPE '\\') \
+                        OR m.problem LIKE ?3 ESCAPE '\\' \
+                        OR m.solution LIKE ?3 ESCAPE '\\') \
                    AND m.tenant_id = ?2 \
+                   AND (m.expires_at = '' OR m.expires_at > ?5) \
                  ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
                  LIMIT ?4"
             };
@@ -235,7 +267,8 @@ impl ExperienceRepository for SQLiteVecStore {
                             tenant_id,
                             like,
                             memory_type_to_str(mt),
-                            limit as i64
+                            limit as i64,
+                            now_str
                         ],
                         row_to_experience,
                     )?;
@@ -243,7 +276,7 @@ impl ExperienceRepository for SQLiteVecStore {
                 }
                 None => {
                     let r = stmt.query_map(
-                        params![fts5_query(query), tenant_id, like, limit as i64],
+                        params![fts5_query(query), tenant_id, like, limit as i64, now_str],
                         row_to_experience,
                     )?;
                     r.collect()
@@ -253,6 +286,7 @@ impl ExperienceRepository for SQLiteVecStore {
             for row in rows {
                 results.push(row?);
             }
+            results.retain(|e| !e.is_expired(now));
             Ok(results)
         } else {
             // vec0 path: full-scan + Rust BM25
@@ -323,17 +357,23 @@ impl ExperienceRepository for SQLiteVecStore {
         memory_type: MemoryType,
     ) -> Result<Vec<Experience>> {
         let conn = self.conn.lock().await;
+        // Expiry gate (see `get`): expired rows must not be listed by type —
+        // otherwise they leak even into keyword mode's BM25 candidate set,
+        // which funnels through this method.
+        let now = Utc::now();
         let mut stmt = conn.prepare(
-            "SELECT * FROM memories WHERE tenant_id = ?1 AND memory_type = ?2 ORDER BY created_at DESC"
+            "SELECT * FROM memories WHERE tenant_id = ?1 AND memory_type = ?2 \
+             AND (expires_at = '' OR expires_at > ?3) ORDER BY created_at DESC",
         )?;
         let rows = stmt.query_map(
-            params![tenant_id, memory_type_to_str(memory_type)],
+            params![tenant_id, memory_type_to_str(memory_type), now.to_rfc3339()],
             row_to_experience,
         )?;
         let mut results = Vec::new();
         for row in rows {
             results.push(row?);
         }
+        results.retain(|e| !e.is_expired(now));
         Ok(results)
     }
 
@@ -371,6 +411,23 @@ impl ExperienceRepository for SQLiteVecStore {
         }
         Ok(results)
     }
+}
+
+/// Build a parameterised `LIKE` pattern (`%query%`) with every `LIKE`
+/// metacharacter escaped for the `ESCAPE '\'` clause used by the FTS-fallback
+/// queries.
+///
+/// The backslash MUST be escaped before `%` and `_`: escaping the wildcards
+/// first leaves a lone `\` that the next escape step turns into `\\`, but a
+/// query already ending in a single `\` would otherwise combine with the
+/// appended trailing `%` — the pattern `%foo\%` makes the trailing wildcard a
+/// literal percent sign and silently drops the "ends-with" match.
+fn like_pattern(query: &str) -> String {
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
 }
 
 /// Insert one `Experience` into `memories` — and into `vec_memories` when it
@@ -425,4 +482,338 @@ fn delete_experience(tx: &rusqlite::Transaction<'_>, id: &str, dim: usize) -> Re
         tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![id])?;
     }
     Ok(deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    /// Build a sample experience for the read-path tests.
+    fn exp(tenant: &str, mt: MemoryType, content: &str) -> Experience {
+        Experience::new(tenant, mt, content, 0.8)
+    }
+
+    /// Objective: Verify `like_pattern` escapes the backslash BEFORE `%`/`_`,
+    /// so a query ending in `\` keeps its trailing wildcard (the old order
+    /// produced `%foo\%`, whose trailing `%%` became a literal percent sign).
+    /// Invariants: each metacharacter in the pattern is backslash-escaped and
+    /// the surrounding `%…%` wildcards survive.
+    #[test]
+    fn like_pattern_escapes_backslash_before_wildcards() {
+        assert_eq!(
+            like_pattern("foo\\"),
+            r"%foo\\%",
+            "trailing backslash must be doubled, not eat the trailing wildcard"
+        );
+        assert_eq!(like_pattern("50%"), r"%50\%%", "percent must be escaped");
+        assert_eq!(like_pattern("a_b"), r"%a\_b%", "underscore must be escaped");
+        assert_eq!(
+            like_pattern(r"a\%_"),
+            r"%a\\\%\_%",
+            "backslash, percent and underscore must all escape independently"
+        );
+    }
+
+    /// Objective: Verify a keyword query containing a literal backslash finds
+    /// a stored row containing that backslash, and does NOT fall through to
+    /// matching a literal `%` (the pre-fix behaviour for a `\`-terminated
+    /// query). FTS cannot match a lone `\`, so this exercises the LIKE branch.
+    /// Invariants: the backslash row is returned; the `%`-containing decoy is not.
+    #[tokio::test]
+    async fn keyword_search_matches_literal_backslash() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let mut bs = exp("t1", MemoryType::Knowledge, "alpha\\");
+        bs.id = "bs".to_string();
+        store.create(&bs).await.expect("create backslash row");
+        let mut pct = exp("t1", MemoryType::Knowledge, "50% off");
+        pct.id = "pct".to_string();
+        store.create(&pct).await.expect("create percent row");
+
+        let results = store
+            .search_by_keyword("\\", "t1", 10, None)
+            .await
+            .expect("search");
+        assert!(
+            results.iter().any(|e| e.id == "bs"),
+            "a backslash query must match the row containing a literal backslash, got {:?}",
+            results.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+        assert!(
+            results.iter().all(|e| e.id != "pct"),
+            "the literal backslash must not degrade into a literal-% match"
+        );
+    }
+
+    /// Objective: Verify `%` and `_` stay escaped in the LIKE fallback, i.e.
+    /// they match literally instead of acting as wildcards (the pre-fix
+    /// unescaped pattern matched unrelated rows).
+    /// Invariants: `50%` matches the `50%` row but not the `5000` row; `a_b`
+    /// matches the `a_b` row but not the `axb` row.
+    #[tokio::test]
+    async fn keyword_search_escapes_percent_and_underscore() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        for (id, content) in [
+            ("pct", "50% off"),
+            ("pct2", "5000 items"),
+            ("us", "a_b c"),
+            ("us2", "axb c"),
+        ] {
+            let mut e = exp("t1", MemoryType::Knowledge, content);
+            e.id = id.to_string();
+            store.create(&e).await.expect("create row");
+        }
+
+        let pct = store
+            .search_by_keyword("50%", "t1", 10, None)
+            .await
+            .expect("search percent");
+        assert!(
+            pct.iter().any(|e| e.id == "pct"),
+            "the literal `50%` row must match"
+        );
+        assert!(
+            pct.iter().all(|e| e.id != "pct2"),
+            "escaped `%` must not act as a wildcard matching `5000`"
+        );
+
+        let us = store
+            .search_by_keyword("a_b", "t1", 10, None)
+            .await
+            .expect("search underscore");
+        assert!(
+            us.iter().any(|e| e.id == "us"),
+            "the literal `a_b` row must match"
+        );
+        assert!(
+            us.iter().all(|e| e.id != "us2"),
+            "escaped `_` must not act as a wildcard matching `axb`"
+        );
+    }
+
+    /// Objective: Verify expired rows are excluded from EVERY read path while
+    /// non-expired rows still come back (previously none of these reads
+    /// filtered `expires_at`, so expired memories leaked forever).
+    /// Invariants: the expired row is absent from by-id / by-type / keyword /
+    /// vector reads; the live row is present in all of them.
+    #[tokio::test]
+    async fn expired_rows_are_excluded_from_all_read_paths() {
+        let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
+
+        let mut expired = exp("t1", MemoryType::Knowledge, "rust async stale");
+        expired.id = "expired".to_string();
+        expired.vector = vec![1.0, 0.0, 0.0, 0.0];
+        expired.expires_at = Some(Utc::now() - Duration::seconds(60));
+        store.create(&expired).await.expect("create expired");
+
+        let mut live = exp("t1", MemoryType::Knowledge, "rust async fresh");
+        live.id = "live".to_string();
+        live.vector = vec![1.0, 0.0, 0.0, 0.0];
+        live.expires_at = Some(Utc::now() + Duration::seconds(3600));
+        store.create(&live).await.expect("create live");
+
+        assert!(
+            store.get("expired").await.expect("get").is_none(),
+            "expired row must not be readable by id"
+        );
+        assert!(
+            store.get("live").await.expect("get").is_some(),
+            "live row must be readable by id"
+        );
+
+        let by_type = store
+            .get_by_memory_type("t1", MemoryType::Knowledge)
+            .await
+            .expect("by type");
+        assert!(
+            by_type.iter().all(|e| e.id != "expired"),
+            "expired row must not be listed by memory type"
+        );
+        assert!(
+            by_type.iter().any(|e| e.id == "live"),
+            "live row must be listed by memory type"
+        );
+
+        let kw = store
+            .search_by_keyword("rust async", "t1", 10, None)
+            .await
+            .expect("keyword");
+        assert!(
+            kw.iter().all(|e| e.id != "expired"),
+            "expired row must not surface in keyword search"
+        );
+        assert!(
+            kw.iter().any(|e| e.id == "live"),
+            "live row must surface in keyword search"
+        );
+
+        let vec = store
+            .search_by_vector(&[1.0, 0.0, 0.0, 0.0], "t1", 10)
+            .await
+            .expect("vector");
+        assert!(
+            vec.iter().all(|e| e.id != "expired"),
+            "expired row must not surface in vector search"
+        );
+        assert!(
+            vec.iter().any(|e| e.id == "live"),
+            "live row must surface in vector search"
+        );
+    }
+
+    /// Objective: Verify the FTS/LIKE keyword branch (dim == 0) also honours
+    /// the expiry gate, not just the vector branch.
+    /// Invariants: an expired matching row is excluded; a live matching row is
+    /// returned.
+    #[tokio::test]
+    async fn expired_row_excluded_from_fts_keyword_search() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let mut expired = exp("t1", MemoryType::Knowledge, "needle expired");
+        expired.id = "expired".to_string();
+        expired.expires_at = Some(Utc::now() - Duration::seconds(60));
+        store.create(&expired).await.expect("create expired");
+        let mut live = exp("t1", MemoryType::Knowledge, "needle live");
+        live.id = "live".to_string();
+        live.expires_at = Some(Utc::now() + Duration::seconds(3600));
+        store.create(&live).await.expect("create live");
+
+        let results = store
+            .search_by_keyword("needle", "t1", 10, None)
+            .await
+            .expect("search");
+        assert!(
+            results.iter().all(|e| e.id != "expired"),
+            "FTS keyword search must exclude the expired row"
+        );
+        assert!(
+            results.iter().any(|e| e.id == "live"),
+            "FTS keyword search must keep the live row"
+        );
+    }
+
+    /// Objective: Verify the expiry boundary is inclusive: a row expiring
+    /// exactly at `now` counts as expired, `None` never expires, and a
+    /// not-yet-reached expiry is live.
+    /// Invariants: `is_expired(now)` is true for `expires_at == now` and for a
+    /// past expiry, false for `None` and for a future expiry.
+    #[test]
+    fn experience_is_expired_boundary() {
+        let now = Utc::now();
+        let mut e = exp("t1", MemoryType::Knowledge, "x");
+        assert!(!e.is_expired(now), "None expires_at must never expire");
+        e.expires_at = Some(now);
+        assert!(
+            e.is_expired(now),
+            "expiry exactly at now must count as expired (inclusive `<=`)"
+        );
+        e.expires_at = Some(now + Duration::seconds(1));
+        assert!(!e.is_expired(now), "a future expiry must not be expired");
+        e.expires_at = Some(now - Duration::seconds(1));
+        assert!(e.is_expired(now), "a past expiry must be expired");
+    }
+
+    /// Objective: Verify a row whose expiry has already been reached is
+    /// excluded by the read query at the exact boundary instant.
+    /// Invariants: a row written with `expires_at = Utc::now()` is not
+    /// returned by keyword search; a row expiring far in the future is.
+    #[tokio::test]
+    async fn row_expiring_at_now_is_excluded() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let mut at_now = exp("t1", MemoryType::Knowledge, "boundarytoken edge");
+        at_now.id = "edge".to_string();
+        at_now.expires_at = Some(Utc::now());
+        store.create(&at_now).await.expect("create edge");
+
+        let mut future = exp("t1", MemoryType::Knowledge, "boundarytoken future");
+        future.id = "future".to_string();
+        future.expires_at = Some(Utc::now() + Duration::seconds(3600));
+        store.create(&future).await.expect("create future");
+
+        let results = store
+            .search_by_keyword("boundarytoken", "t1", 10, None)
+            .await
+            .expect("search");
+        assert!(
+            results.iter().all(|e| e.id != "edge"),
+            "a row reaching its expiry must be excluded at the boundary"
+        );
+        assert!(
+            results.iter().any(|e| e.id == "future"),
+            "a row with a future expiry must be returned"
+        );
+    }
+
+    /// Objective: Verify the FTS backfill makes rows written while the store
+    /// was in vector mode (no FTS table/trigger existed) findable after
+    /// reopening in keyword mode — otherwise they stay invisible to MATCH.
+    /// Invariants: the pre-existing row is returned by keyword search after the
+    /// keyword-mode reopen; backfill is idempotent across opens.
+    #[tokio::test]
+    async fn fts_backfill_makes_rows_from_vector_mode_findable() {
+        let dir = tempfile::TempDir::new().expect("temp dir for backfill db");
+        let db_path = dir.path().join("backfill.db");
+
+        {
+            let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 4)
+                .await
+                .expect("open in vector mode");
+            let mut e = exp("t1", MemoryType::Knowledge, "uniquebigtoken retrievable");
+            e.id = "pre".to_string();
+            e.vector = vec![0.1, 0.2, 0.3, 0.4];
+            store.create(&e).await.expect("create in vector mode");
+        }
+
+        // Reopen in keyword mode: FTS tables are created now and the existing
+        // row must be backfilled so MATCH can see it.
+        let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 0)
+            .await
+            .expect("reopen in keyword mode");
+        let results = store
+            .search_by_keyword("uniquebigtoken", "t1", 10, None)
+            .await
+            .expect("search");
+        assert!(
+            results.iter().any(|e| e.id == "pre"),
+            "backfill must make pre-existing rows MATCH-able, got {:?}",
+            results.iter().map(|e| &e.id).collect::<Vec<_>>()
+        );
+
+        // A second reopen must not duplicate/panic (idempotent backfill).
+        drop(store);
+        let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 0)
+            .await
+            .expect("second keyword reopen");
+        let again = store
+            .search_by_keyword("uniquebigtoken", "t1", 10, None)
+            .await
+            .expect("search again");
+        assert_eq!(
+            again.iter().filter(|e| e.id == "pre").count(),
+            1,
+            "idempotent backfill must not duplicate the FTS row"
+        );
+    }
+
+    /// Objective: Verify a keyword that appears only in `solution` is found by
+    /// the LIKE fallback (it used to scan only `content`/`problem`). The query
+    /// is a substring of a whole FTS token, so MATCH cannot serve it.
+    /// Invariants: the row whose `solution` contains the substring is returned.
+    #[tokio::test]
+    async fn keyword_search_finds_token_only_in_solution() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let mut e = exp("t1", MemoryType::Knowledge, "unrelated body");
+        e.id = "sol".to_string();
+        e.problem = "unrelated problem".to_string();
+        e.solution = "zzqunique solution text".to_string();
+        store.create(&e).await.expect("create solution row");
+
+        let results = store
+            .search_by_keyword("quniqu", "t1", 10, None)
+            .await
+            .expect("search");
+        assert!(
+            results.iter().any(|e| e.id == "sol"),
+            "a token present only in solution must be found via the LIKE fallback"
+        );
+    }
 }

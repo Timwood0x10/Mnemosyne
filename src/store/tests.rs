@@ -472,20 +472,19 @@ async fn forget_expired_deletes_only_expired_tenant_rows() {
         "exactly one expired row for t1 must be forgotten"
     );
 
-    assert!(
-        store.get(&expired.id).await.expect("get").is_none(),
-        "expired memory must be deleted"
+    // The read paths now exclude expired rows, so `get` can no longer
+    // distinguish "deleted" from "still stored but expired". Probe the raw
+    // per-tenant counts instead: t1 must keep only the live and never-expiring
+    // rows (the expired one was deleted), while t2's expired row must be
+    // untouched (tenant isolation).
+    assert_eq!(
+        store.count_for_tenant("t1").await.expect("count t1"),
+        2,
+        "expired memory must be deleted; live + never-expiring rows remain"
     );
-    assert!(
-        store.get(&live.id).await.expect("get").is_some(),
-        "live memory must survive"
-    );
-    assert!(
-        store.get(&never.id).await.expect("get").is_some(),
-        "never-expiring memory must survive"
-    );
-    assert!(
-        store.get(&other_tenant.id).await.expect("get").is_some(),
+    assert_eq!(
+        store.count_for_tenant("t2").await.expect("count t2"),
+        1,
         "other tenant's expired memory must survive (tenant isolation)"
     );
 }

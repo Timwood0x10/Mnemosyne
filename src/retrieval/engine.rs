@@ -1,5 +1,7 @@
 //! `RetrievalEngine` implementation: keyword / vector / hybrid search.
 
+use std::collections::HashSet;
+
 use super::*;
 
 impl RetrievalEngine {
@@ -207,19 +209,29 @@ impl RetrievalEngine {
         // Build a map of experience id -> cosine similarity (if embeddings
         // available). sqlite-vec reports cosine distance in `[0, 2]`; we
         // convert to similarity `1.0 - distance`, clamped to `[0, 1]`.
+        //
+        // Vector-only hits (present in the vector index but absent from the
+        // keyword candidate set) are kept aside so they still enter the fused
+        // ranking. Dropping them made Hybrid recall identical to Keyword.
         let mut semantic_map: HashMap<String, f64> = HashMap::new();
+        let mut semantic_only: Vec<Experience> = Vec::new();
         if !query_vec.is_empty() {
             let vector_results = self
                 .store
                 .search_by_vector(&query_vec, tenant_id, candidates.len().max(limit))
                 .await?;
-            for exp in &vector_results {
+            let candidate_ids: HashSet<&str> =
+                candidates.iter().map(|exp| exp.id.as_str()).collect();
+            for exp in vector_results {
                 let similarity = (1.0 - exp.distance).clamp(0.0, 1.0);
+                if !candidate_ids.contains(exp.id.as_str()) {
+                    semantic_only.push(exp.clone());
+                }
                 semantic_map.insert(exp.id.clone(), similarity);
             }
         }
 
-        let mut results = Vec::with_capacity(candidates.len());
+        let mut results = Vec::with_capacity(candidates.len() + semantic_only.len());
         // Rank each candidate by keyword score and semantic score, then fuse
         // with Reciprocal Rank Fusion (RRF). RRF is scale-free: unlike the
         // old linear weighted sum, it does not let the larger-score signal
@@ -234,14 +246,19 @@ impl RetrievalEngine {
         keyword_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Semantic ranking contains ONLY documents with a real vector hit
-        // (present in `semantic_map`). Documents absent from it are keyword-only
-        // and receive a single RRF contribution; including them here would give
-        // them a full second term based on arbitrary zero-score order.
+        // (present in `semantic_map`): keyword candidates that also carry a
+        // vector, plus the vector-only hits absorbed above. Documents absent
+        // from it are keyword-only and receive a single RRF contribution.
         let mut semantic_ranked: Vec<(&Experience, f64)> = candidates
             .iter()
             .filter(|exp| semantic_map.contains_key(&exp.id))
             .map(|exp| (exp, semantic_map.get(&exp.id).copied().unwrap_or(0.0)))
             .collect();
+        semantic_ranked.extend(
+            semantic_only
+                .iter()
+                .map(|exp| (exp, semantic_map.get(&exp.id).copied().unwrap_or(0.0))),
+        );
         semantic_ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // O(1) rank lookup instead of a per-candidate O(n) position scan.
@@ -263,6 +280,7 @@ impl RetrievalEngine {
         let now = Utc::now();
         let temporal_of: HashMap<&str, f64> = candidates
             .iter()
+            .chain(semantic_only.iter())
             .map(|exp| {
                 let t = temporal_score(intent, exp.created_at, exp.expires_at, now);
                 (exp.id.as_str(), t)
@@ -294,6 +312,36 @@ impl RetrievalEngine {
                 experience: (*exp).clone(),
                 score,
                 keyword_score: *kw,
+                semantic_score: semantic_map.get(&exp.id).copied().unwrap_or(0.0),
+                temporal_score: temporal_of.get(exp.id.as_str()).copied().unwrap_or(0.0),
+                external_score: 0.0,
+                is_external: false,
+            });
+        }
+
+        // Vector-only hits (in the semantic list but not the keyword candidate
+        // set) get the WORST possible keyword rank so their keyword RRF term
+        // collapses to ~0: they contribute only their semantic term, exactly as
+        // a keyword-only hit contributes only its keyword term. This preserves
+        // the scale-free RRF semantics while giving Hybrid genuine recall over
+        // pure Keyword (which by design only ever returns keyword candidates).
+        for exp in &semantic_only {
+            let semantic_rank = semantic_rank_of
+                .get(exp.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX);
+            let rrf = 1.0 / (RRF_K + usize::MAX as f64) + 1.0 / (RRF_K + semantic_rank as f64);
+            let importance = exp.confidence * WEIGHT_IMPORTANCE_HYBRID;
+            let temporal =
+                temporal_of.get(exp.id.as_str()).copied().unwrap_or(0.0) * WEIGHT_TEMPORAL_HYBRID;
+            let score = rrf + importance + temporal;
+            if score <= 0.0 {
+                continue;
+            }
+            results.push(RetrievalResult {
+                experience: exp.clone(),
+                score,
+                keyword_score: bm25_score(&query_terms, &exp.content),
                 semantic_score: semantic_map.get(&exp.id).copied().unwrap_or(0.0),
                 temporal_score: temporal_of.get(exp.id.as_str()).copied().unwrap_or(0.0),
                 external_score: 0.0,
@@ -437,4 +485,100 @@ pub(crate) fn bm25_score(query_terms: &[String], document: &str) -> f64 {
     }
     // Normalize by number of query terms to keep score in [0, 1].
     score / query_terms.len() as f64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embed::EmbeddingService;
+    use crate::store::SQLiteVecStore;
+    use async_trait::async_trait;
+
+    /// Deterministic embedder returning a fixed 4-dim unit vector for any text,
+    /// so vector search can be exercised without a network provider.
+    struct FixedEmbedder;
+
+    #[async_trait]
+    impl EmbeddingService for FixedEmbedder {
+        async fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0, 0.0, 0.0])
+        }
+
+        async fn embed_with_prefix(&self, text: &str, _prefix: &str) -> Result<Vec<f32>> {
+            self.embed(text).await
+        }
+
+        async fn health_check(&self) -> Result<()> {
+            Ok(())
+        }
+
+        fn model(&self) -> &str {
+            "fixed"
+        }
+
+        fn timeout(&self) -> std::time::Duration {
+            std::time::Duration::ZERO
+        }
+    }
+
+    /// Objective: Verify Hybrid retrieval includes a hit that ONLY the vector
+    /// signal found (it was never a keyword candidate), while pure Keyword mode
+    /// still excludes it by design. Before the fix the candidate universe was
+    /// keyword-only, so Hybrid had zero recall gain over Keyword.
+    /// Invariants: the vector-only row appears in Hybrid results with a
+    /// positive semantic score and is absent from Keyword results; the keyword
+    /// hit appears in both.
+    #[tokio::test]
+    async fn hybrid_includes_vector_only_hit_while_keyword_excludes_it() {
+        let store = Arc::new(SQLiteVecStore::open_in_memory(4).await.expect("open"));
+
+        let mut kw = Experience::new("t1", MemoryType::Knowledge, "rust async runtime", 0.8);
+        kw.id = "kw".to_string();
+        kw.vector = vec![1.0, 0.0, 0.0, 0.0];
+        store.create(&kw).await.expect("create keyword hit");
+
+        let mut veconly = Experience::new("t1", MemoryType::Knowledge, "unrelated prose", 0.8);
+        veconly.id = "veconly".to_string();
+        veconly.vector = vec![1.0, 0.0, 0.0, 0.0];
+        store
+            .create(&veconly)
+            .await
+            .expect("create vector-only hit");
+
+        let embedder: Arc<dyn EmbeddingService> = Arc::new(FixedEmbedder);
+        let hybrid = RetrievalEngine::new(embedder.clone(), store.clone(), RetrievalMode::Hybrid);
+        let keyword = RetrievalEngine::new(embedder, store.clone(), RetrievalMode::Keyword);
+
+        let h = hybrid
+            .search("rust async", "t1", 5, None)
+            .await
+            .expect("hybrid search");
+        let vo = h
+            .iter()
+            .find(|r| r.experience.id == "veconly")
+            .expect("hybrid must include the vector-only hit");
+        assert!(
+            vo.semantic_score > 0.0,
+            "the vector-only hit must carry its semantic score, got {}",
+            vo.semantic_score
+        );
+        assert!(
+            h.iter().any(|r| r.experience.id == "kw"),
+            "the keyword hit must still appear in hybrid results"
+        );
+
+        let k = keyword
+            .search("rust async", "t1", 5, None)
+            .await
+            .expect("keyword search");
+        assert!(
+            k.iter().all(|r| r.experience.id != "veconly"),
+            "pure Keyword mode must still exclude the vector-only hit, got {:?}",
+            k.iter().map(|r| &r.experience.id).collect::<Vec<_>>()
+        );
+        assert!(
+            k.iter().any(|r| r.experience.id == "kw"),
+            "keyword mode must return the keyword hit"
+        );
+    }
 }

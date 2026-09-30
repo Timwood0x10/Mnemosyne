@@ -35,7 +35,10 @@ const LARGE_GAP_THRESHOLD: i64 = 90 * 24 * 3600;
 /// though the topics differ. One shared bigram ("喜欢") is too loose across
 /// common verb templates, so a flip requires at least two overlapping bigrams
 /// (e.g. 应酬 appears in both "我喜欢应酬" and "我不喜欢应酬").
-const STANCE_FLIP_MIN_SHARED_BIGRAMS: usize = 2;
+///
+/// Shared with the offline persona-check path (`persona::check`) so both
+/// detection sites use ONE topic guard instead of a magic number.
+pub(crate) const STANCE_FLIP_MIN_SHARED_BIGRAMS: usize = 2;
 
 /// The kind of a persona-evolution turning point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

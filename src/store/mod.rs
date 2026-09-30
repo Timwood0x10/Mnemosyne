@@ -370,6 +370,18 @@ impl SQLiteVecStore {
         } else {
             conn.execute_batch(FTS_SCHEMA)
                 .map_err(|e| StorageError::Schema(format!("init fts: {e}")))?;
+            // Backfill rows that predate the FTS tables/triggers — a database
+            // first opened in vector mode (dim > 0 builds no FTS table) or a
+            // legacy file. The INSERT trigger only fires for new writes, so
+            // without this the old rows stay permanently invisible to MATCH.
+            // The `NOT IN` guard makes the statement idempotent across opens.
+            conn.execute(
+                "INSERT INTO memories_fts(rowid, content, problem, solution)
+                 SELECT rowid, content, problem, solution FROM memories
+                 WHERE rowid NOT IN (SELECT rowid FROM memories_fts)",
+                [],
+            )
+            .map_err(|e| StorageError::Schema(format!("backfill fts: {e}")))?;
         }
         Ok(())
     }

@@ -156,7 +156,7 @@ relationship, and rebuild the persona's evolution timeline.
 |------|----------|-----------------|
 | `persona_inject` | Inject a structured, deterministic persona card (identity / persona / style / taboos / relationship) into the system prompt; multi-tenancy by `tenant_id` | `agent_id` |
 | `persona_check` | Guard the agent's draft reply against the accumulated persona facts; report `conflicts` + `drift` (no LLM, keyword fallback) | `agent_id`, `draft` |
-| `relationship_update` | Incrementally update the agent↔user relationship state from message emotion signals (intimacy / stage / trend / recent topics) | `agent_id`, `user_id`, `messages[]` |
+| `relationship_update` | Incrementally update the agent↔user relationship state from message emotion signals (intimacy / stage / trend / recent topics): user emotions move intimacy by ±0.02, the agent's own by ±0.01 | `agent_id`, `user_id`, `messages[]` |
 | `relationship_query` | Read the current relationship snapshot for a tenant/agent/user triple | `agent_id`, `user_id` |
 | `persona_timeline` | Rebuild an entity's persona evolution timeline (`origin → turning point → current state`) from accumulated facts (mem0 v3 ADD-only) | `entity_id` |
 | `story_bridge` | Novel-character bridge: compile a protagonist's knowledge-graph story events into fact-store persona facts, providing cold-start baseline for `persona_timeline`/`persona_check` | `name` |
@@ -200,6 +200,11 @@ and queried by cosine similarity:
 - `hnsw.rs` — approximate nearest neighbor for large graphs, with an agreed
   convention on degenerate inputs: a zero vector returns distance `sqrt(2)`
   (cosine = 0.0), identical to the brute-force scan, so both indexes agree.
+
+> Vector mode ranks **only** rows that carry an embedding: a legacy row without
+> one has no cosine similarity and is not ranked by this mode. Use Hybrid mode
+> when such rows must still compete for a slot — Hybrid folds them in via
+> keyword scoring, so they are never silently dropped from a hybrid result set.
 
 ### 3. Hybrid retrieval
 

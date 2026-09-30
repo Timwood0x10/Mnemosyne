@@ -142,7 +142,7 @@ Event 事实作为锚点——再由以下两个工具读回。
 |------|----------|-----------------|
 | `persona_inject` | 向系统提示注入结构化、确定性人设卡（身份/人设/风格/禁忌/关系）；按 `tenant_id` 多租户 | `agent_id` |
 | `persona_check` | 守护草稿回复与已积累人设事实的一致性，报告 `conflicts` + `drift`（无 LLM，关键词回退） | `agent_id`, `draft` |
-| `relationship_update` | 从消息情绪信号增量更新 Agent↔用户关系状态（亲密度/阶段/趋势/近期话题） | `agent_id`, `user_id`, `messages[]` |
+| `relationship_update` | 从消息情绪信号增量更新 Agent↔用户关系状态（亲密度/阶段/趋势/近期话题）：用户情绪 ±0.02、Agent 自身情绪 ±0.01 | `agent_id`, `user_id`, `messages[]` |
 | `relationship_query` | 读取租户/Agent/用户三元组的当前关系快照 | `agent_id`, `user_id` |
 | `persona_timeline` | 从积累的事实重建实体人设演化时间线（`起点 → 关键转变点 → 现状`，mem0 v3 ADD-only） | `entity_id` |
 | `story_bridge` | 小说角色桥接：把主角的知识图谱故事事件编译为人设事实，为 `persona_timeline`/`persona_check` 提供冷启动基线 | `name` |
@@ -179,6 +179,10 @@ LIKE 通配符已转义。精确与子串匹配直接走索引——O(log n)，�
 - `brute_force.rs` — 精确 O(N) 全扫（ground truth）；
 - `hnsw.rs` — 大图近似最近邻；对退化输入有约定：零向量返回距离 `sqrt(2)`
   （cosine = 0.0），与 brute_force 一致，两个索引结论相同。
+
+> 向量模式**只**对带有嵌入的行排序：无嵌入的旧数据没有余弦相似度，不会被该
+> 模式排序。若这些行仍需参与竞争，请使用混合（hybrid）模式——混合检索会通过
+> 关键词评分把它们纳入，因此不会被静默丢弃。
 
 ### 3. 混合检索
 

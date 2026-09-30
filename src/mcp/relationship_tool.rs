@@ -240,7 +240,7 @@ fn parse_messages(value: Option<&Value>) -> Result<Vec<Message>, Error> {
 pub fn relationship_update_definition() -> ToolDefinition {
     ToolDefinition {
         name: "relationship_update".into(),
-        description: "Incrementally update the agent↔user relationship state from a batch of messages using deterministic rules (no LLM): each user positive-emotion message raises intimacy by 0.02, each negative-emotion message lowers it by 0.02 (clamped to [0,1]); stage is derived from intimacy thresholds; emotion trend from the intimacy delta; recent topics are recurring keywords. Persists to relationship_state.".into(),
+        description: "Incrementally update the agent↔user relationship state from a batch of messages using deterministic rules (no LLM): each user positive-emotion message raises intimacy by 0.02, each negative-emotion message lowers it by 0.02 (clamped to [0,1]); the agent's own positive/negative-emotion messages also move intimacy with a lighter weight of 0.01, so the user's emotions remain the primary driver; stage is derived from intimacy thresholds; emotion trend from the intimacy delta; recent topics are recurring keywords. Persists to relationship_state.".into(),
         input_schema: json!({
             "type": "object",
             "properties": {

@@ -687,6 +687,13 @@ async fn main() -> AnyhowResult<()> {
         }
         Some(Command::Serve) | None => {
             let cfg = cli.into_config().context("load configuration")?;
+            // Fail loud on a broken vocabulary (audit H18). A `config/*.json`
+            // that EXISTS but cannot be parsed aborts startup with a clear
+            // message, instead of serving silently with an empty/degraded
+            // lexicon. An ABSENT config file is a legitimate minimal
+            // deployment and is deliberately NOT fatal (see `try_init`).
+            mnemosyne::config_check::verify_vocabulary()
+                .map_err(|error| anyhow::anyhow!("load built-in vocabulary: {error}"))?;
             let (server, _distiller, _engine) = build_server(&cfg).await?;
             match transport_kind.as_str() {
                 "http" => {

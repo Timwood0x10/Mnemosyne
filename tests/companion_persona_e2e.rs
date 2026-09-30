@@ -68,8 +68,10 @@ async fn companion_persona_full_loop() {
     // 1. Seed the agent's persona facts. The second and third facts form a
     //    genuine stance flip (喜欢应酬 → 不喜欢应酬) so the timeline later
     //    reports a turning point, and `persona_check` can flag a contradiction.
-    //    Fact 4 (喜欢安稳) is a single-stance topic used by stage 3b to verify
-    //    a genuine reversal with no same-direction anchor.
+    //    Fact 4 (喜欢安稳的生活) is a single-stance topic used by stage 3b to
+    //    verify a genuine reversal with no same-direction anchor. Its topic is
+    //    multi-character so the reversal shares >= 2 bigrams with the draft —
+    //    the documented topic guard in `persona/check.rs` requires that.
     let entity_id = store
         .resolve_agent(TENANT_ID, AGENT_ID)
         .expect("resolve agent");
@@ -77,7 +79,7 @@ async fn companion_persona_full_loop() {
         persona_fact(FactType::Identity, 1, false, "我是白流苏，离过婚"),
         persona_fact(FactType::Preference, 2, false, "我喜欢应酬"),
         persona_fact(FactType::Preference, 3, true, "我不喜欢应酬"),
-        persona_fact(FactType::Preference, 4, false, "我喜欢安稳"),
+        persona_fact(FactType::Preference, 4, false, "我喜欢安稳的生活"),
     ];
     for fact in &mut facts {
         fact.entity_id = entity_id;
@@ -136,13 +138,14 @@ async fn companion_persona_full_loop() {
 
     // 3b. A draft that genuinely contradicts the CURRENT stance (opposite
     //     negation, no same-direction anchor) must still be flagged. Fact 4
-    //     ("我喜欢安稳", negated=false) is a single-stance topic — "我讨厌安稳"
-    //     reverses it with no affirmative anchor to shield it.
+    //     ("我喜欢安稳的生活", negated=false) is a single-stance topic —
+    //     "我讨厌安稳的生活" reverses it with no affirmative anchor to shield
+    //     it, and the two share >= 2 bigrams so the topic guard passes.
     let contra_result = check
         .call(&json!({
             "agent_id": AGENT_ID,
             "tenant_id": TENANT_ID,
-            "draft": "我讨厌安稳，太吵了。",
+            "draft": "我讨厌安稳的生活，太吵了。",
         }))
         .await
         .expect("persona_check succeeds");

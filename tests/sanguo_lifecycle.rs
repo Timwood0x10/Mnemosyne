@@ -158,8 +158,14 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
     expired.expires_at = Some(Utc::now() - chrono::Duration::seconds(60));
     store.create(&expired).await.expect("create expired");
 
-    let before = store.get("sanguo-expired-1").await.expect("get").is_some();
-    assert!(before, "expired row must exist before maintenance");
+    // Reads filter expired rows (H10), so existence is checked via the row
+    // count rather than `get`, which would hide the row we just inserted.
+    let before = store.count_for_tenant("t1").await.expect("count tenant");
+    assert_eq!(
+        before,
+        total + 1,
+        "expired row must exist before maintenance"
+    );
 
     let _ = d.distill("sanguo-empty", &[], "t1", "u1").await;
     let m2 = d.metrics();
@@ -167,9 +173,14 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
         "after forget phase: memories_forgotten={}",
         m2.memories_forgotten
     );
+    let after = store.count_for_tenant("t1").await.expect("count tenant");
+    assert_eq!(
+        after, total,
+        "TTL-expired memory must be purged by the forget phase"
+    );
     assert!(
         store.get("sanguo-expired-1").await.expect("get").is_none(),
-        "TTL-expired memory must be purged by the forget phase"
+        "TTL-expired memory must not be readable after the forget phase"
     );
     println!("\n========== SANGUO LIFECYCLE COMPLETE ==========");
 }

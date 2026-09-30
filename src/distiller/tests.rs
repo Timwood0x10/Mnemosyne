@@ -716,6 +716,118 @@ async fn capacity_control_evicts() {
     );
 }
 
+/// Objective: Verify capacity eviction breaks confidence ties by dropping the
+/// OLDEST row, not the newest (09-26/H9). The query feeds rows newest-first and
+/// the old code stable-sorted on confidence alone, so every tied group evicted
+/// its newest member.
+/// Invariants: With five equally-scored rows and a cap of three, the two oldest
+/// are evicted and the two newest survive; `capacity_evictions` records -2.
+#[tokio::test]
+async fn capacity_eviction_tie_breaks_oldest_first() {
+    let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open"));
+    let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+    let cfg = DistillationConfig {
+        min_importance: 0.0,
+        conflict_threshold: 0.99,
+        max_memories_per_distillation: 100,
+        max_solutions_per_tenant: 3,
+        enable_cross_turn: true,
+    };
+    let d = PipelineDistiller::new(cfg, embedder, store.clone());
+
+    // Identical confidence; strictly increasing age in array order.
+    let now = Utc::now();
+    for (i, id) in ["oldest", "older", "middle", "newer", "newest"]
+        .iter()
+        .enumerate()
+    {
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, format!("tied-{id}"), 0.5);
+        exp.id = (*id).to_string();
+        exp.created_at = now - chrono::Duration::days((5 - i) as i64);
+        store.create(&exp).await.expect("create tied row");
+    }
+
+    // Empty messages still run the maintenance phases that enforce the cap.
+    let _ = d.distill("c1", &[], "t1", "u1").await;
+
+    assert!(
+        store.get("oldest").await.expect("get oldest").is_none(),
+        "the OLDEST row of a tied group must be evicted first"
+    );
+    assert!(
+        store.get("older").await.expect("get older").is_none(),
+        "the second-oldest row of a tied group must be evicted second"
+    );
+    assert!(
+        store.get("middle").await.expect("get middle").is_some(),
+        "a newer tied row must survive once the two oldest are gone"
+    );
+    assert!(
+        store.get("newest").await.expect("get newest").is_some(),
+        "the newest tied row must never be evicted by a tie-break"
+    );
+    assert_eq!(
+        d.metrics().capacity_evictions,
+        -2,
+        "exactly two rows should have been evicted"
+    );
+}
+
+/// Objective: Verify capacity eviction never deletes the memories the current
+/// round just created (09-26/H9): the round runs eviction after its own inserts,
+/// so its lowest-confidence output used to be deleted and still returned as a
+/// persisted memory.
+/// Invariants: The freshly-distilled row survives, the cap is still honoured,
+/// and the returned id is readable from the store.
+#[tokio::test]
+async fn capacity_eviction_never_deletes_current_round_output() {
+    let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open"));
+    let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+    // Cap of 1 with three pre-existing rows: three evictions are required.
+    let cfg = DistillationConfig {
+        min_importance: 0.0,
+        conflict_threshold: 0.99,
+        max_memories_per_distillation: 10,
+        max_solutions_per_tenant: 1,
+        enable_cross_turn: false,
+    };
+    let d = PipelineDistiller::new(cfg, embedder, store.clone());
+
+    // Legacy rows at the maximum confidence: the freshly-distilled row scores
+    // strictly lower, so the old (unprotected) tie-break would target it first.
+    let now = Utc::now();
+    for i in 0..3 {
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, format!("legacy-{i}"), 1.0);
+        exp.id = format!("legacy-{i}");
+        exp.created_at = now - chrono::Duration::days(3 - i as i64);
+        store.create(&exp).await.expect("create legacy row");
+    }
+
+    let messages = vec![
+        Message::new("user", "How do I run it"),
+        Message::new("assistant", "Just start it."),
+    ];
+    let out = d
+        .distill("c1", &messages, "t1", "u1")
+        .await
+        .expect("distill");
+    assert_eq!(out.len(), 1, "the round must produce exactly one memory");
+
+    let fresh_id = out[0].id.clone();
+    assert!(
+        store.get(&fresh_id).await.expect("get fresh").is_some(),
+        "the memory created by this round must survive its own round's eviction"
+    );
+    let count = store
+        .count_by_memory_type("t1", MemoryType::Knowledge)
+        .await
+        .expect("count");
+    assert_eq!(
+        count, 1,
+        "the cap must still be honoured, leaving only the protected fresh row"
+    );
+}
+
 /// Objective: Verify the forget-expired maintenance phase purges expired
 /// memories even when distillation produces nothing.
 /// Invariants: An expired memory for the tenant is deleted; a live memory

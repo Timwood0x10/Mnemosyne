@@ -39,7 +39,11 @@ use crate::error::{Error, Result};
 pub struct PersonaThresholds {
     /// Minimum cosine similarity between an utterance and the winning
     /// prototype for the signal to be accepted.
-    #[serde(default = "default_match")]
+    ///
+    /// The JSON key is `match`; the Rust field is `match_` because `match` is
+    /// a keyword, so the rename is REQUIRED — without it serde silently ignored
+    /// the file's value and always used the default (audit H19).
+    #[serde(rename = "match", default = "default_match")]
     pub match_: f32,
 
     /// Cosine similarity at or above which two facts are considered the same
@@ -326,6 +330,55 @@ mod tests {
         assert_eq!(
             config.thresholds.match_, 0.75,
             "default match threshold applied"
+        );
+    }
+
+    /// Objective: Verify the bundled `config/persona_prototypes.json` `match`
+    /// threshold is actually honoured by serde (audit H19: the field was
+    /// `match_` with no rename, so the file's `match` key was silently ignored
+    /// and the default always applied).
+    /// Invariants: The parsed threshold equals the value declared in the real
+    /// file, and a distinct `match` value is never replaced by the default.
+    #[test]
+    fn bundled_prototypes_honour_match_threshold() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/persona_prototypes.json");
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("bundled persona_prototypes.json must be readable: {e}"));
+        let json: serde_json::Value =
+            serde_json::from_str(&raw).expect("bundled prototype JSON must parse as a Value");
+        let declared = json["thresholds"]["match"]
+            .as_f64()
+            .expect("bundled JSON must declare a numeric `match` threshold")
+            as f32;
+
+        let config = load_prototype_config(&path).expect("bundled prototype config must load");
+        assert_eq!(
+            config.thresholds.match_, declared,
+            "the parser must read the file's `match` key, not the default"
+        );
+
+        // The bundled value happens to equal the default (0.75), so the check
+        // above cannot, by itself, catch a missing rename. Pin the rename with a
+        // distinct value so this stays a real regression guard.
+        let json2 = r#"{
+            "thresholds": { "match": 0.9, "dedup": 0.95, "conflict": 0.9 },
+            "prototypes": [
+                {"fact_type": "Identity", "negated": false, "sentences": ["我是白流苏"]}
+            ]
+        }"#;
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        std::fs::write(tmp.path(), json2).expect("write json");
+        let config2 =
+            load_prototype_config(tmp.path()).expect("distinct-threshold config must load");
+        assert_eq!(
+            config2.thresholds.match_, 0.9,
+            "a non-default `match` value must be honoured"
+        );
+        assert_ne!(
+            config2.thresholds.match_,
+            PersonaThresholds::default().match_,
+            "the distinct match value must differ from the default"
         );
     }
 
