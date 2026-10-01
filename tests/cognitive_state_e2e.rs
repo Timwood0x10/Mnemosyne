@@ -288,7 +288,11 @@ async fn cognition_layer_full_loop_over_mcp() {
         json!({ "fact_id": anchor_id, "tenant_id": "tenant-a" }),
     )
     .await;
-    assert_eq!(provenance["fact_id"], json!(anchor_id));
+    assert_eq!(
+        provenance["fact_id"],
+        json!(anchor_id),
+        "the provenance must echo the anchor fact id"
+    );
     assert_eq!(
         provenance["status"],
         json!("active"),
@@ -589,8 +593,16 @@ async fn self_introduction_lands_in_the_identity_dimension() {
                 panic!("missing the `{name}` attribute in the identity dimension: {timeline}")
             })
     };
-    assert_eq!(attribute("name")["value"]["content"], "小林");
-    assert_eq!(attribute("occupation")["value"]["content"], "后端开发");
+    assert_eq!(
+        attribute("name")["value"]["content"],
+        "小林",
+        "the name attribute must be extracted"
+    );
+    assert_eq!(
+        attribute("occupation")["value"]["content"],
+        "后端开发",
+        "the occupation attribute must be extracted"
+    );
 }
 
 /// Objective: Verify the decision loop CLOSES over the real MCP path: the host

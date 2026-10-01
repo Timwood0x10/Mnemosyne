@@ -100,18 +100,36 @@ mod tests {
     #[test]
     fn conversation_pack_parses() {
         let p = DomainProfile::load("conversation_cognition").expect("pack must load");
-        assert_eq!(p.profile_name, "conversation_cognition");
-        assert!(p.entity_attrs.iter().any(|a| a == "preference"));
-        assert!(p.entity_attrs.iter().any(|a| a == "goal"));
-        assert!(p.verb_groups.contains_key("positive"));
-        assert!(p.verb_groups.contains_key("negative"));
+        assert_eq!(
+            p.profile_name, "conversation_cognition",
+            "the shipped profile must keep its name"
+        );
+        assert!(
+            p.entity_attrs.iter().any(|a| a == "preference"),
+            "the profile must list the preference attribute"
+        );
+        assert!(
+            p.entity_attrs.iter().any(|a| a == "goal"),
+            "the profile must list the goal attribute"
+        );
+        assert!(
+            p.verb_groups.contains_key("positive"),
+            "the profile must define a positive verb group"
+        );
+        assert!(
+            p.verb_groups.contains_key("negative"),
+            "the profile must define a negative verb group"
+        );
         assert!(
             p.extraction_hints
                 .get("decision_keywords")
                 .is_some_and(|kws| kws.iter().any(|k| k == "决定")),
             "decision keywords must include 决定"
         );
-        assert!(p.relation_predicates.iter().any(|r| r == "喜欢"));
+        assert!(
+            p.relation_predicates.iter().any(|r| r == "喜欢"),
+            "the profile must list the 喜欢 relation predicate"
+        );
     }
 
     /// Objective: Verify a missing pack surfaces an Io error (never panic).
@@ -129,7 +147,13 @@ mod tests {
     fn cached_profile_matches_fresh_load() {
         let cached = conversation_profile();
         let fresh = DomainProfile::load("conversation_cognition").expect("fresh");
-        assert_eq!(cached.profile_name, fresh.profile_name);
-        assert_eq!(cached.languages, fresh.languages);
+        assert_eq!(
+            cached.profile_name, fresh.profile_name,
+            "the cached profile must keep its name"
+        );
+        assert_eq!(
+            cached.languages, fresh.languages,
+            "the cached profile must keep its languages"
+        );
     }
 }

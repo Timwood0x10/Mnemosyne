@@ -564,40 +564,55 @@ pub fn find_relation_context_indexed(
 mod tests {
     use super::*;
 
+    /// Objective: Verify 夫妻 keywords map a co-occurring pair to the 夫妻 relation.
+    /// Invariants: the detected relation type is 夫妻.
     #[test]
     fn detect_fuqi_relation() {
         let ctx = "宋江与扈三娘配为夫妇，众人皆贺。";
         let rtype = detect_relation_type(ctx, "宋江", "扈三娘");
-        assert_eq!(rtype, "夫妻");
+        assert_eq!(rtype, "夫妻", "夫妻 keywords must map to the 夫妻 type");
     }
 
+    /// Objective: Verify 结义 keywords map a sworn-brotherhood sentence to the 结义 relation.
+    /// Invariants: the detected relation type is 结义.
     #[test]
     fn detect_jieyi_relation() {
         let ctx = "刘备、关羽、张飞三人结义为兄弟，誓同生死。";
         let rtype = detect_relation_type(ctx, "刘备", "关羽");
-        assert_eq!(rtype, "结义");
+        assert_eq!(rtype, "结义", "结义 keywords must map to the 结义 type");
     }
 
+    /// Objective: Verify 师徒 keywords map the pair to the 师徒 relation.
+    /// Invariants: the detected relation type is 师徒.
     #[test]
     fn detect_shitu_relation() {
         let ctx = "那孙悟空拜唐僧为师，跟随师父西行。";
         let rtype = detect_relation_type(ctx, "孙悟空", "唐僧");
-        assert_eq!(rtype, "师徒");
+        assert_eq!(rtype, "师徒", "师徒 keywords must map to the 师徒 type");
     }
 
+    /// Objective: Verify a context with no relation keyword falls back to the generic 关联 type.
+    /// Invariants: the detected relation type is 关联.
     #[test]
     fn fallback_to_generic() {
         let ctx = "这个人跟那个人一起走着。";
         let rtype = detect_relation_type(ctx, "刘备", "关羽");
-        assert_eq!(rtype, "关联");
+        assert_eq!(
+            rtype, "关联",
+            "an unmatched sentence must fall back to 关联"
+        );
     }
 
+    /// Objective: Verify an empty context falls back to the generic 关联 type.
+    /// Invariants: the detected relation type is 关联.
     #[test]
     fn empty_context_returns_generic() {
         let rtype = detect_relation_type("", "宋江", "吴用");
-        assert_eq!(rtype, "关联");
+        assert_eq!(rtype, "关联", "an empty context must fall back to 关联");
     }
 
+    /// Objective: Verify an address keyword inside a reply yields the 君臣 dialog relation.
+    /// Invariants: the result contains the 诸葛亮→刘备 君臣 relation.
     #[test]
     fn dialog_extracts_junchen_from_zhu_gong() {
         let text = "玄德曰：孔明何在？孔明对曰：主公有何吩咐？";
@@ -618,6 +633,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify a dialog marker sitting inside a poem attribution is skipped.
+    /// Invariants: no dialog relation is produced.
     #[test]
     fn dialog_skips_poem_prefix() {
         let text = "诗曰：主公在上。玄德曰：善。";
@@ -629,6 +646,8 @@ mod tests {
         assert!(relations.is_empty(), "got {relations:?}");
     }
 
+    /// Objective: Verify the 道 dialog marker resolves both speaker and addressee.
+    /// Invariants: the result contains the 吴用→宋江 结义 relation.
     #[test]
     fn dialog_works_with_dao_marker() {
         let text = "吴用对宋江道：哥哥在上，小弟有一言。";
@@ -648,6 +667,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify a lone 谓X曰 sentence does not fabricate a dialog relation.
+    /// Invariants: no dialog relation is produced.
     #[test]
     fn dialog_resolves_wei_x_yue() {
         let text = "玄德谓孔明曰：先生何以教我？";
@@ -658,9 +679,14 @@ mod tests {
             ("刘备".to_string(), "刘备".to_string()),
         ];
         let relations = extract_dialog_relations(text, &name_pairs);
-        assert!(relations.is_empty());
+        assert!(
+            relations.is_empty(),
+            "a 谓X曰 sentence must not fabricate a dialog relation"
+        );
     }
 
+    /// Objective: Verify no relation rule carries an empty keyword.
+    /// Invariants: every rule has at least one keyword and no keyword is empty.
     #[test]
     fn relation_rules_have_no_empty_keywords() {
         for (keywords, rtype) in relation_type_rules() {

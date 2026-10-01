@@ -222,23 +222,43 @@ mod tests {
 
         let mut bad_subject = sample_decision();
         bad_subject.subject = 0;
-        assert_eq!(validate_decision(&bad_subject), Some("subject"));
+        assert_eq!(
+            validate_decision(&bad_subject),
+            Some("subject"),
+            "a bad subject must be rejected"
+        );
 
         let mut bad_verb = sample_decision();
         bad_verb.verb = "   ".to_string();
-        assert_eq!(validate_decision(&bad_verb), Some("verb"));
+        assert_eq!(
+            validate_decision(&bad_verb),
+            Some("verb"),
+            "a bad verb must be rejected"
+        );
 
         let mut bad_object = sample_decision();
         bad_object.object = String::new();
-        assert_eq!(validate_decision(&bad_object), Some("object"));
+        assert_eq!(
+            validate_decision(&bad_object),
+            Some("object"),
+            "a bad object must be rejected"
+        );
 
         let mut long_verb = sample_decision();
         long_verb.verb = "x".repeat(65);
-        assert_eq!(validate_decision(&long_verb), Some("verb"));
+        assert_eq!(
+            validate_decision(&long_verb),
+            Some("verb"),
+            "an over-long verb must be rejected"
+        );
 
         let mut long_object = sample_decision();
         long_object.object = "x".repeat(513);
-        assert_eq!(validate_decision(&long_object), Some("object"));
+        assert_eq!(
+            validate_decision(&long_object),
+            Some("object"),
+            "an over-long object must be rejected"
+        );
     }
 
     /// Objective: Verify `apply_outcome` records the outcome exactly once and
@@ -248,8 +268,16 @@ mod tests {
     #[test]
     fn outcome_is_recorded_exactly_once() {
         let closed = apply_outcome(sample_decision(), DecisionOutcome::Fulfilled);
-        assert_eq!(closed.outcome, Some(DecisionOutcome::Fulfilled));
-        assert_eq!(closed.status, DecisionStatus::Closed);
+        assert_eq!(
+            closed.outcome,
+            Some(DecisionOutcome::Fulfilled),
+            "closing must record the outcome"
+        );
+        assert_eq!(
+            closed.status,
+            DecisionStatus::Closed,
+            "closing must set the status"
+        );
 
         let again = apply_outcome(closed, DecisionOutcome::Violated);
         assert_eq!(
@@ -257,7 +285,11 @@ mod tests {
             Some(DecisionOutcome::Fulfilled),
             "first outcome wins, second is a no-op"
         );
-        assert_eq!(again.status, DecisionStatus::Closed);
+        assert_eq!(
+            again.status,
+            DecisionStatus::Closed,
+            "a second close must stay closed"
+        );
     }
 
     /// Objective: Verify `apply_outcome` on an already-open decision still
@@ -266,8 +298,12 @@ mod tests {
     #[test]
     fn fresh_decision_is_open_with_no_outcome() {
         let fresh = sample_decision();
-        assert_eq!(fresh.outcome, None);
-        assert_eq!(fresh.status, DecisionStatus::Open);
+        assert_eq!(fresh.outcome, None, "a new decision has no outcome");
+        assert_eq!(
+            fresh.status,
+            DecisionStatus::Open,
+            "a new decision starts open"
+        );
     }
 
     /// Objective: Verify the length limits count CHARACTERS, not bytes. Counting

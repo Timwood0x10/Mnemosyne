@@ -249,7 +249,11 @@ mod tests {
         let huge = vec![b'x'; MAX_LINE_BYTES + 100];
         let mut oversized = Cursor::new(huge);
         let err = read_bounded_line(&mut oversized).expect_err("oversized line must error");
-        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData,
+            "an oversized line must report InvalidData"
+        );
         assert!(
             err.to_string().contains("exceeds"),
             "error explains the cap, got {err}"

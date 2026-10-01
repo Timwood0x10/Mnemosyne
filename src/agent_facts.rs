@@ -464,9 +464,19 @@ mod tests {
         ];
         let facts = agent_facts_from_messages(&messages, 9, 100);
         assert_eq!(facts.len(), 1, "completion language → one agent fact");
-        assert_eq!(facts[0].entity_id, 9);
-        assert_eq!(facts[0].fact_type, FactType::Event);
-        assert_eq!(facts[0].payload["action"], "completed");
+        assert_eq!(
+            facts[0].entity_id, 9,
+            "the compiled fact must carry the caller entity id"
+        );
+        assert_eq!(
+            facts[0].fact_type,
+            FactType::Event,
+            "a completion statement must compile to an Event fact"
+        );
+        assert_eq!(
+            facts[0].payload["action"], "completed",
+            "the action must be recorded in the payload"
+        );
     }
 
     /// Objective: Verify pure user messages produce NO agent facts (agent
@@ -501,7 +511,11 @@ mod tests {
         assert_eq!(facts.len(), 1, "one restatement → one derived fact");
         let fact = &facts[0];
         assert_eq!(fact.entity_id, 42, "derived fact is ABOUT the User entity");
-        assert_eq!(fact.fact_type, FactType::Preference);
+        assert_eq!(
+            fact.fact_type,
+            FactType::Preference,
+            "a preference statement must compile to a Preference fact"
+        );
         assert_eq!(
             fact.payload["attribution"], "agent_derived",
             "marked as agent-derived so consumers can downweight it"
@@ -538,16 +552,24 @@ mod tests {
             Message::new("assistant", "看来你喜欢 Go，我会推荐相关资料。"),
         ];
         let facts = derived_facts_from_messages(&messages, 3, 1);
-        assert_eq!(facts.len(), 1);
-        assert_eq!(facts[0].fact_type, FactType::Preference);
+        assert_eq!(facts.len(), 1, "exactly one preference fact is expected");
+        assert_eq!(
+            facts[0].fact_type,
+            FactType::Preference,
+            "the surviving fact must be the preference"
+        );
 
         let messages_goal = vec![
             Message::new("user", "我想学新东西"),
             Message::new("assistant", "你计划学 Rust，对吗？"),
         ];
         let facts_goal = derived_facts_from_messages(&messages_goal, 3, 1);
-        assert_eq!(facts_goal.len(), 1);
-        assert_eq!(facts_goal[0].fact_type, FactType::Goal);
+        assert_eq!(facts_goal.len(), 1, "exactly one goal fact is expected");
+        assert_eq!(
+            facts_goal[0].fact_type,
+            FactType::Goal,
+            "the surviving fact must be the goal"
+        );
     }
 
     /// Objective: Verify derived facts are produced even when there is NO
@@ -661,7 +683,7 @@ mod tests {
             },
         ];
         let facts = agent_facts_from_messages(&messages, 1, 1);
-        assert_eq!(facts.len(), 1);
+        assert_eq!(facts.len(), 1, "exactly one fact is expected");
         assert_eq!(
             facts[0].payload["status"], "error",
             "failed tool → error status"
@@ -751,9 +773,18 @@ mod tests {
     #[test]
     fn conversation_facts_new_is_empty() {
         let conv = ConversationFacts::new();
-        assert!(conv.user_facts.is_empty());
-        assert!(conv.agent_facts.is_empty());
-        assert!(conv.derived_facts.is_empty());
-        assert_eq!(conv.total(), 0);
+        assert!(
+            conv.user_facts.is_empty(),
+            "an empty conversation yields no user facts"
+        );
+        assert!(
+            conv.agent_facts.is_empty(),
+            "an empty conversation yields no agent facts"
+        );
+        assert!(
+            conv.derived_facts.is_empty(),
+            "an empty conversation yields no derived facts"
+        );
+        assert_eq!(conv.total(), 0, "an empty conversation must yield no facts");
     }
 }

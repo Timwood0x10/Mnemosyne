@@ -161,11 +161,26 @@ async fn import_rejects_newer_bundle_version() {
 async fn export_empty_store_is_empty() {
     let store = SQLiteKnowledgeStore::open_in_memory().await.expect("store");
     let bundle = export_store(&store).await.expect("export");
-    assert!(bundle.documents.is_empty());
-    assert!(bundle.objects.is_empty());
-    assert!(bundle.edges.is_empty());
-    assert!(bundle.evidence.is_empty());
-    assert!(bundle.evidence_links.is_empty());
+    assert!(
+        bundle.documents.is_empty(),
+        "an empty bundle must export no documents"
+    );
+    assert!(
+        bundle.objects.is_empty(),
+        "an empty bundle must export no objects"
+    );
+    assert!(
+        bundle.edges.is_empty(),
+        "an empty bundle must export no edges"
+    );
+    assert!(
+        bundle.evidence.is_empty(),
+        "an empty bundle must export no evidence"
+    );
+    assert!(
+        bundle.evidence_links.is_empty(),
+        "an empty bundle must export no evidence links"
+    );
 }
 
 /// Objective: Verify a world profile's evidence anchor exports its byte
@@ -247,7 +262,11 @@ async fn profile_export_carries_evidence_span() {
         "export must carry the anchored span, got {:?}",
         p.evidence_start
     );
-    assert_eq!(p.evidence_end, Some(310));
+    assert_eq!(
+        p.evidence_end,
+        Some(310),
+        "the mention span must round-trip its end offset"
+    );
     assert_eq!(
         p.evidence_content.as_deref(),
         Some("重复的句子。"),
@@ -409,7 +428,11 @@ async fn evidence_link_re_anchors_to_the_span_matching_row() {
         Some(300),
         "the link must stay on its own occurrence, not the first identical text"
     );
-    assert_eq!(link.evidence_end, Some(310));
+    assert_eq!(
+        link.evidence_end,
+        Some(310),
+        "the exported link must keep its evidence end offset"
+    );
 }
 
 /// Objective: Verify mentions survive the bundle. They were not exported at all,
@@ -435,13 +458,20 @@ async fn mentions_survive_the_bundle_round_trip() {
 
     let exported = export_store(&store).await.expect("export");
     assert_eq!(exported.mentions.len(), 1, "the mention is exported");
-    assert_eq!(exported.mentions[0].object_name, "用户");
+    assert_eq!(
+        exported.mentions[0].object_name, "用户",
+        "the exported mention must name its object"
+    );
     assert_eq!(
         exported.mentions[0].start_offset,
         Some(300),
         "the span round-trips"
     );
-    assert_eq!(exported.mentions[0].alias_used.as_deref(), Some("我"));
+    assert_eq!(
+        exported.mentions[0].alias_used.as_deref(),
+        Some("我"),
+        "the exported mention must record the alias used"
+    );
 
     let again = import_bundle(&store, &exported).await.expect("re-import");
     assert_eq!(

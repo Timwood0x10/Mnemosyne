@@ -150,9 +150,21 @@ mod tests {
     /// Invariants: Agent→"agent", User→"user", Character→"character".
     #[test]
     fn speaker_as_str() {
-        assert_eq!(Speaker::Agent.as_str(), "agent");
-        assert_eq!(Speaker::User.as_str(), "user");
-        assert_eq!(Speaker::Character.as_str(), "character");
+        assert_eq!(
+            Speaker::Agent.as_str(),
+            "agent",
+            "Agent must serialise to the wire tag agent"
+        );
+        assert_eq!(
+            Speaker::User.as_str(),
+            "user",
+            "User must serialise to the wire tag user"
+        );
+        assert_eq!(
+            Speaker::Character.as_str(),
+            "character",
+            "Character must serialise to the wire tag character"
+        );
     }
 
     /// Objective: Verify SpeakerAttribution::for_agent builds the correct

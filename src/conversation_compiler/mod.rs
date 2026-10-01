@@ -577,6 +577,8 @@ mod bench_tests {
     use super::*;
     use crate::types::*;
 
+    /// Objective: Verify a message with no tool-invocation fields produces no tool calls.
+    /// Invariants: the extracted tool-call list is empty.
     #[test]
     fn no_tool_invocation_fields_yields_empty() {
         let compiler = ConversationCompiler::new();
@@ -585,6 +587,9 @@ mod bench_tests {
             Message::new("assistant", "hi"),
         ];
         let result = compiler.compile("t1", &msgs);
-        assert!(result.session.reasoning_chain.is_empty());
+        assert!(
+            result.session.reasoning_chain.is_empty(),
+            "an empty session must have no reasoning chain"
+        );
     }
 }

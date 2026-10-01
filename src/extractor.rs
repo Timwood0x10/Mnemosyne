@@ -236,8 +236,14 @@ mod tests {
             ExtractionMethod::Direct,
             "method is Direct"
         );
-        assert_eq!(result[0].problem, "How do I parse JSON in Rust?");
-        assert_eq!(result[0].solution, "Use serde_json::from_str.");
+        assert_eq!(
+            result[0].problem, "How do I parse JSON in Rust?",
+            "the extracted problem must be the question turn"
+        );
+        assert_eq!(
+            result[0].solution, "Use serde_json::from_str.",
+            "the extracted solution must be the answer turn"
+        );
     }
 
     /// Objective: Verify non-problem user messages are skipped.

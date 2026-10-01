@@ -256,7 +256,10 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(content, "Prince O'Brien's regiment");
+        assert_eq!(
+            content, "Prince O'Brien's regiment",
+            "apostrophes must survive the writer round-trip"
+        );
     }
 
     /// Objective: Verify a mid-batch INSERT failure propagates and rolls back

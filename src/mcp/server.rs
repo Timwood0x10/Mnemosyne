@@ -487,7 +487,10 @@ mod tests {
                         .and_then(Value::as_str),
                     Some("test")
                 );
-                assert!(result.get("capabilities").is_some());
+                assert!(
+                    result.get("capabilities").is_some(),
+                    "the initialize reply must advertise capabilities"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -569,8 +572,12 @@ mod tests {
                     .get("tools")
                     .and_then(Value::as_array)
                     .expect("tools array");
-                assert_eq!(tools.len(), 1);
-                assert_eq!(tools[0].get("name").and_then(Value::as_str), Some("noop"));
+                assert_eq!(tools.len(), 1, "exactly one tool must be registered");
+                assert_eq!(
+                    tools[0].get("name").and_then(Value::as_str),
+                    Some("noop"),
+                    "the registered tool must be the noop tool"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -597,7 +604,10 @@ mod tests {
         match &t.outbox[0] {
             JSONRPCMessage::Response(resp) => {
                 let err = resp.error.as_ref().expect("error");
-                assert_eq!(err.code, ERR_METHOD_NOT_FOUND);
+                assert_eq!(
+                    err.code, ERR_METHOD_NOT_FOUND,
+                    "an unknown method must report method-not-found"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -642,9 +652,21 @@ mod tests {
                     .get("content")
                     .and_then(Value::as_array)
                     .expect("content array");
-                assert_eq!(content.len(), 1);
-                assert_eq!(content[0].get("text").and_then(Value::as_str), Some("noop"));
-                assert_eq!(result.get("isError").and_then(Value::as_bool), Some(false));
+                assert_eq!(
+                    content.len(),
+                    1,
+                    "a tool result must carry one content block"
+                );
+                assert_eq!(
+                    content[0].get("text").and_then(Value::as_str),
+                    Some("noop"),
+                    "the tool result must echo the tool output"
+                );
+                assert_eq!(
+                    result.get("isError").and_then(Value::as_bool),
+                    Some(false),
+                    "a successful tool must not be flagged as an error"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -674,8 +696,14 @@ mod tests {
         match &t.outbox[0] {
             JSONRPCMessage::Response(resp) => {
                 let err = resp.error.as_ref().expect("error");
-                assert_eq!(err.code, ERR_METHOD_NOT_FOUND);
-                assert!(err.message.contains("ghost"));
+                assert_eq!(
+                    err.code, ERR_METHOD_NOT_FOUND,
+                    "an unknown method must report method-not-found"
+                );
+                assert!(
+                    err.message.contains("ghost"),
+                    "an unknown tool error must name the tool"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }
@@ -716,8 +744,14 @@ mod tests {
         match &t.outbox[0] {
             JSONRPCMessage::Response(resp) => {
                 let err = resp.error.as_ref().expect("error present");
-                assert_eq!(err.code, ERR_INVALID_PARAMS);
-                assert!(err.message.contains("foo"));
+                assert_eq!(
+                    err.code, ERR_INVALID_PARAMS,
+                    "bad params must report invalid-params"
+                );
+                assert!(
+                    err.message.contains("foo"),
+                    "an invalid-params error must name the argument"
+                );
             }
             other => panic!("expected Response, got {other:?}"),
         }

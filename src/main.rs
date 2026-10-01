@@ -79,7 +79,8 @@ fn build_remote_embedder(
         cfg.embedding_model.clone(),
         cfg.embedding_timeout,
     )
-    .context("build remote embedder")?;
+    .context("build remote embedder")?
+    .with_api_key(cfg.openai_api_key.clone());
     Ok(Arc::new(embedder))
 }
 

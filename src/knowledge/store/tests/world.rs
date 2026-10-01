@@ -80,7 +80,10 @@ async fn world_event_offsets_round_trip_and_upsert_is_idempotent() {
         .await
         .expect("query")
         .expect("participant upserted into world_entities");
-    assert_eq!(world.name, "刘备");
+    assert_eq!(
+        world.name, "刘备",
+        "the participant must be upserted as a world entity"
+    );
 }
 
 /// Objective: Verify world-state slots persist with their event anchor and
@@ -137,17 +140,21 @@ async fn world_state_slots_round_trip_and_append_history() {
 
     let all = store.list_world_states(None).await.expect("list all");
     assert_eq!(all.len(), 1, "idempotent upsert must not grow history");
-    assert_eq!(all[0].entity_name, "董卓");
-    assert_eq!(all[0].slot, "status");
-    assert_eq!(all[0].value, "deceased");
-    assert_eq!(all[0].chapter, Some(3));
+    assert_eq!(all[0].entity_name, "董卓", "the state must name its entity");
+    assert_eq!(all[0].slot, "status", "the state must keep its slot");
+    assert_eq!(all[0].value, "deceased", "the state must keep its value");
+    assert_eq!(all[0].chapter, Some(3), "the state must keep its chapter");
     assert_eq!(
         all[0].event_id,
         Some(event_id),
         "state anchors to its event"
     );
     assert_eq!(all[0].start_offset, Some(100), "span persisted");
-    assert_eq!(all[0].end_offset, Some(112));
+    assert_eq!(
+        all[0].end_offset,
+        Some(112),
+        "the state must keep its end offset"
+    );
 
     // A later chapter (different event) appends history — ADD-only.
     let event2 = store
@@ -180,13 +187,24 @@ async fn world_state_slots_round_trip_and_append_history() {
     let all = store.list_world_states(None).await.expect("list all");
     assert_eq!(all.len(), 2, "a new event appends, never overwrites");
     // Ordered by (chapter, id): ch3 first, ch5 second.
-    assert_eq!(all[0].chapter, Some(3));
-    assert_eq!(all[1].chapter, Some(5));
+    assert_eq!(
+        all[0].chapter,
+        Some(3),
+        "the earlier chapter must sort first"
+    );
+    assert_eq!(
+        all[1].chapter,
+        Some(5),
+        "the later chapter must sort second"
+    );
 
     // Entity-name filter scopes the query.
     let one = store.list_world_states(Some("董卓")).await.expect("filter");
     assert_eq!(one.len(), 1, "filter by entity name");
-    assert_eq!(one[0].entity_name, "董卓");
+    assert_eq!(
+        one[0].entity_name, "董卓",
+        "the entity filter must scope the result"
+    );
 }
 
 /// Objective: Pin the re-observation contract for world-state spans: the same
@@ -303,9 +321,18 @@ fn new_world_rows_default_to_the_schema_values() {
         event.timestamp, None,
         "an omitted chapter must stay unknown"
     );
-    assert_eq!(event.location, None);
-    assert_eq!(event.start_offset, None);
-    assert_eq!(event.end_offset, None);
+    assert_eq!(
+        event.location, None,
+        "an omitted location must stay unknown"
+    );
+    assert_eq!(
+        event.start_offset, None,
+        "an omitted span must stay unknown"
+    );
+    assert_eq!(
+        event.end_offset, None,
+        "an omitted end span must stay unknown"
+    );
     assert!(
         event.title.is_empty() && event.description.is_empty(),
         "text fields default to empty, never to a placeholder"
@@ -316,10 +343,16 @@ fn new_world_rows_default_to_the_schema_values() {
         state.confidence, 0.8,
         "world_states.confidence defaults to 0.8"
     );
-    assert_eq!(state.chapter, None);
+    assert_eq!(state.chapter, None, "an omitted chapter must stay unknown");
     assert_eq!(state.event_id, None, "no event anchor is invented");
-    assert_eq!(state.start_offset, None);
-    assert_eq!(state.end_offset, None);
+    assert_eq!(
+        state.start_offset, None,
+        "an omitted span must stay unknown"
+    );
+    assert_eq!(
+        state.end_offset, None,
+        "an omitted end span must stay unknown"
+    );
     assert!(
         state.entity_name.is_empty() && state.slot.is_empty() && state.value.is_empty(),
         "text fields default to empty, never to a placeholder"

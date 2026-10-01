@@ -369,15 +369,27 @@ mod tests {
         ];
         let card = build_persona_card_from_facts("tenant-a", "agent-bailiusu", &facts);
 
-        assert_eq!(card.tenant_id, "tenant-a");
-        assert_eq!(card.agent_id, "agent-bailiusu");
+        assert_eq!(
+            card.tenant_id, "tenant-a",
+            "the card must inherit the tenant id"
+        );
+        assert_eq!(
+            card.agent_id, "agent-bailiusu",
+            "the card must carry the agent id"
+        );
         assert_eq!(
             card.identity, "我是白流苏，离过婚，爱过，也输过",
             "non-negated identity wins"
         );
         assert_eq!(card.persona.len(), 4, "preference+emotion+goal → persona");
-        assert!(card.persona.iter().any(|s| s.contains("我喜欢安稳")));
-        assert!(card.persona.iter().any(|s| s.contains("我不喜欢应酬")));
+        assert!(
+            card.persona.iter().any(|s| s.contains("我喜欢安稳")),
+            "the positive preference must reach the card"
+        );
+        assert!(
+            card.persona.iter().any(|s| s.contains("我不喜欢应酬")),
+            "the negated preference must reach the card"
+        );
         assert_eq!(
             card.relationship.as_array().map(|a| a.len()),
             Some(1),
@@ -443,9 +455,20 @@ mod tests {
             merged.identity, "白流苏，离过婚，爱过，也输过",
             "file identity wins"
         );
-        assert_eq!(merged.style, vec!["话少，克制，偶尔揶揄"]);
-        assert_eq!(merged.taboos, vec!["绝不说自己已经放下"]);
-        assert_eq!(merged.relationship["status"], "彼此揣着明白");
+        assert_eq!(
+            merged.style,
+            vec!["话少，克制，偶尔揶揄"],
+            "the hand-authored style must win the merge"
+        );
+        assert_eq!(
+            merged.taboos,
+            vec!["绝不说自己已经放下"],
+            "the hand-authored taboos must win the merge"
+        );
+        assert_eq!(
+            merged.relationship["status"], "彼此揣着明白",
+            "the relationship status must win the merge"
+        );
         assert_eq!(
             merged.persona,
             vec!["我喜欢安稳"],

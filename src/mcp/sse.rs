@@ -137,6 +137,8 @@ mod tests {
     /// Invariants: the sender's message arrives byte-identical on the other
     /// side after SSE framing + unframing (compared field-by-field, since
     /// JSONRPCMessage has no PartialEq).
+    /// Objective: Verify a JSON-RPC request round-trips over the in-memory duplex transport.
+    /// Invariants: jsonrpc, id, method and params are preserved.
     #[tokio::test]
     async fn request_round_trips_over_duplex() {
         let (a, b) = tokio::io::duplex(1024);

@@ -157,9 +157,15 @@ mod tests {
         let text = "赵云救阿斗。";
         let chunks = plan(text, Config::default());
         assert_eq!(chunks.len(), 1, "short text → single chunk");
-        assert_eq!(chunks[0].text, text);
-        assert_eq!(chunks[0].overlap_before, 0);
-        assert_eq!(chunks[0].overlap_after, 0);
+        assert_eq!(chunks[0].text, text, "a short text must stay in one chunk");
+        assert_eq!(
+            chunks[0].overlap_before, 0,
+            "the first chunk has no leading overlap"
+        );
+        assert_eq!(
+            chunks[0].overlap_after, 0,
+            "a single chunk has no trailing overlap"
+        );
     }
 
     /// Objective: Verify that a long text is split into multiple chunks.
@@ -235,9 +241,12 @@ mod tests {
             overlap: 100,
         };
         let chunks = plan(&text, cfg);
-        assert!(!chunks.is_empty());
+        assert!(!chunks.is_empty(), "at least one chunk must be planned");
         // First chunk starts at 0
-        assert_eq!(chunks[0].start_offset, 0);
+        assert_eq!(
+            chunks[0].start_offset, 0,
+            "the first chunk must start at offset 0"
+        );
         // Last chunk ends at text.len()
         assert_eq!(
             chunks.last().unwrap().end_offset,

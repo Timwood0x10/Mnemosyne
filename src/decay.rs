@@ -495,7 +495,10 @@ mod tests {
             now,
         );
         assert!(low.should_archive, "low importance is archived");
-        assert!(low.decay_score < 1.0);
+        assert!(
+            low.decay_score < 1.0,
+            "a stale low-importance row must be decayed"
+        );
 
         let high = compute_decay(
             &fact(Some(17), FactType::Event, now, json!({"importance": 0.9})),
@@ -503,7 +506,10 @@ mod tests {
             now,
         );
         assert!(!high.should_archive, "high importance stays fresh");
-        assert_eq!(high.decay_score, 1.0);
+        assert_eq!(
+            high.decay_score, 1.0,
+            "an importance-protected row must not be decayed"
+        );
     }
 
     /// Objective: Verify the hybrid strategy combines all three signals — only
@@ -525,7 +531,7 @@ mod tests {
             now,
         );
         assert!(!news.should_archive, "fresh+important+accessed stays fresh");
-        assert_eq!(news.decay_score, 1.0);
+        assert_eq!(news.decay_score, 1.0, "fresh content must not be decayed");
 
         let stale = compute_decay(
             &fact(
@@ -596,7 +602,10 @@ mod tests {
         );
         assert_eq!(persona.decay_score, 1.0, "persona fact keeps full weight");
         assert!(!persona.should_archive, "persona fact is never archived");
-        assert_eq!(persona.reason, "high_value_persona");
+        assert_eq!(
+            persona.reason, "high_value_persona",
+            "a persona must be protected by the high-value rule"
+        );
 
         let relationship = compute_decay(
             &fact(
@@ -612,7 +621,10 @@ mod tests {
             relationship.decay_score, 1.0,
             "relationship fact never decays"
         );
-        assert!(!relationship.should_archive);
+        assert!(
+            !relationship.should_archive,
+            "a healthy relationship must not be archived"
+        );
     }
 
     /// Objective: Verify `force` ignores the high-value protection and decays
@@ -630,7 +642,10 @@ mod tests {
         );
         let forced = compute_decay_with_force(&persona, &config, now, true);
         assert!(forced.should_archive, "force decays the protected fact");
-        assert!(forced.decay_score < 1.0);
+        assert!(
+            forced.decay_score < 1.0,
+            "a forced decay must lower the score"
+        );
     }
 
     /// Objective: Verify archiving only writes flags — the fact row is never
@@ -724,11 +739,24 @@ mod tests {
     #[test]
     fn default_config_loads_when_file_missing() {
         let cfg = DecayConfig::load_from_path("/nonexistent/decay.json").expect("defaults");
-        assert_eq!(cfg.strategy, DecayStrategy::Hybrid);
-        assert_eq!(cfg.time_to_live_days, 90);
-        assert_eq!(cfg.importance_threshold, 0.3);
-        assert_eq!(cfg.access_threshold, 5);
-        assert_eq!(cfg.decay_factor, 0.5);
+        assert_eq!(
+            cfg.strategy,
+            DecayStrategy::Hybrid,
+            "the file must select the hybrid strategy"
+        );
+        assert_eq!(
+            cfg.time_to_live_days, 90,
+            "the file must set the TTL in days"
+        );
+        assert_eq!(
+            cfg.importance_threshold, 0.3,
+            "the file must set the importance threshold"
+        );
+        assert_eq!(
+            cfg.access_threshold, 5,
+            "the file must set the access threshold"
+        );
+        assert_eq!(cfg.decay_factor, 0.5, "the file must set the decay factor");
     }
 
     /// Objective: Verify the background decay task (D2) runs a pass and exits
@@ -790,11 +818,27 @@ mod tests {
         )
         .expect("write config");
         let cfg = DecayConfig::load_from_path(path.to_str().expect("path")).expect("load");
-        assert_eq!(cfg.strategy, DecayStrategy::TimeBased);
-        assert_eq!(cfg.time_to_live_days, 30);
-        assert_eq!(cfg.importance_threshold, 0.4);
-        assert_eq!(cfg.access_threshold, 3);
-        assert_eq!(cfg.decay_factor, 0.7);
+        assert_eq!(
+            cfg.strategy,
+            DecayStrategy::TimeBased,
+            "the file must select the time-based strategy"
+        );
+        assert_eq!(
+            cfg.time_to_live_days, 30,
+            "the file must set the shorter TTL"
+        );
+        assert_eq!(
+            cfg.importance_threshold, 0.4,
+            "the file must set the raised importance threshold"
+        );
+        assert_eq!(
+            cfg.access_threshold, 3,
+            "the file must set the lower access threshold"
+        );
+        assert_eq!(
+            cfg.decay_factor, 0.7,
+            "the file must set the higher decay factor"
+        );
     }
 
     /// Objective: Verify importance falls back to the fact's CONFIDENCE. No

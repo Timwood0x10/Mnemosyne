@@ -99,7 +99,10 @@ pub struct Config {
     /// - `hybrid`: keyword + vector + ranking fusion (requires embedding).
     pub retrieval_mode: RetrievalMode,
 
-    /// Optional OpenAI API key. Required when `embedding_provider == openai`.
+    /// Optional upstream API key, sent as `Authorization: Bearer` on every
+    /// embedding request. Required when `embedding_provider == openai`; a
+    /// keyless local server (`ollama`, an in-house `embedding-mcp`) leaves it
+    /// unset and receives no auth header.
     pub openai_api_key: Option<String>,
 }
 
@@ -182,11 +185,6 @@ pub const WEIGHT_IMPORTANCE_HYBRID: f64 = 0.2;
 /// retrieval). Scaled by `temporal_score` in [0,1]; kept small so time is a
 /// decisive-but-bounded tiebreaker, never a dominant signal.
 pub const WEIGHT_TEMPORAL_HYBRID: f64 = 0.15;
-/// Exponential temporal-decay rate λ (per second) for
-/// `score = e^(−λ·Δt)`. Default ≈ 0.01/day ≈ 1.157e-7/s, so a 90-day-old
-/// memory scores e^−0.9 ≈ 0.41. Repeated occurrence refreshes the memory
-/// timestamp, resetting the decay (long-term preferences stay fresh).
-pub const TEMPORAL_DECAY_LAMBDA_PER_SEC: f64 = 1.157e-7;
 /// Default context-usage threshold (percent) that triggers distillation +
 /// memory injection in `memory_context_check`. Configurable per call via the
 /// `threshold` argument; this is the fallback when none is supplied.
@@ -200,15 +198,6 @@ pub const PERSONA_PROTOTYPES_PATH: &str = "config/persona_prototypes.json";
 /// `PERSONA_CARDS_PATH` environment variable. The file is optional: when it
 /// is absent the tool falls back to the aggregated persona card only.
 pub const PERSONA_CARDS_PATH: &str = "config/persona_cards.json";
-/// Grayscale gate for the pure-embedding memory features (plan
-/// `embedding-memory-plan.md`, P0–P3).
-///
-/// **Default OFF**: the embedding-memory modules (`anchor`, `centroid`) exist
-/// as independent additions, but the main-line behaviors they would change
-/// (exponential temporal decay in retrieval, `inject_memories` in
-/// `memory_context_check`) stay at their legacy values until this flag is
-/// flipped. Set to `true` only after the grayscale modules pass full tests.
-pub const EMBEDDING_MEMORY_GRAYSCALE: bool = false;
 pub const WEIGHT_KEYWORD_ONLY: f64 = 0.7;
 pub const WEIGHT_IMPORTANCE_ONLY: f64 = 0.3;
 
@@ -567,6 +556,8 @@ pub(crate) fn validate_http_token(token: Option<&str>) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Objective: Verify the built-in default configuration passes validation.
+    /// Invariants: `Config::default().validate()` returns `Ok`.
     #[test]
     fn default_config_validates() {
         assert!(
@@ -575,6 +566,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify a zero vector dimension is rejected once an embedding provider is enabled.
+    /// Invariants: validation returns `Err(Error::Config)`.
     #[test]
     fn validate_rejects_zero_dim() {
         let cfg = Config {
@@ -587,6 +580,8 @@ mod tests {
         assert!(matches!(err, Error::Config(_)), "expected Config error");
     }
 
+    /// Objective: Verify an out-of-range minimum importance is rejected.
+    /// Invariants: validation returns an `Err`.
     #[test]
     fn validate_rejects_bad_min_importance() {
         let cfg = Config {
@@ -600,6 +595,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify an out-of-range retrieval threshold is rejected.
+    /// Invariants: validation returns an `Err`.
     #[test]
     fn validate_rejects_bad_threshold() {
         let cfg = Config {
@@ -613,6 +610,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify CLI arguments are converted into a validated configuration.
+    /// Invariants: the db path, timeout, provider and retrieval mode carry over; `vector_dim` is auto-set to 0 and cross-turn stays disabled for a keyless provider.
     #[test]
     fn cli_args_into_config() {
         let args = CliArgs {
@@ -635,14 +634,31 @@ mod tests {
             http_token: None,
         };
         let cfg = args.into_config().expect("config");
-        assert_eq!(cfg.db_path, "/tmp/test.db");
+        assert_eq!(
+            cfg.db_path, "/tmp/test.db",
+            "the CLI db path must reach the config"
+        );
         assert_eq!(cfg.vector_dim, 0, "auto-set to 0 when provider=none");
         assert!(!cfg.enable_cross_turn, "cross-turn disabled");
-        assert_eq!(cfg.embedding_timeout, Duration::from_millis(60_000));
-        assert_eq!(cfg.embedding_provider, EmbeddingProvider::None);
-        assert_eq!(cfg.retrieval_mode, RetrievalMode::Keyword);
+        assert_eq!(
+            cfg.embedding_timeout,
+            Duration::from_millis(60_000),
+            "the CLI timeout must reach the config"
+        );
+        assert_eq!(
+            cfg.embedding_provider,
+            EmbeddingProvider::None,
+            "an unset provider must default to None"
+        );
+        assert_eq!(
+            cfg.retrieval_mode,
+            RetrievalMode::Keyword,
+            "the default retrieval mode must be keyword"
+        );
     }
 
+    /// Objective: Verify the OpenAI provider is rejected when no API key is configured.
+    /// Invariants: validation returns an `Err`.
     #[test]
     fn validate_rejects_openai_without_key() {
         let cfg = Config {
@@ -658,6 +674,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify vector retrieval is rejected with no embedding provider.
+    /// Invariants: validation returns an `Err`.
     #[test]
     fn validate_rejects_vector_retrieval_without_embedding() {
         let cfg = Config {
@@ -732,6 +750,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify hybrid retrieval is rejected with no embedding provider.
+    /// Invariants: `validate()` returns `Err`.
     #[test]
     fn validate_rejects_hybrid_retrieval_without_embedding() {
         let cfg = Config {
@@ -742,6 +762,8 @@ mod tests {
         assert!(cfg.validate().is_err(), "hybrid+none must fail validate");
     }
 
+    /// Objective: Verify hybrid retrieval is accepted once an embedding provider is configured.
+    /// Invariants: `validate()` returns `Ok`.
     #[test]
     fn validate_accepts_hybrid_with_embedding_provider() {
         let cfg = Config {
@@ -754,6 +776,8 @@ mod tests {
         assert!(cfg.validate().is_ok(), "hybrid+openai must validate");
     }
 
+    /// Objective: Verify the documented provider aliases parse to their variants.
+    /// Invariants: `none`/`null`/`disabled` map to `None` and the remote aliases to their own variants.
     #[test]
     fn embedding_provider_parses_aliases() {
         for s in ["none", "null", "disabled", "NONE", "Null"] {
@@ -770,12 +794,16 @@ mod tests {
         );
     }
 
+    /// Objective: Verify an unknown provider name is rejected and echoed back.
+    /// Invariants: the error message contains the offending input.
     #[test]
     fn embedding_provider_rejects_unknown() {
         let err = "fastembed".parse::<EmbeddingProvider>().unwrap_err();
         assert!(err.contains("fastembed"), "error echoes bad input");
     }
 
+    /// Objective: Verify `produces_embeddings` separates the keyless provider from the embedding ones.
+    /// Invariants: `None` reports false and every embedding provider reports true.
     #[test]
     fn embedding_provider_produces_embeddings_flag() {
         assert!(
@@ -792,6 +820,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify an environment with no overrides yields the documented defaults.
+    /// Invariants: the db path, minimum importance, cross-turn flag and vector dimension match `Config::default()`.
     #[test]
     fn from_env_uses_defaults_when_unset() {
         let keys = [
@@ -820,9 +850,21 @@ mod tests {
             }
         }
         let default = Config::default();
-        assert_eq!(cfg.db_path, default.db_path);
-        assert_eq!(cfg.vector_dim, 0);
-        assert_eq!(cfg.min_importance, default.min_importance);
-        assert_eq!(cfg.enable_cross_turn, default.enable_cross_turn);
+        assert_eq!(
+            cfg.db_path, default.db_path,
+            "an unset env must fall back to the default db path"
+        );
+        assert_eq!(
+            cfg.vector_dim, 0,
+            "no embedding provider must force vector_dim 0"
+        );
+        assert_eq!(
+            cfg.min_importance, default.min_importance,
+            "an unset env must keep the default min importance"
+        );
+        assert_eq!(
+            cfg.enable_cross_turn, default.enable_cross_turn,
+            "an unset env must keep the default cross-turn flag"
+        );
     }
 }

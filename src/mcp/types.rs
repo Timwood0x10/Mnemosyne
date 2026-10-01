@@ -218,9 +218,13 @@ mod tests {
     #[test]
     fn content_block_text_shape() {
         let b = ContentBlock::text("hi");
-        assert_eq!(b.block_type, "text");
-        assert_eq!(b.text.as_deref(), Some("hi"));
-        assert!(b.mime_type.is_none());
+        assert_eq!(b.block_type, "text", "a text block must serialise its type");
+        assert_eq!(
+            b.text.as_deref(),
+            Some("hi"),
+            "a text block must carry its payload"
+        );
+        assert!(b.mime_type.is_none(), "a text block carries no mime type");
     }
 
     /// Objective: Verify ToolCallResult::error sets is_error=true.
@@ -228,9 +232,17 @@ mod tests {
     #[test]
     fn tool_call_result_error() {
         let r = ToolCallResult::error("bad input");
-        assert!(r.is_error);
-        assert_eq!(r.content.len(), 1);
-        assert_eq!(r.content[0].text.as_deref(), Some("bad input"));
+        assert!(r.is_error, "a failure result must set is_error");
+        assert_eq!(
+            r.content.len(),
+            1,
+            "a failure result must carry exactly one content block"
+        );
+        assert_eq!(
+            r.content[0].text.as_deref(),
+            Some("bad input"),
+            "the failure result must echo the message"
+        );
     }
 
     /// Objective: Verify `ToolDefinition` serializes its schema as
@@ -263,8 +275,11 @@ mod tests {
         let msg: JSONRPCMessage = serde_json::from_str(json).expect("parse");
         match msg {
             JSONRPCMessage::Request(r) => {
-                assert_eq!(r.method, "initialize");
-                assert_eq!(r.id, Value::from(1));
+                assert_eq!(
+                    r.method, "initialize",
+                    "the request method must be preserved"
+                );
+                assert_eq!(r.id, Value::from(1), "the request id must be preserved");
             }
             other => panic!("expected Request, got {other:?}"),
         }
@@ -278,7 +293,10 @@ mod tests {
         let msg: JSONRPCMessage = serde_json::from_str(json).expect("parse");
         match msg {
             JSONRPCMessage::Notification { method, .. } => {
-                assert_eq!(method, "notifications/initialized");
+                assert_eq!(
+                    method, "notifications/initialized",
+                    "the notification method must be preserved"
+                );
             }
             other => panic!("expected Notification, got {other:?}"),
         }

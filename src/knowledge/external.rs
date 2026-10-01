@@ -349,7 +349,11 @@ mod tests {
             0,
             "document adapters are NOT signal providers"
         );
-        assert_eq!(reg.source_names(), vec!["doc-src".to_string()]);
+        assert_eq!(
+            reg.source_names(),
+            vec!["doc-src".to_string()],
+            "the registry must list its only source"
+        );
         // Documents must never be query-forwarded.
         assert!(
             reg.search_all("alpha", 5).is_empty(),
@@ -358,7 +362,10 @@ mod tests {
         // But it IS materializable.
         let docs = reg.materialize_all().expect("materialize");
         assert_eq!(docs.len(), 2, "both docs materialize once");
-        assert_eq!(docs[0].title, "ch1");
+        assert_eq!(
+            docs[0].title, "ch1",
+            "the external document must keep its title"
+        );
     }
 
     /// Objective: Verify register_signal stores a Db adapter as BOTH a
@@ -385,7 +392,11 @@ mod tests {
             1,
             "Db adapter is also a signal provider"
         );
-        assert_eq!(reg.kind_of("fake-db"), Some(AdapterKind::Db));
+        assert_eq!(
+            reg.kind_of("fake-db"),
+            Some(AdapterKind::Db),
+            "the registry must resolve the adapter kind"
+        );
         let got = reg.search_all("anything", 5);
         assert_eq!(got, hits, "search_all forwards to the Db adapter");
     }
@@ -441,10 +452,22 @@ mod tests {
         let merged = reg.search_all("q", 10);
         assert_eq!(merged.len(), 4, "all hits merged");
         // Descending score order: 0.95, 0.7, 0.5, 0.3.
-        assert_eq!(merged[0].id, "b-top");
-        assert_eq!(merged[1].id, "a-high");
-        assert_eq!(merged[2].id, "b-mid");
-        assert_eq!(merged[3].id, "a-low");
+        assert_eq!(
+            merged[0].id, "b-top",
+            "the merged list must rank the first hit"
+        );
+        assert_eq!(
+            merged[1].id, "a-high",
+            "the merged list must interleave by score"
+        );
+        assert_eq!(
+            merged[2].id, "b-mid",
+            "the merged list must keep the next hit"
+        );
+        assert_eq!(
+            merged[3].id, "a-low",
+            "the merged list must end with the lowest hit"
+        );
 
         // Limit truncates after sorting.
         let top2 = reg.search_all("q", 2);
@@ -511,8 +534,14 @@ mod tests {
         // Two unique links after dedup; sorted by (external_name, canonical, source).
         assert_eq!(links.len(), 2, "duplicate link removed");
         // "J. Smith" sorts before "John Smith".
-        assert_eq!(links[0].external_name, "J. Smith");
-        assert_eq!(links[1].external_name, "John Smith");
+        assert_eq!(
+            links[0].external_name, "J. Smith",
+            "the first alias must map to its external name"
+        );
+        assert_eq!(
+            links[1].external_name, "John Smith",
+            "the second alias must map to its external name"
+        );
     }
 
     /// Objective: Verify materialize_source targets one named source and
@@ -528,7 +557,10 @@ mod tests {
 
         let docs = reg.materialize_source("docs").expect("known source");
         assert_eq!(docs.len(), 1, "named source materializes its docs");
-        assert_eq!(docs[0].title, "only");
+        assert_eq!(
+            docs[0].title, "only",
+            "the single external document must keep its title"
+        );
 
         let err = reg.materialize_source("nope").unwrap_err();
         assert!(

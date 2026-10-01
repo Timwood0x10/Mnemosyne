@@ -79,7 +79,7 @@ async fn txt_compiles_into_general_model() {
     let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
-    assert_eq!(stats.documents, 1);
+    assert_eq!(stats.documents, 1, "the compile must create one document");
     assert!(
         stats.objects >= 1,
         "txt file must yield the body's people, got {stats:?}"
@@ -136,7 +136,7 @@ async fn novel_dictionary_registers_known_cast() {
         .await
         .expect("query")
         .expect("world entity");
-    assert_eq!(we.name, "赵云");
+    assert_eq!(we.name, "赵云", "the persisted entity must keep its name");
 }
 
 /// Objective: Verify an empty source produces zero rows (no phantom
@@ -149,9 +149,12 @@ async fn empty_source_yields_zero_stats() {
     let stats = compile_source(&source, &profile(), &store)
         .await
         .expect("compile");
-    assert_eq!(stats.documents, 0);
-    assert_eq!(stats.objects, 0);
-    assert_eq!(stats.evidence, 0);
+    assert_eq!(
+        stats.documents, 0,
+        "an empty source must create no document"
+    );
+    assert_eq!(stats.objects, 0, "an empty source must create no object");
+    assert_eq!(stats.evidence, 0, "an empty source must create no evidence");
 }
 
 /// Objective: Verify entity upsert — compiling the same non-dialog text

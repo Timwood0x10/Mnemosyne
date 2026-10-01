@@ -207,9 +207,19 @@ mod tests {
         let chunk = make_chunk(0, "赵云救阿斗。", 100);
         let sents = split_chunk(&chunk);
         assert_eq!(sents.len(), 1, "single sentence expected");
-        assert_eq!(sents[0].text, "赵云救阿斗。");
-        assert_eq!(sents[0].start_offset, 100);
-        assert_eq!(sents[0].end_offset, 100 + chunk.text.len());
+        assert_eq!(
+            sents[0].text, "赵云救阿斗。",
+            "the sentence text must be the punctuation-terminated span"
+        );
+        assert_eq!(
+            sents[0].start_offset, 100,
+            "offsets must stay chunk-relative"
+        );
+        assert_eq!(
+            sents[0].end_offset,
+            100 + chunk.text.len(),
+            "the end offset must cover the whole chunk"
+        );
     }
 
     /// Objective: Verify that multiple sentences are split correctly.
@@ -222,7 +232,10 @@ mod tests {
         assert_eq!(sents.len(), 2, "two sentences expected");
         assert!(sents[0].text.contains("关羽"), "first mentions 关羽");
         assert!(sents[1].text.contains("张飞"), "second mentions 张飞");
-        assert!(sents[0].end_offset <= sents[1].start_offset);
+        assert!(
+            sents[0].end_offset <= sents[1].start_offset,
+            "sentences must not overlap"
+        );
     }
 
     /// Objective: Verify that mixed Chinese/English punctuation works.
@@ -232,9 +245,18 @@ mod tests {
         let chunk = make_chunk(0, "小心！有埋伏。撤!", 0);
         let sents = split_chunk(&chunk);
         assert_eq!(sents.len(), 3, "three sentences expected");
-        assert_eq!(sents[0].text, "小心！");
-        assert_eq!(sents[1].text, "有埋伏。");
-        assert_eq!(sents[2].text, "撤!");
+        assert_eq!(
+            sents[0].text, "小心！",
+            "the full-width ！ must terminate a sentence"
+        );
+        assert_eq!(
+            sents[1].text, "有埋伏。",
+            "the full-width 。 must terminate a sentence"
+        );
+        assert_eq!(
+            sents[2].text, "撤!",
+            "the ASCII ! must terminate a sentence"
+        );
     }
 
     /// Objective: Verify that trailing whitespace after separators is trimmed.
@@ -243,8 +265,11 @@ mod tests {
     fn whitespace_after_separator_is_trimmed() {
         let chunk = make_chunk(0, "第一句。   \n第二句。", 0);
         let sents = split_chunk(&chunk);
-        assert_eq!(sents.len(), 2);
-        assert_eq!(sents[1].text, "第二句。");
+        assert_eq!(sents.len(), 2, "exactly two sentences are expected");
+        assert_eq!(
+            sents[1].text, "第二句。",
+            "the second sentence must follow the first"
+        );
     }
 
     /// Objective: Verify that text without separators produces one sentence.
@@ -253,8 +278,15 @@ mod tests {
     fn no_separator_produces_one_sentence() {
         let chunk = make_chunk(0, "赵云救阿斗", 0);
         let sents = split_chunk(&chunk);
-        assert_eq!(sents.len(), 1);
-        assert_eq!(sents[0].text, "赵云救阿斗");
+        assert_eq!(
+            sents.len(),
+            1,
+            "text without terminal punctuation stays one sentence"
+        );
+        assert_eq!(
+            sents[0].text, "赵云救阿斗",
+            "the whole text must be kept when no separator exists"
+        );
     }
 
     /// Objective: Verify that split_all aggregates multiple chunks.
@@ -266,9 +298,15 @@ mod tests {
             make_chunk(1, "张飞喝断桥。", 50),
         ];
         let sents = split_all(&chunks);
-        assert_eq!(sents.len(), 2);
-        assert_eq!(sents[0].chunk_index, 0);
-        assert_eq!(sents[1].chunk_index, 1);
+        assert_eq!(sents.len(), 2, "one sentence per chunk is expected");
+        assert_eq!(
+            sents[0].chunk_index, 0,
+            "the first sentence belongs to chunk 0"
+        );
+        assert_eq!(
+            sents[1].chunk_index, 1,
+            "the second sentence belongs to chunk 1"
+        );
     }
 
     /// Objective: Verify that build_index creates the correct lookup map.

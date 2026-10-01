@@ -257,6 +257,8 @@ fn sanguo_pack_merges_and_core_stays_clean() {
 }
 /// Invariants: Selecting only `conversation_memory` excludes classical
 /// lexemes while keeping core + the selected pack.
+/// Objective: Verify a per-request pack selection limits which packs contribute entries.
+/// Invariants: only the selected pack's entries are present and the others are absent.
 #[test]
 fn per_request_pack_selection_filters_packs() {
     let core_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config/dictionary.json");

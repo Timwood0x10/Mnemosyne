@@ -118,7 +118,11 @@ fn courtesy_from_dialog() {
     );
     let cp = ctx.profiles.iter().find(|p| p.key == "courtesy_name");
     assert!(cp.is_some(), "courtesy_name should be extracted");
-    assert_eq!(cp.unwrap().value, "玄德");
+    assert_eq!(
+        cp.unwrap().value,
+        "玄德",
+        "字 must capture the courtesy name"
+    );
     assert!(
         ctx.entities.iter().any(|e| e.name == "刘备"),
         "刘备 entity created"
@@ -139,7 +143,10 @@ fn birthplace_extracted() {
     );
     let bp = ctx.profiles.iter().find(|p| p.key == "birthplace");
     assert!(bp.is_some(), "birthplace should be extracted");
-    assert!(bp.unwrap().value.contains("涿郡"));
+    assert!(
+        bp.unwrap().value.contains("涿郡"),
+        "the birth place must be captured"
+    );
 }
 
 /// Objective: Verify that weapon is extracted from "使XX".
@@ -156,7 +163,11 @@ fn weapon_extracted() {
     );
     let wp = ctx.profiles.iter().find(|p| p.key == "weapon");
     assert!(wp.is_some(), "weapon should be extracted");
-    assert_eq!(wp.unwrap().value, "青龙偃月刀");
+    assert_eq!(
+        wp.unwrap().value,
+        "青龙偃月刀",
+        "the weapon slot must capture the full name"
+    );
 }
 
 /// Objective: Verify that narrative text without entity names produces nothing.

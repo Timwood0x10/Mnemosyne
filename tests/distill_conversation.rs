@@ -4,8 +4,18 @@
 use mnemosyne::conversation_compiler::ConversationCompiler;
 use mnemosyne::types::Message;
 
+/// Objective: Exercise the conversation compiler over the recorded development
+/// session (architecture diagnosis and decision history) and report what it
+/// produced.
+/// Invariants: `compile` returns without panicking and the session snapshot is
+/// printable even when the goal, module and open-problem lists are empty.
 #[test]
 fn distill_dev_session() {
+    // Diagnostics go through `tracing` (the crate's tests must not print);
+    // run with `--nocapture` to see them.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
     let compiler = ConversationCompiler::new();
 
     // Structure messages so the extractor can detect problem→solution patterns
@@ -81,9 +91,9 @@ fn distill_dev_session() {
 
     let compiled = compiler.compile("lorescope-dev", &msgs);
 
-    eprintln!("\n========== Memory Distillation 蒸馏结果 ==========\n");
+    tracing::info!("\n========== Memory Distillation 蒸馏结果 ==========\n");
 
-    eprintln!(
+    tracing::info!(
         "━━━ 知识 ({} 条) ━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
         compiled.knowledge.len()
     );
@@ -95,17 +105,17 @@ fn distill_dev_session() {
             &k.summary
         };
         let snippet: String = summary.chars().take(140).collect();
-        eprintln!("  {:>2}. [{}%] {:?}", i + 1, score, k.memory_type);
-        eprintln!("       {}", snippet);
+        tracing::info!("  {:>2}. [{}%] {:?}", i + 1, score, k.memory_type);
+        tracing::info!("       {}", snippet);
     }
 
-    eprintln!(
+    tracing::info!(
         "\n━━━ 决策 ({} 条) ━━━━━━━━━━━━━━━━━━━━━━━━━━\n",
         compiled.decisions.len()
     );
     for (i, d) in compiled.decisions.iter().enumerate() {
         let score = (d.importance * 100.0) as u32;
-        eprintln!(
+        tracing::info!(
             "  {:>2}. [{}%] {} (module: {})",
             i + 1,
             score,
@@ -113,25 +123,25 @@ fn distill_dev_session() {
             d.module
         );
         if !d.rationale.is_empty() {
-            eprintln!(
+            tracing::info!(
                 "      理由: {}",
                 d.rationale.chars().take(140).collect::<String>()
             );
         }
     }
 
-    eprintln!("\n━━━ 会话状态 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+    tracing::info!("\n━━━ 会话状态 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
     let s = &compiled.session;
     if !s.current_goal.is_empty() {
-        eprintln!("  目标: {}", s.current_goal);
+        tracing::info!("  目标: {}", s.current_goal);
     }
     if !s.current_module.is_empty() {
-        eprintln!("  模块: {}", s.current_module);
+        tracing::info!("  模块: {}", s.current_module);
     }
     if !s.open_problems.is_empty() {
-        eprintln!("\n  未完成项:");
+        tracing::info!("\n  未完成项:");
         for p in &s.open_problems {
-            eprintln!("    - {}", p);
+            tracing::info!("    - {}", p);
         }
     }
 }

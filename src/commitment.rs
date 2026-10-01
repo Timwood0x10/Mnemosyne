@@ -284,7 +284,10 @@ mod tests {
         let decision = &decisions[0];
         assert_eq!(decision.subject, 7, "the speaker is the decision subject");
         assert_eq!(decision.verb, "promise", "答应 maps to the promise verb");
-        assert_eq!(decision.object, "我答应你明天陪你去医院");
+        assert_eq!(
+            decision.object, "我答应你明天陪你去医院",
+            "the promise must keep its object"
+        );
         assert_eq!(decision.made_at, 2026, "observation time is recorded");
         assert!(
             decision.outcome.is_none(),
@@ -326,13 +329,19 @@ mod tests {
 
         let user_decisions = commitments_from_messages(&messages, "user", 7, 2026);
         assert_eq!(user_decisions.len(), 1, "one user commitment");
-        assert_eq!(user_decisions[0].subject, 7);
+        assert_eq!(
+            user_decisions[0].subject, 7,
+            "the decision must be attributed to the user entity"
+        );
         assert_eq!(user_decisions[0].verb, "commit", "保证 maps to commit");
 
         let agent_decisions = commitments_from_messages(&messages, "assistant", 9, 2026);
         assert_eq!(agent_decisions.len(), 1, "one agent commitment");
         assert_eq!(agent_decisions[0].subject, 9, "agent is the subject");
-        assert_eq!(agent_decisions[0].verb, "promise");
+        assert_eq!(
+            agent_decisions[0].verb, "promise",
+            "the agent promise must keep its verb"
+        );
     }
 
     /// Objective: Verify an unresolvable subject (no entity id) produces no
@@ -423,9 +432,18 @@ mod tests {
             "a commitment is stored as an Event"
         );
         assert_eq!(anchor.time, 2026, "the anchor carries the decision time");
-        assert_eq!(anchor.payload["content"], "我答应你明天陪你去医院");
-        assert_eq!(anchor.payload["verb"], "promise");
-        assert_eq!(anchor.payload["source"], "commitment");
+        assert_eq!(
+            anchor.payload["content"], "我答应你明天陪你去医院",
+            "the evidence anchor must carry the promise text"
+        );
+        assert_eq!(
+            anchor.payload["verb"], "promise",
+            "the evidence anchor must carry the verb"
+        );
+        assert_eq!(
+            anchor.payload["source"], "commitment",
+            "the evidence anchor must record its source"
+        );
         assert!(anchor.id.is_none(), "the anchor is inserted by the store");
     }
 
@@ -466,7 +484,7 @@ mod tests {
             1,
             "an inflected promise is still a commitment"
         );
-        assert_eq!(decisions[0].verb, "promise");
+        assert_eq!(decisions[0].verb, "promise", "the promise must be detected");
     }
 
     /// Objective: Verify a negated utterance is never recorded as a commitment.
@@ -502,7 +520,10 @@ mod tests {
             1,
             "a cue behind the marker describes the promise, it does not negate it"
         );
-        assert_eq!(decisions[0].verb, "promise");
+        assert_eq!(
+            decisions[0].verb, "promise",
+            "the promise must still be detected"
+        );
     }
 
     /// Objective: Verify a multi-byte clause break before the marker does not
@@ -542,7 +563,7 @@ mod tests {
             7,
             2026,
         );
-        assert_eq!(decisions.len(), 1);
+        assert_eq!(decisions.len(), 1, "exactly one decision is expected");
         assert_eq!(
             decisions[0].verb, "promise",
             "the first commitment in the text decides the verb"

@@ -1,19 +1,17 @@
-//! Entity registry — maps aliases to entity IDs and canonical names.
+//! Entity dictionary — maps aliases to canonical names and entity IDs.
 //!
-//! Built from one or more [`EntityProvider`]s. The registry is populated
-//! during Pass 1 (World Builder) and used in Pass 2 (Story Compiler) to
-//! resolve mentions to entity IDs.
+//! Populated during Pass 1 (World Builder) and consulted in Pass 2 (Story
+//! Compiler) to resolve mentions.
 //!
 //! ## Lookup path
 //!
 //! ```text
-//! "玄德" → AliasIndex → "刘备" → EntityIdIndex → 10001
+//! "玄德" → AliasIndex → "刘备" → name_to_id → 10001
 //! ```
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
-use super::provider::{EntityEntry, EntityProvider};
+use super::provider::EntityEntry;
 
 /// Merged entity index — alias → (canonical_name, entity_id).
 #[derive(Debug, Default)]
@@ -36,55 +34,6 @@ impl EntityDictionary {
         for alias in aliases {
             self.alias_to_canonical
                 .insert(alias.to_string(), name.to_string());
-        }
-    }
-}
-
-/// Entity registry that accepts multiple providers and builds an index.
-#[derive(Default)]
-pub struct EntityRegistry {
-    providers: Vec<Arc<dyn EntityProvider>>,
-}
-
-impl std::fmt::Debug for EntityRegistry {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EntityRegistry")
-            .field("provider_count", &self.providers.len())
-            .finish()
-    }
-}
-
-impl EntityRegistry {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(&mut self, provider: Arc<dyn EntityProvider>) {
-        self.providers.push(provider);
-    }
-
-    /// Merge all registered providers into a single index.
-    pub fn build_dictionary(&self) -> EntityDictionary {
-        let mut entries = Vec::new();
-        let mut alias_map = HashMap::new();
-
-        for provider in &self.providers {
-            for entry in provider.entries() {
-                alias_map.insert(entry.canonical_name.clone(), entry.canonical_name.clone());
-                for alias in &entry.aliases {
-                    alias_map.insert(alias.clone(), entry.canonical_name.clone());
-                }
-                if let Some(sc) = &entry.single_char {
-                    alias_map.insert(sc.clone(), entry.canonical_name.clone());
-                }
-                entries.push(entry);
-            }
-        }
-
-        EntityDictionary {
-            entries,
-            alias_to_canonical: alias_map,
-            name_to_id: HashMap::new(),
         }
     }
 }

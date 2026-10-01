@@ -16,7 +16,7 @@ use super::provider::{EntityEntry, EntityProvider};
 ///
 /// ```ignore
 /// let provider = NovelProvider::new("三国演义");
-/// let engine = EntityEngine::new(EntityRegistry::from(vec![Arc::new(provider)]));
+/// let cast = provider.entries();
 /// ```
 pub struct NovelProvider {
     novel: String,
@@ -98,9 +98,15 @@ mod tests {
     fn entry_has_correct_shape() {
         let provider = NovelProvider::new("三国演义");
         let entries = provider.entries();
-        assert!(!entries.is_empty());
-        assert_eq!(entries[0].object_type, "person");
-        assert!(!entries[0].canonical_name.is_empty());
+        assert!(!entries.is_empty(), "a known novel must yield a cast");
+        assert_eq!(
+            entries[0].object_type, "person",
+            "novel characters must be typed as person"
+        );
+        assert!(
+            !entries[0].canonical_name.is_empty(),
+            "every entry must carry a canonical name"
+        );
         // Properties should include the novel name
         assert_eq!(
             entries[0].properties.get("novel").map(|s| s.as_str()),
@@ -113,6 +119,9 @@ mod tests {
     #[test]
     fn unknown_novel_returns_empty() {
         let provider = NovelProvider::new("不存在的");
-        assert!(provider.entries().is_empty());
+        assert!(
+            provider.entries().is_empty(),
+            "an unknown novel must yield no entries"
+        );
     }
 }

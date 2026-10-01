@@ -50,18 +50,27 @@ fn sample_exp(tenant: &str, mt: MemoryType, content: &str) -> Experience {
     Experience::new(tenant, mt, content, 0.8)
 }
 
+/// Objective: Verify an in-memory store opens at the requested dimension.
+/// Invariants: `open_in_memory(8)` returns `Ok` and reports `dim == 8`.
 #[tokio::test]
 async fn open_in_memory_succeeds() {
     let store = SQLiteVecStore::open_in_memory(8).await.expect("open");
-    assert_eq!(store.dim, 8);
+    assert_eq!(
+        store.dim, 8,
+        "the store must report the requested dimension"
+    );
 }
 
+/// Objective: Verify a keyword-only in-memory store opens at dimension 0.
+/// Invariants: `open_in_memory(0)` returns `Ok` and reports `dim == 0`.
 #[tokio::test]
 async fn open_in_memory_zero_dim_succeeds() {
     let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
-    assert_eq!(store.dim, 0);
+    assert_eq!(store.dim, 0, "a keyword-only store reports dimension 0");
 }
 
+/// Objective: Verify the FTS5 path finds an ASCII token in a dimension-0 store.
+/// Invariants: the query returns the stored row and that row ranks first.
 #[tokio::test]
 async fn fts5_keyword_search_works() {
     let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
@@ -73,17 +82,19 @@ async fn fts5_keyword_search_works() {
         .await
         .expect("search");
     assert!(!results.is_empty(), "FTS5 should find 'rust'");
-    assert_eq!(results[0].id, "e1");
+    assert_eq!(results[0].id, "e1", "the single stored row must rank first");
 }
 
+/// Objective: Verify a created experience round-trips through `get`.
+/// Invariants: the stored content and tenant id come back unchanged.
 #[tokio::test]
 async fn create_and_get_round_trip() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
     let exp = sample_exp("t1", MemoryType::Knowledge, "hello");
     store.create(&exp).await.expect("create");
     let got = store.get(&exp.id).await.expect("get").expect("exists");
-    assert_eq!(got.content, "hello");
-    assert_eq!(got.tenant_id, "t1");
+    assert_eq!(got.content, "hello", "the stored content must round-trip");
+    assert_eq!(got.tenant_id, "t1", "the tenant must round-trip");
 }
 
 /// Objective: Verify pre-existing databases without the `expires_at`
@@ -159,15 +170,16 @@ async fn reopen_with_new_dimension_rebuilds_vec_table() {
         .await
         .expect("open with dim 8");
     assert_eq!(store.dim, 8, "store reports the new dimension");
-    let conn = store.conn.lock().await;
-    let stored = stored_vec_dim(&conn)
-        .expect("read stored dim")
-        .expect("vec table exists after reopen");
-    assert_eq!(
-        stored, 8,
-        "vec table must be rebuilt at the new dimension, stored={stored}"
-    );
-    drop(conn);
+    {
+        let conn = store.lock_conn();
+        let stored = stored_vec_dim(&conn)
+            .expect("read stored dim")
+            .expect("vec table exists after reopen");
+        assert_eq!(
+            stored, 8,
+            "vec table must be rebuilt at the new dimension, stored={stored}"
+        );
+    }
 
     // A dim-8 write round-trips through vector search.
     let mut exp = sample_exp("t1", MemoryType::Knowledge, "eight-dim");
@@ -204,12 +216,13 @@ async fn reopen_with_same_dimension_keeps_vec_table() {
     let store = SQLiteVecStore::open(db_path.to_str().expect("utf8 path"), 4)
         .await
         .expect("reopen with dim 4");
-    let conn = store.conn.lock().await;
-    let stored = stored_vec_dim(&conn)
-        .expect("read stored dim")
-        .expect("vec table exists");
-    assert_eq!(stored, 4, "same dimension keeps the original vec table");
-    drop(conn);
+    {
+        let conn = store.lock_conn();
+        let stored = stored_vec_dim(&conn)
+            .expect("read stored dim")
+            .expect("vec table exists");
+        assert_eq!(stored, 4, "same dimension keeps the original vec table");
+    }
 
     // The memory written before the reopen is still searchable (no data
     // loss from a spurious rebuild).
@@ -220,6 +233,26 @@ async fn reopen_with_same_dimension_keeps_vec_table() {
     assert!(
         hits.iter().any(|e| e.content == "keep-me"),
         "memory survives a same-dimension reopen"
+    );
+}
+
+/// Objective: Verify the store's synchronous SQL runs on the blocking pool
+/// rather than on the tokio worker that awaits it — a blocking `rusqlite`
+/// call on a worker stalls every unrelated task the runtime drives
+/// (audit 09-26/H7).
+/// Invariants: the thread executing the store work differs from the thread
+/// awaiting it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn store_work_runs_off_the_async_worker() {
+    let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+    let awaiting = std::thread::current().id();
+    let ran_on = store
+        .with_conn(|_conn| Ok(std::thread::current().id()))
+        .await
+        .expect("blocking closure succeeds");
+    assert_ne!(
+        awaiting, ran_on,
+        "store SQL must not execute on the awaiting tokio worker"
     );
 }
 
@@ -252,13 +285,17 @@ fn stored_vec_dim_parses_ddl() {
     );
 }
 
+/// Objective: Verify `get` reports an unknown id as absent rather than erroring.
+/// Invariants: the call returns `Ok(None)`.
 #[tokio::test]
 async fn get_missing_returns_none() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
     let got = store.get("nonexistent").await.expect("get");
-    assert!(got.is_none());
+    assert!(got.is_none(), "a missing id must return None");
 }
 
+/// Objective: Verify a row written with a vector is retrievable through vector search.
+/// Invariants: the search returns at least one hit and the stored row ranks first.
 #[tokio::test]
 async fn create_with_vector_and_search() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -271,9 +308,14 @@ async fn create_with_vector_and_search() {
         .await
         .expect("search");
     assert!(!results.is_empty(), "should find at least one result");
-    assert_eq!(results[0].id, exp.id);
+    assert_eq!(
+        results[0].id, exp.id,
+        "the freshly stored row must rank first"
+    );
 }
 
+/// Objective: Verify vector search never leaks another tenant's rows.
+/// Invariants: every returned hit belongs to the queried tenant.
 #[tokio::test]
 async fn search_is_tenant_scoped() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -291,6 +333,8 @@ async fn search_is_tenant_scoped() {
     assert!(r1.iter().all(|e| e.tenant_id == "t1"), "only t1 results");
 }
 
+/// Objective: Verify a query vector of the wrong length is rejected instead of scoring garbage.
+/// Invariants: the call returns `Err` whose message names the dimension.
 #[tokio::test]
 async fn search_rejects_dimension_mismatch() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -301,6 +345,8 @@ async fn search_rejects_dimension_mismatch() {
     assert!(err.to_string().contains("dim"), "dim mismatch should error");
 }
 
+/// Objective: Verify `update` overwrites the stored row.
+/// Invariants: reading the id back yields the new content.
 #[tokio::test]
 async fn update_modifies_record() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -309,18 +355,28 @@ async fn update_modifies_record() {
     exp.content = "new".to_string();
     store.update(&exp).await.expect("update");
     let got = store.get(&exp.id).await.expect("get").expect("exists");
-    assert_eq!(got.content, "new");
+    assert_eq!(
+        got.content, "new",
+        "the update must overwrite the stored content"
+    );
 }
 
+/// Objective: Verify `delete` removes the row from the store.
+/// Invariants: reading the id afterwards returns `None`.
 #[tokio::test]
 async fn delete_removes_record() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
     let exp = sample_exp("t1", MemoryType::Knowledge, "x");
     store.create(&exp).await.expect("create");
     store.delete(&exp.id).await.expect("delete");
-    assert!(store.get(&exp.id).await.expect("get").is_none());
+    assert!(
+        store.get(&exp.id).await.expect("get").is_none(),
+        "the deleted row must be gone"
+    );
 }
 
+/// Objective: Verify deleting an unknown id is reported as an error naming that id.
+/// Invariants: the call returns `Err` whose message contains the id.
 #[tokio::test]
 async fn delete_missing_returns_not_found() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -328,6 +384,8 @@ async fn delete_missing_returns_not_found() {
     assert!(err.to_string().contains("ghost"), "should mention the id");
 }
 
+/// Objective: Verify an empty delete batch is a no-op rather than an error.
+/// Invariants: `delete_batch(&[])` returns `Ok`.
 #[tokio::test]
 async fn delete_batch_empty_noop() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -380,14 +438,15 @@ async fn delete_batch_propagates_errors_and_rolls_back() {
     // keep is deleted first inside the transaction, then doomed trips the
     // trigger — proving rollback of the prior delete, not just a failed
     // delete on an untouched table.
-    let conn = store.conn.lock().await;
-    conn.execute_batch(
-        "CREATE TRIGGER abort_doomed BEFORE DELETE ON memories
+    {
+        let conn = store.lock_conn();
+        conn.execute_batch(
+            "CREATE TRIGGER abort_doomed BEFORE DELETE ON memories
          WHEN OLD.content = 'doomed'
          BEGIN SELECT RAISE(ABORT, 'doomed-delete-triggered'); END;",
-    )
-    .expect("create abort trigger");
-    drop(conn);
+        )
+        .expect("create abort trigger");
+    }
 
     let err = store
         .delete_batch(&[keep.id.clone(), doomed.id.clone()])
@@ -418,13 +477,14 @@ async fn delete_batch_tolerates_orphan_vec_row() {
     // A vec row with no matching memories row (legal vector JSON, so the
     // vec extension accepts it).
     let orphan_id = "orphan-vec-row";
-    let conn = store.conn.lock().await;
-    conn.execute(
-        "INSERT INTO vec_memories (id, vector) VALUES (?1, ?2)",
-        rusqlite::params![orphan_id, "[0.0,0.0,0.0,0.0]"],
-    )
-    .expect("insert orphan vec row");
-    drop(conn);
+    {
+        let conn = store.lock_conn();
+        conn.execute(
+            "INSERT INTO vec_memories (id, vector) VALUES (?1, ?2)",
+            rusqlite::params![orphan_id, "[0.0,0.0,0.0,0.0]"],
+        )
+        .expect("insert orphan vec row");
+    }
 
     store
         .delete_batch(&[orphan_id.to_string(), exp.id.clone()])
@@ -489,6 +549,8 @@ async fn forget_expired_deletes_only_expired_tenant_rows() {
     );
 }
 
+/// Objective: Verify `get_by_memory_type` returns only the requested memory type.
+/// Invariants: each type query returns exactly its own row.
 #[tokio::test]
 async fn get_by_memory_type_filters() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -512,6 +574,8 @@ async fn get_by_memory_type_filters() {
     assert_eq!(p.len(), 1, "one preference");
 }
 
+/// Objective: Verify a vector-bearing row is found by vector search.
+/// Invariants: the search returns at least one hit.
 #[tokio::test]
 async fn create_and_search_round_trip() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -525,6 +589,8 @@ async fn create_and_search_round_trip() {
     assert!(!results.is_empty(), "should find created memory");
 }
 
+/// Objective: Verify the stored embedding round-trips through `get_vector`.
+/// Invariants: the returned vector equals the one that was written.
 #[tokio::test]
 async fn get_vector_round_trips() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -535,6 +601,8 @@ async fn get_vector_round_trips() {
     assert_eq!(v, vec![0.1_f32, 0.2, 0.3, 0.4], "vector round-trips");
 }
 
+/// Objective: Verify `get_vector` reports an unknown id as an empty vector.
+/// Invariants: the call returns `Ok` with an empty vector.
 #[tokio::test]
 async fn get_vector_missing_returns_empty() {
     let store = SQLiteVecStore::open_in_memory(4).await.expect("open");
@@ -542,6 +610,8 @@ async fn get_vector_missing_returns_empty() {
     assert!(v.is_empty(), "missing id -> empty vector");
 }
 
+/// Objective: Verify a dimension-0 store has no vectors to return.
+/// Invariants: `get_vector` returns `Ok` with an empty vector for any id.
 #[tokio::test]
 async fn get_vector_zero_dim_returns_empty() {
     let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
@@ -549,6 +619,8 @@ async fn get_vector_zero_dim_returns_empty() {
     assert!(v.is_empty(), "dim==0 store has no vectors");
 }
 
+/// Objective: Verify a query full of FTS5 syntax characters raises no syntax error.
+/// Invariants: the call completes; a nonsense query may legitimately match nothing.
 #[tokio::test]
 async fn fts5_query_escapes_special_chars() {
     // A query full of FTS5 syntax chars must not raise a syntax error.
@@ -577,7 +649,7 @@ async fn replace_batch_rolls_back_when_a_replacement_fails() {
     let old = sample_exp("t1", MemoryType::Knowledge, "old fact");
     store.create(&old).await.expect("create the old memory");
     {
-        let conn = store.conn.lock().await;
+        let conn = store.lock_conn();
         // Abort the INSERT, which runs AFTER the delete inside the batch.
         conn.execute_batch(
             "CREATE TRIGGER abort_new BEFORE INSERT ON memories \

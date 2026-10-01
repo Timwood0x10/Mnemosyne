@@ -231,7 +231,11 @@ mod tests {
                 .expect("provenance returns a text block"),
         )
         .expect("valid JSON payload");
-        assert_eq!(payload["fact_id"], json!(fact_id));
+        assert_eq!(
+            payload["fact_id"],
+            json!(fact_id),
+            "the provenance must echo the requested fact id"
+        );
     }
 
     /// Objective: Verify the tool answers the full provenance story for a fact

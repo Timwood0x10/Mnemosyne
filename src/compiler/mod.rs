@@ -25,7 +25,6 @@ pub mod resolver;
 pub mod sentence;
 pub mod state_slots;
 pub mod story_events;
-pub mod timeline;
 pub mod writer;
 
 use std::ops::Range;

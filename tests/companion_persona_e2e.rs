@@ -61,6 +61,8 @@ fn parse_payload(result: &ToolCallResult) -> Value {
     .expect("valid JSON payload")
 }
 
+/// Objective: Verify the companion-persona tools close the loop over one fact store: inject a card, guard a draft, roll the relationship and read it back.
+/// Invariants: the injected card carries the agent id, the update marks the relationship as existing, and the query reads the same state back.
 #[tokio::test]
 async fn companion_persona_full_loop() {
     let store = Arc::new(SqliteFactStore::open_in_memory().expect("open fact store"));
@@ -106,7 +108,11 @@ async fn companion_persona_full_loop() {
             .contains("我是白流苏"),
         "injected card carries the identity, got: {card}"
     );
-    assert_eq!(inject_payload["agent_id"], json!(AGENT_ID));
+    assert_eq!(
+        inject_payload["agent_id"],
+        json!(AGENT_ID),
+        "the injected card must carry the agent id"
+    );
 
     // 3. persona_check: verify the draft matching the CURRENT stance is NOT
     //    falsely flagged. Facts 2 and 3 form a stance flip (我喜欢应酬 →
@@ -186,7 +192,11 @@ async fn companion_persona_full_loop() {
         .await
         .expect("relationship_update succeeds");
     let update_payload = parse_payload(&update_result);
-    assert_eq!(update_payload["exists"], json!(true));
+    assert_eq!(
+        update_payload["exists"],
+        json!(true),
+        "the relationship must exist after the update"
+    );
     let intimacy = update_payload["intimacy"]
         .as_f64()
         .expect("intimacy is a number");
@@ -210,7 +220,11 @@ async fn companion_persona_full_loop() {
         .await
         .expect("relationship_query succeeds");
     let query_payload = parse_payload(&query_result);
-    assert_eq!(query_payload["exists"], json!(true));
+    assert_eq!(
+        query_payload["exists"],
+        json!(true),
+        "the queried relationship must exist"
+    );
     assert_eq!(
         query_payload["intimacy"], update_payload["intimacy"],
         "query returns the persisted intimacy"

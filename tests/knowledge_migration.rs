@@ -120,7 +120,10 @@ async fn synthetic_corpus_migrates_and_inspects() {
         .expect("inspect 赵云")
         .expect("赵云 should exist in the general model after migration");
 
-    assert_eq!(zhaoyun.object.name, "赵云");
+    assert_eq!(
+        zhaoyun.object.name, "赵云",
+        "the migrated entity must keep its name"
+    );
     assert!(
         !zhaoyun.evidences.is_empty(),
         "赵云 must have backing evidence after migration"
@@ -163,5 +166,8 @@ async fn migration_is_idempotent_on_synthetic_corpus() {
         .await
         .expect("inspect after re-migrate")
         .expect("赵云 still resolvable");
-    assert_eq!(zhaoyun.object.name, "赵云");
+    assert_eq!(
+        zhaoyun.object.name, "赵云",
+        "the re-migrated entity must keep its name"
+    );
 }

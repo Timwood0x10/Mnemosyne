@@ -247,7 +247,11 @@ mod tests {
             .filter(|m| m.milestone_type == MilestoneType::StanceFlip)
             .collect();
         assert_eq!(flips.len(), 1, "one stance flip milestone");
-        assert_eq!(flips[0].fact.fact_type, FactType::Preference);
+        assert_eq!(
+            flips[0].fact.fact_type,
+            FactType::Preference,
+            "a stance flip must be driven by a Preference fact"
+        );
 
         assert_eq!(
             timeline.trajectory.len(),

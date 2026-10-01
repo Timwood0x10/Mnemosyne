@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use crate::cognition::{FactStore, FactType};
 use crate::cognition_compiler::CognitionCompiler;
-use crate::config::{CONTEXT_INJECT_THRESHOLD, EMBEDDING_MEMORY_GRAYSCALE};
+use crate::config::CONTEXT_INJECT_THRESHOLD;
 use crate::distiller::{Distiller, PipelineDistiller};
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
@@ -133,11 +133,8 @@ impl ToolHandler for ContextCheckTool {
         };
 
         // Distill the conversation into long-term memories (knowledge/preferences…).
-        // Grayscale ON: the distilled memories ARE the injection payload —
-        // original text, never an LLM rewrite ("检索代数化、注入原文化").
         // The network/embedding call stays on the async worker.
         let mut distilled = 0usize;
-        let mut inject_memories: Vec<String> = Vec::new();
         if let Some(distiller) = &self.distiller {
             let conversation_id = args
                 .get("conversation_id")
@@ -147,13 +144,6 @@ impl ToolHandler for ContextCheckTool {
                 .distill(conversation_id, &messages, &tenant_id, &user_id)
                 .await?;
             distilled = memories.len();
-            if EMBEDDING_MEMORY_GRAYSCALE {
-                inject_memories = memories
-                    .iter()
-                    .map(|m| m.content.clone())
-                    .filter(|c| !c.is_empty())
-                    .collect();
-            }
         }
 
         // Rebuild the user profile from ALL accumulated facts of this user.
@@ -183,9 +173,6 @@ impl ToolHandler for ContextCheckTool {
             }),
         );
         payload.insert("profile".into(), profile);
-        if EMBEDDING_MEMORY_GRAYSCALE {
-            payload.insert("inject_memories".into(), json!(inject_memories));
-        }
         Ok(ToolCallResult::text(
             serde_json::Value::Object(payload).to_string(),
         ))
@@ -211,10 +198,6 @@ fn run_context_check_diagnostic(
     threshold: f64,
 ) -> Result<ToolCallResult, Error> {
     // No-op diagnostic: report usage and current memory state.
-    // Grayscale OFF → exact legacy payload (no inject_memories field,
-    // original reason text). Grayscale ON → empty injection slot
-    // (plan P3: below the gate we inject nothing, preserving the
-    // host's context window).
     //
     // Read-only resolve: a below-threshold diagnostic must NOT
     // materialize an entity for a user who never chatted (audit:
@@ -239,12 +222,7 @@ fn run_context_check_diagnostic(
     payload.insert(
         "reason".into(),
         json!(format!(
-            "context usage {context_usage:.0}% below threshold {threshold:.0}% — no distillation{}",
-            if EMBEDDING_MEMORY_GRAYSCALE {
-                ", no injection"
-            } else {
-                ""
-            }
+            "context usage {context_usage:.0}% below threshold {threshold:.0}% — no distillation"
         )),
     );
     payload.insert(
@@ -254,9 +232,6 @@ fn run_context_check_diagnostic(
             "facts": facts.len(),
         }),
     );
-    if EMBEDDING_MEMORY_GRAYSCALE {
-        payload.insert("inject_memories".into(), json!([]));
-    }
     Ok(ToolCallResult::text(
         serde_json::Value::Object(payload).to_string(),
     ))

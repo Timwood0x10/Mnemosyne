@@ -218,34 +218,56 @@ pub fn load_novel(novel: &str, corpus_dir: &Path) -> std::io::Result<Vec<Chapter
 mod tests {
     use super::*;
 
+    /// Objective: Verify single, tens and hundreds Chinese numerals parse.
+    /// Invariants: 一→1, 十→10, 一百→100 and 一百二十→120.
     #[test]
     fn chinese_to_int_basic() {
-        assert_eq!(chinese_to_int("一"), 1);
-        assert_eq!(chinese_to_int("十"), 10);
-        assert_eq!(chinese_to_int("一百"), 100);
-        assert_eq!(chinese_to_int("一百二十"), 120);
+        assert_eq!(chinese_to_int("一"), 1, "一 must parse to 1");
+        assert_eq!(chinese_to_int("十"), 10, "十 must parse to 10");
+        assert_eq!(chinese_to_int("一百"), 100, "一百 must parse to 100");
+        assert_eq!(
+            chinese_to_int("一百二十"),
+            120,
+            "一百二十 must parse to 120"
+        );
     }
 
+    /// Objective: Verify an Arabic numeral passes through unchanged.
+    /// Invariants: the decimal string parses to its numeric value.
     #[test]
     fn chinese_to_int_arabic_mixed() {
-        assert_eq!(chinese_to_int("120"), 120);
+        assert_eq!(
+            chinese_to_int("120"),
+            120,
+            "an Arabic numeral must pass through"
+        );
     }
 
+    /// Objective: Verify a compound Chinese numeral parses.
+    /// Invariants: 三千五百 parses to 3500.
     #[test]
     fn chinese_to_int_complex() {
-        assert_eq!(chinese_to_int("三千五百"), 3500);
+        assert_eq!(
+            chinese_to_int("三千五百"),
+            3500,
+            "三千五百 must parse to 3500"
+        );
     }
 
+    /// Objective: Verify the zero and empty inputs parse to 0.
+    /// Invariants: 零 and the empty string both yield 0.
     #[test]
     fn chinese_to_int_zero_edge() {
-        assert_eq!(chinese_to_int("零"), 0);
-        assert_eq!(chinese_to_int(""), 0);
+        assert_eq!(chinese_to_int("零"), 0, "零 must parse to 0");
+        assert_eq!(chinese_to_int(""), 0, "an empty string must parse to 0");
     }
 
+    /// Objective: Verify the teens parse without a leading 一.
+    /// Invariants: 十一→11 and 二十一→21.
     #[test]
     fn chinese_to_int_eleven() {
-        assert_eq!(chinese_to_int("十一"), 11);
-        assert_eq!(chinese_to_int("二十一"), 21);
+        assert_eq!(chinese_to_int("十一"), 11, "十一 must parse to 11");
+        assert_eq!(chinese_to_int("二十一"), 21, "二十一 must parse to 21");
     }
 
     /// Objective: Verify 万-scale numerals parse correctly — the old
@@ -268,7 +290,11 @@ mod tests {
             "十万八千 must be 108000"
         );
         // Existing small-number behavior is unchanged.
-        assert_eq!(chinese_to_int("三千五百"), 3500);
+        assert_eq!(
+            chinese_to_int("三千五百"),
+            3500,
+            "三千五百 must parse to 3500 again"
+        );
     }
 
     /// Objective: Verify an absurdly long Arabic digit string does not panic
@@ -285,19 +311,26 @@ mod tests {
         );
     }
 
+    /// Objective: Verify text without chapter markers yields no chapters.
+    /// Invariants: the chapter list is empty.
     #[test]
     fn split_chapters_finds_none_in_empty() {
         let chapters = split_into_chapters("");
-        assert!(chapters.is_empty());
+        assert!(
+            chapters.is_empty(),
+            "a file without chapter markers yields no chapters"
+        );
     }
 
+    /// Objective: Verify consecutive chapter headings split into numbered chapters.
+    /// Invariants: two chapters, numbered 1 and 2.
     #[test]
     fn split_chapters_simple() {
         let text = "第一回 开篇\n这是正文内容。\n第二回 发展\n更多内容。\n";
         let chapters = split_into_chapters(text);
-        assert_eq!(chapters.len(), 2);
-        assert_eq!(chapters[0].num, 1);
-        assert_eq!(chapters[1].num, 2);
+        assert_eq!(chapters.len(), 2, "two chapters must be split");
+        assert_eq!(chapters[0].num, 1, "the first chapter number must be 1");
+        assert_eq!(chapters[1].num, 2, "the second chapter number must be 2");
     }
 
     /// Objective: Verify each chapter carries its EXACT source byte range —
@@ -366,9 +399,14 @@ mod tests {
         );
     }
 
+    /// Objective: Verify an unknown corpus path is reported as an error.
+    /// Invariants: the call returns `Err`.
     #[test]
     fn load_novel_unknown_returns_error() {
         let result = load_novel("unknown", Path::new("corpus"));
-        assert!(result.is_err());
+        assert!(
+            result.is_err(),
+            "an unreadable corpus path must be an error"
+        );
     }
 }

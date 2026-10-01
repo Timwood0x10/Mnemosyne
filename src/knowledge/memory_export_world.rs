@@ -301,9 +301,19 @@ mod tests {
         let events = dst.list_world_events().await.expect("list events");
         assert_eq!(events.len(), 1, "one event imported");
         let ev = &events[0];
-        assert_eq!(ev.title, "吕布 杀 董卓");
-        assert_eq!(ev.event_type, "action");
-        assert_eq!(ev.timestamp, Some(3));
+        assert_eq!(
+            ev.title, "吕布 杀 董卓",
+            "the exported event must keep its title"
+        );
+        assert_eq!(
+            ev.event_type, "action",
+            "the exported event must keep its type"
+        );
+        assert_eq!(
+            ev.timestamp,
+            Some(3),
+            "the exported event must keep its chapter"
+        );
         assert_eq!((ev.start_offset, ev.end_offset), (Some(5), Some(8)));
 
         let parts = dst
@@ -326,14 +336,23 @@ mod tests {
             .iter()
             .find(|s| s.slot == "status")
             .expect("anchored status state");
-        assert_eq!(victim.entity_name, "董卓");
-        assert_eq!(victim.value, "deceased");
+        assert_eq!(
+            victim.entity_name, "董卓",
+            "the exported state must name its victim"
+        );
+        assert_eq!(
+            victim.value, "deceased",
+            "the exported state must keep its value"
+        );
         assert_eq!(
             victim.event_id,
             Some(ev.id),
             "anchor must point at the DESTINATION event id"
         );
-        assert!((victim.confidence - 0.75).abs() < f64::EPSILON);
+        assert!(
+            (victim.confidence - 0.75).abs() < f64::EPSILON,
+            "the exported state confidence must round-trip"
+        );
         let manual = states
             .iter()
             .find(|s| s.slot == "location")
@@ -445,8 +464,14 @@ mod tests {
         });
         let bundle: crate::knowledge::memory_export::ExportBundle =
             serde_json::from_value(json).expect("v1 bundle must deserialize");
-        assert!(bundle.world_events.is_empty());
-        assert!(bundle.world_states.is_empty());
+        assert!(
+            bundle.world_events.is_empty(),
+            "an empty bundle must have no world events"
+        );
+        assert!(
+            bundle.world_states.is_empty(),
+            "an empty bundle must have no world states"
+        );
 
         let dst = SQLiteKnowledgeStore::open_in_memory().await.expect("dst");
         import_bundle(&dst, &bundle)

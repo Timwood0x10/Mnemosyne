@@ -220,6 +220,8 @@ pub fn extract_description(text: &str, name: &str) -> (String, String) {
 mod tests {
     use super::*;
 
+    /// Objective: Verify a sentence containing a strong verb yields an action span.
+    /// Invariants: a span is found and it contains the matched verb.
     #[test]
     fn extract_action_sentence_finds_verb() {
         let text = "武松提起哨棒，照头一下打去，那大虫便死了。";
@@ -232,28 +234,45 @@ mod tests {
         );
     }
 
+    /// Objective: Verify a sentence without a strong verb yields nothing.
+    /// Invariants: the result is `None`.
     #[test]
     fn extract_action_sentence_no_verb() {
         let text = "武松是一个好汉。";
         let result = extract_action_sentence(text, "武松");
-        assert!(result.is_none());
+        assert!(
+            result.is_none(),
+            "a name without a verb must not yield an action sentence"
+        );
     }
 
+    /// Objective: Verify an alias absent from the text yields nothing.
+    /// Invariants: the result is `None`.
     #[test]
     fn extract_action_sentence_name_not_found() {
         let text = "这是一个普通的句子。";
         let result = extract_action_sentence(text, "不存在");
-        assert!(result.is_none());
+        assert!(
+            result.is_none(),
+            "an unknown alias must not yield an action sentence"
+        );
     }
 
+    /// Objective: Verify an introduction line yields its clothing description.
+    /// Invariants: the clothing slot is non-empty and carries a clothing cue.
     #[test]
     fn extract_description_clothing() {
         let text = "只见那武松头戴一顶新头巾，身穿一领新衣裳。";
         let (clothing, _) = extract_description(text, "武松");
         assert!(!clothing.is_empty(), "should find clothing kw");
-        assert!(clothing.contains("头戴") || clothing.contains("身穿"));
+        assert!(
+            clothing.contains("头戴") || clothing.contains("身穿"),
+            "the description must capture the clothing cue"
+        );
     }
 
+    /// Objective: Verify an introduction line yields its personality description.
+    /// Invariants: the personality slot is non-empty.
     #[test]
     fn extract_description_personality() {
         let text = "那武松相貌堂堂，性格刚烈，是个英雄好汉。";
@@ -261,19 +280,32 @@ mod tests {
         assert!(!personality.is_empty(), "should find personality kw");
     }
 
+    /// Objective: Verify a line with no description cue yields no slots.
+    /// Invariants: both the clothing and the personality slot are empty.
     #[test]
     fn extract_description_no_match() {
         let text = "武松在路上走了几日。";
         let (clothing, personality) = extract_description(text, "武松");
-        assert!(clothing.is_empty());
-        assert!(personality.is_empty());
+        assert!(
+            clothing.is_empty(),
+            "a non-introduction line must yield no clothing"
+        );
+        assert!(
+            personality.is_empty(),
+            "a non-introduction line must yield no personality"
+        );
     }
 
+    /// Objective: Verify the strong-verb table holds the documented verbs.
+    /// Invariants: the table is non-empty and contains 杀 and 死.
     #[test]
     fn strong_verbs_list_is_populated() {
-        assert!(!STRONG_VERBS.is_empty());
-        assert!(STRONG_VERBS.contains(&"杀"));
-        assert!(STRONG_VERBS.contains(&"死"));
+        assert!(
+            !STRONG_VERBS.is_empty(),
+            "the strong-verb table must not be empty"
+        );
+        assert!(STRONG_VERBS.contains(&"杀"), "杀 must be a strong verb");
+        assert!(STRONG_VERBS.contains(&"死"), "死 must be a strong verb");
     }
 
     /// Objective: Verify DEATH_KW contains NO bare ambiguous single characters
@@ -291,10 +323,12 @@ mod tests {
             );
         }
         // The genuine death phrases survive.
-        assert!(DEATH_KW.contains(&"身亡"));
-        assert!(DEATH_KW.contains(&"战死"));
+        assert!(DEATH_KW.contains(&"身亡"), "身亡 must be a death keyword");
+        assert!(DEATH_KW.contains(&"战死"), "战死 must be a death keyword");
     }
 
+    /// Objective: Verify the sentence start is recovered at a chunk boundary.
+    /// Invariants: the computed start offset is the expected one.
     #[test]
     fn sentence_start_handles_boundary() {
         let text = "甲。乙。丙。";
@@ -307,6 +341,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify the sentence end stops at the first terminator.
+    /// Invariants: the end offset is the position of the first period.
     #[test]
     fn sentence_end_handles_boundary() {
         let text = "甲。乙。丙。";

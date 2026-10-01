@@ -494,8 +494,16 @@ mod tests {
             "two positive messages should raise intimacy to 0.04, got {}",
             state.intimacy
         );
-        assert_eq!(state.stage, RelationshipStage::Stranger);
-        assert_eq!(state.emotion_trend, EmotionTrend::Rising);
+        assert_eq!(
+            state.stage,
+            RelationshipStage::Stranger,
+            "a new relationship starts at Stranger"
+        );
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Rising,
+            "positive emotion must trend upward"
+        );
 
         let loaded = store
             .get_relationship("tenant-a", state.agent_entity_id, state.user_entity_id)
@@ -524,7 +532,11 @@ mod tests {
             state.intimacy
         );
         // Starting from 0.0, after clamping we still have 0.0 → delta is zero → Stable
-        assert_eq!(state.emotion_trend, EmotionTrend::Stable);
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Stable,
+            "unchanged emotion must trend stable"
+        );
     }
 
     /// Objective: Verify the AGENT's own emotional statements also move the
@@ -644,7 +656,11 @@ mod tests {
         let first = store
             .apply_messages("tenant-a", "agent-bailiusu", "alice", &positive)
             .expect("first apply");
-        assert_eq!(first.emotion_trend, EmotionTrend::Rising);
+        assert_eq!(
+            first.emotion_trend,
+            EmotionTrend::Rising,
+            "the first update must trend upward"
+        );
 
         let second = store
             .apply_messages("tenant-a", "agent-bailiusu", "alice", &negative)
@@ -743,7 +759,11 @@ mod tests {
             "别害怕 is reassurance, not distress: intimacy must stay 0.0, got {}",
             state.intimacy
         );
-        assert_eq!(state.emotion_trend, EmotionTrend::Stable);
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Stable,
+            "the trend must settle at stable"
+        );
     }
 
     /// Objective: Verify "我无所谓压力" no longer fires the negative delta —
@@ -761,7 +781,11 @@ mod tests {
             "无所谓压力 must not lower intimacy, got {}",
             state.intimacy
         );
-        assert_eq!(state.emotion_trend, EmotionTrend::Stable);
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Stable,
+            "the trend must stay stable"
+        );
     }
 
     /// Objective: Verify a clause-internal negation of a different verb does
@@ -780,7 +804,11 @@ mod tests {
             POSITIVE_DELTA,
             state.intimacy
         );
-        assert_eq!(state.emotion_trend, EmotionTrend::Rising);
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Rising,
+            "the trend must return to rising"
+        );
     }
 
     /// Objective: Verify per-occurrence negation: a keyword appearing twice
@@ -799,7 +827,11 @@ mod tests {
             "one un-negated 开心 occurrence must register as positive, got {}",
             state.intimacy
         );
-        assert_eq!(state.emotion_trend, EmotionTrend::Rising);
+        assert_eq!(
+            state.emotion_trend,
+            EmotionTrend::Rising,
+            "the trend must rise again"
+        );
     }
 
     /// Objective: Verify the chosen two-way contract (C2): the agent's own
@@ -835,6 +867,10 @@ mod tests {
             AGENT_NEGATIVE_DELTA,
             second.intimacy
         );
-        assert_eq!(second.emotion_trend, EmotionTrend::Declining);
+        assert_eq!(
+            second.emotion_trend,
+            EmotionTrend::Declining,
+            "negative emotion must trend downward"
+        );
     }
 }

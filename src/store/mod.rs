@@ -1,10 +1,9 @@
-use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::Mutex;
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
-use tokio::sync::Mutex;
 
 use crate::error::{Result, StorageError};
 use crate::types::{Experience, ExtractionMethod, MemoryType, Metadata};
@@ -251,16 +250,64 @@ impl std::fmt::Debug for SQLiteVecStore {
 }
 
 impl SQLiteVecStore {
+    /// Run `work` on the blocking pool with the connection locked.
+    ///
+    /// `rusqlite` is synchronous, so executing it straight from an `async fn`
+    /// blocks a tokio worker thread for the whole query and stalls every
+    /// unrelated task the runtime is driving (audit 09-26/H7 — fixed one layer
+    /// up in batch F, batch G, and here). The `Arc` is cloned first so the
+    /// closure owns its handle, and the guard is taken *inside* the closure, so
+    /// no lock is ever held across an `await`.
+    ///
+    /// The guard is passed as `&mut Connection` so the callers that need a
+    /// transaction keep using `rusqlite::Transaction` (its borrow discipline
+    /// still guarantees the commit/rollback they intend).
+    ///
+    /// A poisoned mutex is recovered rather than propagated: the connection is
+    /// a serialized resource whose statements are individually atomic, and the
+    /// `tokio::sync::Mutex` this replaced had no poisoning at all — surfacing
+    /// poison would let one panicking caller brick the store for every later
+    /// one.
+    async fn with_conn<T, F>(&self, work: F) -> Result<T>
+    where
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        crate::blocking::run(move || {
+            let mut guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            work(&mut guard)
+        })
+        .await
+    }
+
+    /// Lock the connection synchronously, for test-only raw SQL access.
+    ///
+    /// The guard must be dropped before awaiting any store method: the async
+    /// path takes the same lock from the blocking pool, so holding it across an
+    /// `await` would deadlock.
+    #[cfg(test)]
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     pub async fn open(path: &str, dim: usize) -> Result<Self> {
         if dim > 0 {
             ensure_vec_loaded();
         }
-        let conn =
-            Connection::open(path).map_err(|e| StorageError::Schema(format!("open: {e}")))?;
-        // busy_timeout: several connections share one DB file (vec + fact +
-        // knowledge); without it a concurrent writer gets SQLITE_BUSY
-        // immediately (0 ms default).
-        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+        let path = path.to_owned();
+        let conn = crate::blocking::run(move || {
+            let conn =
+                Connection::open(&path).map_err(|e| StorageError::Schema(format!("open: {e}")))?;
+            // busy_timeout: several connections share one DB file (vec + fact +
+            // knowledge); without it a concurrent writer gets SQLITE_BUSY
+            // immediately (0 ms default).
+            let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+            Ok(conn)
+        })
+        .await?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             dim,
@@ -273,9 +320,13 @@ impl SQLiteVecStore {
         if dim > 0 {
             ensure_vec_loaded();
         }
-        let conn = Connection::open_in_memory()
-            .map_err(|e| StorageError::Schema(format!("open_in_memory: {e}")))?;
-        let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+        let conn = crate::blocking::run(|| {
+            let conn = Connection::open_in_memory()
+                .map_err(|e| StorageError::Schema(format!("open_in_memory: {e}")))?;
+            let _ = conn.execute_batch("PRAGMA busy_timeout = 5000;");
+            Ok(conn)
+        })
+        .await?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
             dim,
@@ -285,113 +336,118 @@ impl SQLiteVecStore {
     }
 
     async fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch(SCHEMA)
-            .map_err(|e| StorageError::Schema(format!("init schema: {e}")))?;
-        // Migrate older databases that lack the vector column.
-        let has_vec_col = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'vector'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            > 0;
-        if !has_vec_col {
-            conn.execute(
-                "ALTER TABLE memories ADD COLUMN vector TEXT NOT NULL DEFAULT '[]'",
-                [],
-            )
-            .map_err(|e| StorageError::Schema(format!("migrate vector col: {e}")))?;
-        }
-        // Migrate older databases that lack the expires_at column (added for
-        // the TTL forget-expired lifecycle phase). Mirrors the vector column
-        // migration above so pre-existing DB files keep opening.
-        let has_expires_col = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'expires_at'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )
-            .unwrap_or(0)
-            > 0;
-        if !has_expires_col {
-            conn.execute(
-                "ALTER TABLE memories ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''",
-                [],
-            )
-            .map_err(|e| StorageError::Schema(format!("migrate expires_at col: {e}")))?;
-        }
-        // Recreate the index in case the column was just added (CREATE INDEX
-        // in SCHEMA may have failed on old tables missing the column).
-        let _ = conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)",
-            [],
-        );
-        if self.dim > 0 {
-            // Rebuild the vec table when an existing database was created
-            // with a different embedding dimension: `CREATE VIRTUAL TABLE IF
-            // NOT EXISTS` silently keeps the stale schema, so the mismatch
-            // would otherwise only surface at query time (bug-audit
-            // store.rs:264-267). Dropping first forces the table to be
-            // recreated with the current dimension.
-            if let Some(stored) = stored_vec_dim(&conn)? {
-                if stored != self.dim {
-                    conn.execute_batch("DROP TABLE IF EXISTS vec_memories;")
-                        .map_err(|e| StorageError::Schema(format!("drop stale vec table: {e}")))?;
-                }
+        let dim = self.dim;
+        self.with_conn(move |conn| {
+            conn.execute_batch(SCHEMA)
+                .map_err(|e| StorageError::Schema(format!("init schema: {e}")))?;
+            // Migrate older databases that lack the vector column.
+            let has_vec_col = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'vector'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
+            if !has_vec_col {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN vector TEXT NOT NULL DEFAULT '[]'",
+                    [],
+                )
+                .map_err(|e| StorageError::Schema(format!("migrate vector col: {e}")))?;
             }
-            let vec_sql = VEC_SCHEMA.replace("?", &self.dim.to_string());
-            conn.execute_batch(&vec_sql)
-                .map_err(|e| StorageError::Schema(format!("init vec: {e}")))?;
-            // Backfill existing rows so a dimension change (or a DB that
-            // already had `memories.vector`) does not silently hide every
-            // memory from vector search. Rows whose stored vector length
-            // differs from `self.dim` are rejected by sqlite-vec; insert them
-            // one by one and skip mismatches so open() still succeeds.
-            let rows: Vec<(String, String)> = {
-                let mut stmt = conn.prepare(
+            // Migrate older databases that lack the expires_at column (added for
+            // the TTL forget-expired lifecycle phase). Mirrors the vector column
+            // migration above so pre-existing DB files keep opening.
+            let has_expires_col = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = 'expires_at'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap_or(0)
+                > 0;
+            if !has_expires_col {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN expires_at TEXT NOT NULL DEFAULT ''",
+                    [],
+                )
+                .map_err(|e| StorageError::Schema(format!("migrate expires_at col: {e}")))?;
+            }
+            // Recreate the index in case the column was just added (CREATE INDEX
+            // in SCHEMA may have failed on old tables missing the column).
+            let _ = conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at)",
+                [],
+            );
+            if dim > 0 {
+                // Rebuild the vec table when an existing database was created
+                // with a different embedding dimension: `CREATE VIRTUAL TABLE IF
+                // NOT EXISTS` silently keeps the stale schema, so the mismatch
+                // would otherwise only surface at query time (bug-audit
+                // store.rs:264-267). Dropping first forces the table to be
+                // recreated with the current dimension.
+                if let Some(stored) = stored_vec_dim(conn)? {
+                    if stored != dim {
+                        conn.execute_batch("DROP TABLE IF EXISTS vec_memories;")
+                            .map_err(|e| {
+                                StorageError::Schema(format!("drop stale vec table: {e}"))
+                            })?;
+                    }
+                }
+                let vec_sql = VEC_SCHEMA.replace("?", &dim.to_string());
+                conn.execute_batch(&vec_sql)
+                    .map_err(|e| StorageError::Schema(format!("init vec: {e}")))?;
+                // Backfill existing rows so a dimension change (or a DB that
+                // already had `memories.vector`) does not silently hide every
+                // memory from vector search. Rows whose stored vector length
+                // differs from `dim` are rejected by sqlite-vec; insert them
+                // one by one and skip mismatches so open() still succeeds.
+                let rows: Vec<(String, String)> = {
+                    let mut stmt = conn.prepare(
                     "SELECT id, vector FROM memories WHERE vector IS NOT NULL AND vector != '[]'",
                 )?;
-                let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                mapped.collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            for (id, vector_json) in rows {
-                let parsed: Vec<f32> = match serde_json::from_str(&vector_json) {
-                    Ok(v) => v,
-                    Err(_) => continue,
+                    let mapped = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                    mapped.collect::<rusqlite::Result<Vec<_>>>()?
                 };
-                if parsed.len() != self.dim {
-                    tracing::warn!(
-                        %id,
-                        stored_dim = parsed.len(),
-                        expected = self.dim,
-                        "vec backfill skipped: dimension mismatch"
+                for (id, vector_json) in rows {
+                    let parsed: Vec<f32> = match serde_json::from_str(&vector_json) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    if parsed.len() != dim {
+                        tracing::warn!(
+                            %id,
+                            stored_dim = parsed.len(),
+                            expected = dim,
+                            "vec backfill skipped: dimension mismatch"
+                        );
+                        continue;
+                    }
+                    let _ = conn.execute(
+                        "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
+                        params![id, vector_json],
                     );
-                    continue;
                 }
-                let _ = conn.execute(
-                    "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
-                    params![id, vector_json],
-                );
-            }
-        } else {
-            conn.execute_batch(FTS_SCHEMA)
-                .map_err(|e| StorageError::Schema(format!("init fts: {e}")))?;
-            // Backfill rows that predate the FTS tables/triggers — a database
-            // first opened in vector mode (dim > 0 builds no FTS table) or a
-            // legacy file. The INSERT trigger only fires for new writes, so
-            // without this the old rows stay permanently invisible to MATCH.
-            // The `NOT IN` guard makes the statement idempotent across opens.
-            conn.execute(
-                "INSERT INTO memories_fts(rowid, content, problem, solution)
+            } else {
+                conn.execute_batch(FTS_SCHEMA)
+                    .map_err(|e| StorageError::Schema(format!("init fts: {e}")))?;
+                // Backfill rows that predate the FTS tables/triggers — a database
+                // first opened in vector mode (dim > 0 builds no FTS table) or a
+                // legacy file. The INSERT trigger only fires for new writes, so
+                // without this the old rows stay permanently invisible to MATCH.
+                // The `NOT IN` guard makes the statement idempotent across opens.
+                conn.execute(
+                    "INSERT INTO memories_fts(rowid, content, problem, solution)
                  SELECT rowid, content, problem, solution FROM memories
                  WHERE rowid NOT IN (SELECT rowid FROM memories_fts)",
-                [],
-            )
-            .map_err(|e| StorageError::Schema(format!("backfill fts: {e}")))?;
-        }
-        Ok(())
+                    [],
+                )
+                .map_err(|e| StorageError::Schema(format!("backfill fts: {e}")))?;
+            }
+            Ok(())
+        })
+        .await
     }
 }
 

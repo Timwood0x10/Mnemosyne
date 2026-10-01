@@ -600,7 +600,10 @@ mod tests {
         let mut engine = RetrievalEngine::new(embedder, store, RetrievalMode::Hybrid);
         // No registry yet → no external results.
         let before = engine.search("q", "t1", 5, None).await.expect("search");
-        assert!(before.iter().all(|r| !r.is_external));
+        assert!(
+            before.iter().all(|r| !r.is_external),
+            "a memory-only search must not mark results external"
+        );
 
         engine.set_external_registry(registry_with_db_hits(vec![
             crate::knowledge::adapter::ExternalHit {

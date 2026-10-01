@@ -95,9 +95,18 @@ fn stance_flip_produces_transition_and_keeps_intervals() {
         evolution.transitions[0].transition_type,
         TransitionType::StanceFlip
     );
-    assert_eq!(evolution.transitions[0].from_index, 0);
-    assert_eq!(evolution.transitions[0].to_index, 1);
-    assert_eq!(evolution.transitions[0].at, 2026);
+    assert_eq!(
+        evolution.transitions[0].from_index, 0,
+        "the transition must start at the first snapshot"
+    );
+    assert_eq!(
+        evolution.transitions[0].to_index, 1,
+        "the transition must end at the second snapshot"
+    );
+    assert_eq!(
+        evolution.transitions[0].at, 2026,
+        "the transition must record the later year"
+    );
 }
 
 /// Objective: Verify unrelated same-type topics do NOT produce a transition — no

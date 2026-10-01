@@ -74,13 +74,8 @@ aho-corasick = "1.1"
 # knowledge::pdf module can use it without a feature flag).
 flate2 = "1.1"
 
-# HNSW vector index for entity resolution
-instant-distance = "0.6"
-
-# Entity embedding for fuzzy resolution (ONNX local, no API key).
-# This dependency is intentionally opt-in because ONNX and tokenizers dominate
-# clean-build time and binary size.
-fastembed = { version = "4", optional = true }
+# PDF text extraction: FlateDecode stream decoding is provided by `flate2`
+# above; `pdf_oxide` supplies the PDF object parsing layer.
 pdf_oxide = "0.3.37"
 
 [dev-dependencies]
@@ -95,7 +90,6 @@ async-trait = "0.1"
 [features]
 default = ["remote-embed"]
 remote-embed = ["dep:reqwest"]
-local-embed = ["dep:fastembed"]
 
 # Fast edit-build-run cycles. Dependencies receive light optimization so debug
 # builds remain usable without sacrificing incremental compilation.

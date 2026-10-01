@@ -11,7 +11,6 @@
 //!
 use crate::compiler::entity::EntityDictionary;
 use crate::compiler::{CompileContext, Event, EventParticipant, Mention, Relation};
-use crate::entity_resolver::EntityResolver;
 
 /// Config for the story compiler's observation extraction.
 #[derive(Debug, Clone)]
@@ -76,16 +75,11 @@ impl Config {
 /// `sentences` is a list of `(text, start_offset, end_offset)` triples —
 /// absolute byte spans into the original document — so every Event can carry
 /// a re-locatable source span instead of a free-text description prefix.
-///
-/// When `resolver` is `Some`, it is used in addition to the dictionary for
-/// mention resolution — the resolver handles alias matching and fuzzy
-/// embedding lookup, while the dictionary provides the fallback.
 pub fn compile(
     ctx: &mut CompileContext,
     sentences: &[(&str, usize, usize)],
     dict: &EntityDictionary,
     config: &Config,
-    resolver: Option<&EntityResolver>,
 ) {
     let mut current_chapter = ctx.current_timestamp.unwrap_or(1);
 
@@ -100,7 +94,7 @@ pub fn compile(
     // Filter empty patterns first: AhoCorasick::new fails on empty strings
     // (reachable via user-editable LanguageProvider verb lists), not only on
     // an empty set. After filtering, degrade to no-verb-scan instead of
-    // panicking (mirrors EntityEngine's empty-matcher fallback).
+    // panicking.
     let all_verbs: Vec<&str> = config
         .strong_verbs
         .iter()
@@ -147,7 +141,7 @@ pub fn compile(
             ctx.current_timestamp = Some(current_chapter);
         }
 
-        let local_mentions = scan_mentions(text, dict, resolver, Some(&alias_index));
+        let local_mentions = scan_mentions(text, dict, Some(&alias_index));
         if local_mentions.is_empty() {
             continue;
         }
@@ -360,12 +354,8 @@ fn chinese_to_int(s: &str) -> Option<i32> {
     if total > 0 { Some(total) } else { None }
 }
 
-/// Scan a single sentence for entity mentions using the dictionary and resolver.
+/// Scan a single sentence for entity mentions using the dictionary.
 ///
-/// The dictionary provides the fallback. When `resolver` is `Some`, mentions
-/// that the resolver can match (via alias or embedding) are included even if
-/// they are not in the dictionary — this is how "刘皇叔" resolves to 刘备
-/// without being explicitly listed in the alias map.
 /// Pre-built entity alias index used by all sentences in a compile run.
 ///
 /// Building the Aho-Corasick automaton once per compile (instead of once
@@ -385,8 +375,8 @@ impl AliasIndex {
         // from the global Aho-Corasick automaton: a whole-text scan has no
         // safety context, so "浮云" would wrongly resolve to 赵云. Single
         // chars must only match via the context-checked shortname path
-        // (`EntityEngine::scan` / `ingest::extract::find_single_char_matches`),
-        // which requires punctuation-before + verb-after.
+        // (`ingest::extract::find_single_char_matches`), which requires
+        // punctuation-before + verb-after.
         let mut aliases: Vec<(String, String)> = dict
             .alias_to_canonical
             .iter()
@@ -426,7 +416,6 @@ impl AliasIndex {
 fn scan_mentions(
     text: &str,
     dict: &EntityDictionary,
-    resolver: Option<&EntityResolver>,
     alias_index: Option<&AliasIndex>,
 ) -> Vec<Mention> {
     let mut mentions = Vec::new();
@@ -499,66 +488,6 @@ fn scan_mentions(
     }
 
     mentions.sort_by_key(|a| a.offset.start);
-
-    // Resolver-based mention scan: try the resolver for mentions the
-    // dictionary didn't already find. This catches aliases like "刘皇叔"
-    // that aren't explicitly listed in the alias map.
-    if let Some(resolver) = resolver {
-        // Walk the text using char indices to avoid UTF-8 slicing issues.
-        let char_indices: Vec<(usize, char)> = text.char_indices().collect();
-        let mut ci = 0;
-        while ci < char_indices.len() {
-            let (byte_start, ch) = char_indices[ci];
-            // Skip positions already covered by a dictionary mention
-            if mentions
-                .iter()
-                .any(|m| byte_start >= m.offset.start && byte_start < m.offset.end)
-            {
-                ci += 1;
-                continue;
-            }
-            // Only consider CJK characters as potential mention starts
-            if !('\u{4e00}'..='\u{9fff}').contains(&ch) {
-                ci += 1;
-                continue;
-            }
-            // Try the resolver on spans of 1-4 additional chars
-            let mut matched = false;
-            for len in (2..=char_indices.len().saturating_sub(ci).min(6)).rev() {
-                let end_idx = ci + len - 1;
-                let candidate_byte_end =
-                    char_indices[end_idx].0 + char_indices[end_idx].1.len_utf8();
-                let candidate = &text[byte_start..candidate_byte_end];
-                // Check all chars in candidate are CJK
-                if !candidate
-                    .chars()
-                    .all(|c| ('\u{4e00}'..='\u{9fff}').contains(&c))
-                {
-                    continue;
-                }
-                let result = resolver.resolve(candidate);
-                if let Some(entity_id) = result.entity_id() {
-                    if !mentions.iter().any(|m| m.offset.start == byte_start) {
-                        mentions.push(Mention {
-                            sentence_id: 0,
-                            entity_id: Some(entity_id),
-                            surface: candidate.to_string(),
-                            canonical_name: candidate.to_string(),
-                            offset: byte_start..candidate_byte_end,
-                            confidence: 0.85,
-                        });
-                    }
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                ci += 1;
-            }
-        }
-    }
-
-    mentions.sort_by_key(|a| a.offset.start);
     mentions.dedup_by(|a, b| a.offset.start == b.offset.start);
     mentions
 }
@@ -613,10 +542,22 @@ mod tests {
     /// 4-digit numbers and non-year text yield None.
     #[test]
     fn in_book_year_detection() {
-        assert_eq!(parse_in_book_year("In 1805 Prince was silent."), Some(1805));
+        assert_eq!(
+            parse_in_book_year("In 1805 Prince was silent."),
+            Some(1805),
+            "an in-book year after In must be parsed"
+        );
         assert_eq!(parse_in_book_year("1807,"), Some(1807));
-        assert_eq!(parse_in_book_year("the winter of 1812."), Some(1812));
-        assert_eq!(parse_in_book_year("sentence 1805 continues"), Some(1805));
+        assert_eq!(
+            parse_in_book_year("the winter of 1812."),
+            Some(1812),
+            "a year after the winter of must be parsed"
+        );
+        assert_eq!(
+            parse_in_book_year("sentence 1805 continues"),
+            Some(1805),
+            "a year between words must still be parsed"
+        );
 
         // Embedded in a longer digit run → not a standalone year.
         assert_eq!(
@@ -635,8 +576,16 @@ mod tests {
         assert_eq!(parse_in_book_year("year 9999"), None, "9999 out of range");
 
         // No digits at all.
-        assert_eq!(parse_in_book_year("no year here"), None);
-        assert_eq!(parse_in_book_year(""), None);
+        assert_eq!(
+            parse_in_book_year("no year here"),
+            None,
+            "text without a year must yield None"
+        );
+        assert_eq!(
+            parse_in_book_year(""),
+            None,
+            "an empty string must yield None"
+        );
     }
 
     /// Objective: Verify chapter headings still parse (fallback timeline).
@@ -644,10 +593,26 @@ mod tests {
     /// text with "第X回" mid-sentence is rejected (start-anchored rule).
     #[test]
     fn chapter_number_fallback_still_works() {
-        assert_eq!(parse_chapter_number("第三回 桃园结义"), Some(3));
-        assert_eq!(parse_chapter_number("第120章"), Some(120));
-        assert_eq!(parse_chapter_number("他说：第三回合该如此"), None);
-        assert_eq!(parse_chapter_number("plain text"), None);
+        assert_eq!(
+            parse_chapter_number("第三回 桃园结义"),
+            Some(3),
+            "Chinese numerals in 第X回 must be parsed"
+        );
+        assert_eq!(
+            parse_chapter_number("第120章"),
+            Some(120),
+            "Arabic numerals in 第X章 must be parsed"
+        );
+        assert_eq!(
+            parse_chapter_number("他说：第三回合该如此"),
+            None,
+            "a 回 inside prose must not be a chapter number"
+        );
+        assert_eq!(
+            parse_chapter_number("plain text"),
+            None,
+            "text without a chapter marker must yield None"
+        );
     }
 
     fn make_dict() -> EntityDictionary {
@@ -694,12 +659,12 @@ mod tests {
     #[test]
     fn legacy_path_excludes_single_char() {
         let dict = make_dict();
-        let mentions = scan_mentions("浮云蔽日", &dict, None, None);
+        let mentions = scan_mentions("浮云蔽日", &dict, None);
         assert!(
             mentions.is_empty(),
             "bare 云 must not match in the legacy path, got {mentions:?}"
         );
-        let mentions = scan_mentions("曹操观云", &dict, None, None);
+        let mentions = scan_mentions("曹操观云", &dict, None);
         assert!(
             mentions.iter().any(|m| m.canonical_name == "曹操"),
             "multi-char alias still found in legacy path"
@@ -713,7 +678,7 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        compile(&mut ctx, &[("赵云救阿斗。", 0, 12)], &dict, &config, None);
+        compile(&mut ctx, &[("赵云救阿斗。", 0, 12)], &dict, &config);
         assert!(!ctx.events.is_empty(), "should create at least one event");
         let has_action = ctx.events.iter().any(|e| e.event_type == "action");
         assert!(has_action, "should have action-type event");
@@ -732,7 +697,7 @@ mod tests {
         let sentences = [(text, 0usize, text.len())];
 
         let mut zh_ctx = CompileContext::default();
-        compile(&mut zh_ctx, &sentences, &dict, &Config::default(), None);
+        compile(&mut zh_ctx, &sentences, &dict, &Config::default());
         assert!(
             !zh_ctx.events.iter().any(|e| e.event_type == "action"),
             "zh-only default must not match English verbs, got {:?}",
@@ -740,7 +705,7 @@ mod tests {
         );
 
         let mut bi_ctx = CompileContext::default();
-        compile(&mut bi_ctx, &sentences, &dict, &Config::bilingual(), None);
+        compile(&mut bi_ctx, &sentences, &dict, &Config::bilingual());
         let ev = bi_ctx
             .events
             .iter()
@@ -776,7 +741,7 @@ mod tests {
         let mut ctx = CompileContext::default();
         let dict = make_dict();
         let config = Config::default();
-        compile(&mut ctx, &[("刘备曰：关羽", 0, 15)], &dict, &config, None);
+        compile(&mut ctx, &[("刘备曰：关羽", 0, 15)], &dict, &config);
         let has_dialogue = ctx.events.iter().any(|e| e.event_type == "dialogue");
         assert!(has_dialogue, "dialog sentence should create dialogue event");
     }
@@ -791,7 +756,7 @@ mod tests {
         let sentences = ["刘备救关羽。", "刘备救张飞。"];
         let refs: Vec<(&str, usize, usize)> =
             sentences.iter().map(|s| (*s, 0usize, s.len())).collect();
-        compile(&mut ctx, &refs, &dict, &config, None);
+        compile(&mut ctx, &refs, &dict, &config);
         let has_rel = ctx.relations.iter().any(|r| {
             (r.source == "刘备" && r.target == "关羽") || (r.source == "关羽" && r.target == "刘备")
         });
@@ -833,7 +798,7 @@ mod tests {
         };
         let mut ctx = CompileContext::default();
         let text = "刘备杀害了他";
-        compile(&mut ctx, &[(text, 0, text.len())], &dict, &config, None);
+        compile(&mut ctx, &[(text, 0, text.len())], &dict, &config);
         let ev = ctx
             .events
             .iter()
@@ -865,7 +830,7 @@ mod tests {
         };
         let mut ctx = CompileContext::default();
         let text = "刘备杀了他";
-        compile(&mut ctx, &[(text, 0, text.len())], &dict, &config, None);
+        compile(&mut ctx, &[(text, 0, text.len())], &dict, &config);
         let ev = ctx
             .events
             .iter()

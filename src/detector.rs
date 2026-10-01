@@ -207,8 +207,14 @@ mod tests {
     #[test]
     fn question_detector_trailing_mark() {
         let det = QuestionDetector::new();
-        assert!(det.is_question("what is going on?"));
-        assert!(det.is_question("really?"));
+        assert!(
+            det.is_question("what is going on?"),
+            "a question mark marks a question"
+        );
+        assert!(
+            det.is_question("really?"),
+            "a bare question mark marks a question"
+        );
     }
 
     /// Objective: Verify QuestionDetector handles empty input safely.
@@ -216,8 +222,8 @@ mod tests {
     #[test]
     fn question_detector_empty_input() {
         let det = QuestionDetector::new();
-        assert!(!det.is_question(""));
-        assert!(!det.is_question("   "));
+        assert!(!det.is_question(""), "an empty message is not a question");
+        assert!(!det.is_question("   "), "a blank message is not a question");
     }
 
     /// Objective: Verify QuestionDetector recognizes interrogative openers.
@@ -225,9 +231,18 @@ mod tests {
     #[test]
     fn question_detector_interrogative_opener() {
         let det = QuestionDetector::new();
-        assert!(det.is_question("how do I solve this"));
-        assert!(det.is_question("why does it fail"));
-        assert!(!det.is_question("the value is 42"));
+        assert!(
+            det.is_question("how do I solve this"),
+            "a how-question without punctuation is a question"
+        );
+        assert!(
+            det.is_question("why does it fail"),
+            "a why-question without punctuation is a question"
+        );
+        assert!(
+            !det.is_question("the value is 42"),
+            "a statement is not a question"
+        );
     }
 
     /// Objective: Verify QuestionDetector wrapper over Message works identically.
@@ -236,6 +251,9 @@ mod tests {
     fn question_detector_message_wrapper() {
         let det = QuestionDetector::new();
         let msg = Message::new("user", "what is the capital of France?");
-        assert!(det.is_question_message(&msg));
+        assert!(
+            det.is_question_message(&msg),
+            "a message carrying a question is detected"
+        );
     }
 }

@@ -164,10 +164,17 @@ mod tests {
         let provider =
             ExternalFileProvider::from_json("test", json).expect("external lexicon must parse");
 
-        assert_eq!(provider.name(), "test");
+        assert_eq!(
+            provider.name(),
+            "test",
+            "the provider must report its own name"
+        );
         let kill = provider.lookup("KILL"); // case-insensitive
         assert_eq!(kill.len(), 1, "case-insensitive lookup for KILL");
-        assert_eq!(kill[0].word, "kill");
+        assert_eq!(
+            kill[0].word, "kill",
+            "the external lexeme must round-trip its word"
+        );
         assert_eq!(
             kill[0].synonyms,
             vec!["murder".to_string(), "slay".to_string()],
@@ -187,7 +194,11 @@ mod tests {
             {"word": "run", "lemma": "run", "part_of_speech": "verb"}
         ]"#;
         let provider = ExternalFileProvider::from_json("arr", json).expect("bare array must parse");
-        assert_eq!(provider.lookup("run").len(), 1);
+        assert_eq!(
+            provider.lookup("run").len(),
+            1,
+            "one lexeme must be registered for run"
+        );
     }
 
     /// Objective: Verify prefix candidate suggestions.

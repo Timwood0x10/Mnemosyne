@@ -724,7 +724,10 @@ mod tests {
             .await
             .expect("inspect")
             .expect("赵云 found");
-        assert_eq!(zhaoyun.object.name, "赵云");
+        assert_eq!(
+            zhaoyun.object.name, "赵云",
+            "the migrated object must keep its name"
+        );
         assert!(
             !zhaoyun.events.is_empty(),
             "赵云 should have a participated_in event"
@@ -799,9 +802,9 @@ mod tests {
         let text = "刘备与关羽及赵云";
         let names = vec!["赵云".to_string(), "刘备".to_string()];
         let m = first_match(text, &names).expect("match found");
-        assert_eq!(m.0, "刘备");
-        assert_eq!(m.1, 0);
-        assert_eq!(m.2, "刘备".len());
+        assert_eq!(m.0, "刘备", "the migrated mention must name its object");
+        assert_eq!(m.1, 0, "the mention must keep its start offset");
+        assert_eq!(m.2, "刘备".len(), "the mention span must cover the name");
 
         assert!(first_match("空文本", &["不存在".to_string()]).is_none());
     }
@@ -858,7 +861,10 @@ mod tests {
             .await
             .expect("query")
             .expect("赵云 migrated and committed");
-        assert_eq!(zhaoyun.name, "赵云");
+        assert_eq!(
+            zhaoyun.name, "赵云",
+            "the inspected entity must keep its name"
+        );
     }
 
     /// Objective: Verify migration does NOT create evidence with a dangling

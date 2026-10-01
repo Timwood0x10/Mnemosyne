@@ -278,8 +278,14 @@ mod tests {
     #[test]
     fn participants_score_monotonic() {
         assert_eq!(participants_score(0), 0.0, "no participants scores zero");
-        assert!(participants_score(8) > participants_score(3));
-        assert!(participants_score(3) > participants_score(1));
+        assert!(
+            participants_score(8) > participants_score(3),
+            "more participants must score higher"
+        );
+        assert!(
+            participants_score(3) > participants_score(1),
+            "three participants must outscore one"
+        );
     }
 
     /// Objective: Verify the combined score stays in [0,1] and rewards rich
@@ -290,7 +296,10 @@ mod tests {
         let rich = importance_score(10, 8, false);
         let poor = importance_score(0, 0, false);
         assert!(rich > poor, "rich event must outscore a poor one");
-        assert!((0.0..=1.0).contains(&rich));
+        assert!(
+            (0.0..=1.0).contains(&rich),
+            "the participant score must stay within zero and one"
+        );
         assert_eq!(poor, 0.0, "all-zero signals score exactly zero");
     }
 

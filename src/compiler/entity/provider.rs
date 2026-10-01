@@ -1,5 +1,6 @@
 //! Entity provider trait. Each provider returns a list of known entities
-//! and their aliases. Multiple providers are merged by [`EntityRegistry`].
+//! and their aliases, which the compiler merges into an
+//! [`EntityDictionary`](super::EntityDictionary).
 
 use std::collections::HashMap;
 
@@ -15,8 +16,9 @@ pub struct EntityEntry {
 
 /// A provider of entity definitions.
 ///
-/// Implementations should be stateless or cheap to construct —
-/// [`EntityRegistry`](super::EntityRegistry) holds the merged dictionary.
+/// Implementations should be stateless or cheap to construct: the compiler
+/// calls [`entries`](EntityProvider::entries) once per compile and merges the
+/// results into an [`EntityDictionary`](super::EntityDictionary).
 pub trait EntityProvider: Send + Sync {
     fn name(&self) -> &str;
     fn entries(&self) -> Vec<EntityEntry>;

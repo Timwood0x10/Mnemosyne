@@ -253,9 +253,21 @@ mod tests {
             .as_array()
             .expect("intervals array");
         assert_eq!(intervals.len(), 3, "all three historical states preserved");
-        assert_eq!(intervals[0]["from"], json!(2024));
-        assert_eq!(intervals[1]["from"], json!(2025));
-        assert_eq!(intervals[2]["from"], json!(2026));
+        assert_eq!(
+            intervals[0]["from"],
+            json!(2024),
+            "the first interval must start in 2024"
+        );
+        assert_eq!(
+            intervals[1]["from"],
+            json!(2025),
+            "the second interval must start in 2025"
+        );
+        assert_eq!(
+            intervals[2]["from"],
+            json!(2026),
+            "the third interval must start in 2026"
+        );
         assert_eq!(
             intervals[0]["to"],
             json!(2025),
@@ -476,7 +488,10 @@ mod tests {
     #[test]
     fn state_timeline_definition_declares_contract() {
         let definition = state_timeline_definition();
-        assert_eq!(definition.name, "state_timeline");
+        assert_eq!(
+            definition.name, "state_timeline",
+            "the tool must be named state_timeline"
+        );
         let required: Vec<&str> = definition
             .input_schema
             .get("required")
@@ -494,6 +509,10 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert_eq!(enum_values, state_timeline_dimensions());
+        assert_eq!(
+            enum_values,
+            state_timeline_dimensions(),
+            "the enum must list every documented dimension"
+        );
     }
 }

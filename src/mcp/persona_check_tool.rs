@@ -306,14 +306,22 @@ mod tests {
         assert_eq!(payload["clean"], json!(false), "must not be clean");
         let conflicts = payload["conflicts"].as_array().expect("conflicts array");
         assert_eq!(conflicts.len(), 1, "one conflict reported");
-        assert_eq!(conflicts[0]["fact_type"], json!("Preference"));
+        assert_eq!(
+            conflicts[0]["fact_type"],
+            json!("Preference"),
+            "the conflict must be typed as a Preference"
+        );
         assert!(
             conflicts[0]["draft_signal"]["negated"]
                 .as_bool()
                 .unwrap_or(false),
             "draft signal flagged as negated"
         );
-        assert_eq!(payload["drift"].as_array().expect("drift array").len(), 0);
+        assert_eq!(
+            payload["drift"].as_array().expect("drift array").len(),
+            0,
+            "a matching draft must report no drift"
+        );
     }
 
     /// Objective: Verify a draft that repeats an established persona fact is
@@ -338,8 +346,16 @@ mod tests {
             .expect("call succeeds");
         let payload = parse_payload(&result);
         assert_eq!(payload["clean"], json!(true), "repeat must be clean");
-        assert_eq!(payload["conflicts"].as_array().expect("conflicts").len(), 0);
-        assert_eq!(payload["drift"].as_array().expect("drift").len(), 0);
+        assert_eq!(
+            payload["conflicts"].as_array().expect("conflicts").len(),
+            0,
+            "a compatible draft must report no conflict"
+        );
+        assert_eq!(
+            payload["drift"].as_array().expect("drift").len(),
+            0,
+            "a compatible draft must report no drift"
+        );
     }
 
     /// Objective: Verify a persona statement with no anchor in the stored
@@ -371,7 +387,11 @@ mod tests {
         );
         let drift = payload["drift"].as_array().expect("drift array");
         assert_eq!(drift.len(), 1, "one drift reported");
-        assert_eq!(drift[0]["fact_type"], json!("Identity"));
+        assert_eq!(
+            drift[0]["fact_type"],
+            json!("Identity"),
+            "the drift must be typed as an Identity fact"
+        );
     }
 
     /// Objective: Verify a draft with no persona signal yields a clean result.
@@ -395,7 +415,11 @@ mod tests {
             .expect("call succeeds");
         let payload = parse_payload(&result);
         assert_eq!(payload["clean"], json!(true), "no signal → clean");
-        assert_eq!(payload["stats"]["total_signals"], json!(0));
+        assert_eq!(
+            payload["stats"]["total_signals"],
+            json!(0),
+            "an unrecognised draft must yield zero signals"
+        );
     }
 
     /// Objective: Verify the tool rejects a call missing the required
@@ -413,7 +437,10 @@ mod tests {
             matches!(err, Error::InvalidInput(_)),
             "expected InvalidInput, got {err:?}"
         );
-        assert!(err.to_string().contains("draft"));
+        assert!(
+            err.to_string().contains("draft"),
+            "a missing draft must be named in the error"
+        );
     }
 
     /// Objective: Verify the tool schema requires `agent_id` and `draft`.
@@ -429,6 +456,9 @@ mod tests {
         let names: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
         assert!(names.contains(&"agent_id"), "schema requires agent_id");
         assert!(names.contains(&"draft"), "schema requires draft");
-        assert_eq!(def.name, "persona_check");
+        assert_eq!(
+            def.name, "persona_check",
+            "the tool must be named persona_check"
+        );
     }
 }

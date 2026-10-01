@@ -8,17 +8,26 @@ use mnemosyne::observation_compiler::{DefaultRule, compile_observations};
 
 const TEXT: &str = "刘备字玄德，涿郡人也。关羽字云长，张飞字翼德。桃园三结义，刘备、关羽、张飞结为兄弟。曹操字孟德，治世之能臣。吕布杀丁原。";
 
+/// Objective: Verify the full Observation → Fact → Snapshot → Context pipeline
+/// end to end on a 三国演义 excerpt.
+/// Invariants: at least two observations are extracted, at least two facts are
+/// generated, and at least two facts are persisted to the store.
 #[tokio::test]
 async fn full_pipeline() {
-    println!("========== Cognition Engine E2E ==========\n");
+    // Diagnostics go through `tracing` (the crate's tests must not print);
+    // run with `--nocapture` to see them.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
+    tracing::info!("========== Cognition Engine E2E ==========\n");
 
     // 1. Language Frontend
     let lang = ChineseLanguageProvider::new();
-    println!("Frontend: {}", lang.name());
+    tracing::info!("Frontend: {}", lang.name());
 
     // 2. Sentence splitting (by Chinese period)
     let sentences: Vec<&str> = TEXT.split('。').filter(|s| !s.is_empty()).collect();
-    println!("Sentences: {}\n", sentences.len());
+    tracing::info!("Sentences: {}\n", sentences.len());
 
     // 3. Observation Compiler
     let verbs = vec![
@@ -60,9 +69,9 @@ async fn full_pipeline() {
     };
 
     let observations = compile_observations(&sentences, &verbs, &resolve_mention);
-    println!("Observations: {}", observations.len());
+    tracing::info!("Observations: {}", observations.len());
     for obs in &observations {
-        println!("  {} -> {}", obs.subject.canonical_name, obs.action);
+        tracing::info!("  {} -> {}", obs.subject.canonical_name, obs.action);
     }
 
     // 4. Rule → Facts
@@ -72,9 +81,9 @@ async fn full_pipeline() {
         let mut result = rule.apply(obs);
         facts.append(&mut result);
     }
-    println!("\nFacts: {}", facts.len());
+    tracing::info!("\nFacts: {}", facts.len());
     for fact in &facts {
-        println!("  {:?} [{}] {}", fact.fact_type, fact.time, fact.payload);
+        tracing::info!("  {:?} [{}] {}", fact.fact_type, fact.time, fact.payload);
     }
 
     // 5. FactStore
@@ -83,16 +92,16 @@ async fn full_pipeline() {
     let stored = store
         .insert_batch(&facts)
         .expect("The cognition fact batch should persist atomically");
-    println!("\nStored: {} facts", stored);
+    tracing::info!("\nStored: {} facts", stored);
 
     // 6. Verify stored facts
     for entity_id in &[10001i64, 10004, 10005] {
         let efacts = store
             .get_facts(*entity_id)
             .expect("Stored entity facts should remain readable");
-        println!("Entity {}: {} facts", entity_id, efacts.len());
+        tracing::info!("Entity {}: {} facts", entity_id, efacts.len());
         for f in &efacts {
-            println!("  {:?} [{}]", f.fact_type, f.time);
+            tracing::info!("  {:?} [{}]", f.fact_type, f.time);
         }
     }
 
@@ -104,7 +113,7 @@ async fn full_pipeline() {
         .expect("Liu Bei facts should remain readable for snapshot reconstruction");
     if !liubei_facts.is_empty() {
         let state = state_engine.aggregate(&liubei_facts);
-        println!("\n刘备 State: {:?}", state);
+        tracing::info!("\n刘备 State: {:?}", state);
 
         let snapshot = build_snapshot(
             10001,
@@ -113,7 +122,7 @@ async fn full_pipeline() {
             liubei_facts.clone(),
             &state_engine,
         );
-        println!(
+        tracing::info!(
             "\n刘备 Snapshot (markdown):\n{}",
             snapshot.format_markdown()
         );
@@ -121,7 +130,7 @@ async fn full_pipeline() {
 
     // 8. Cognitive Context
     let ctx = build_context(None, vec![], context_facts, (None, None));
-    println!(
+    tracing::info!(
         "\nContext entities: {:?}",
         ctx.primary_entity.as_ref().map(|e| &e.entity_name)
     );
@@ -134,5 +143,5 @@ async fn full_pipeline() {
     assert!(facts.len() >= 2, "should generate at least 2 facts");
     assert!(stored >= 2, "should store at least 2 facts");
 
-    println!("\n========== E2E COMPLETE ==========");
+    tracing::info!("\n========== E2E COMPLETE ==========");
 }

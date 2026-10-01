@@ -302,11 +302,21 @@ mod tests {
             .get_decision(id)
             .expect("read decision")
             .expect("decision exists");
-        assert_eq!(read.subject, 7);
-        assert_eq!(read.verb, "promise");
-        assert_eq!(read.object, "陪用户明天去医院");
+        assert_eq!(read.subject, 7, "the stored decision must keep its subject");
+        assert_eq!(
+            read.verb, "promise",
+            "the stored decision must keep its verb"
+        );
+        assert_eq!(
+            read.object, "陪用户明天去医院",
+            "the stored decision must keep its object"
+        );
         assert_eq!(read.because, vec![17, 23], "supporting facts preserved");
-        assert_eq!(read.status, crate::decision::DecisionStatus::Open);
+        assert_eq!(
+            read.status,
+            crate::decision::DecisionStatus::Open,
+            "a new decision must start open"
+        );
         assert_eq!(read.outcome, None, "outcome starts empty");
     }
 
@@ -329,7 +339,10 @@ mod tests {
         let decisions = store.get_decisions(7).expect("list decisions");
         assert_eq!(decisions.len(), 2, "only subject 7 decisions returned");
         assert_eq!(decisions[0].object, "新决定", "newest first");
-        assert_eq!(decisions[1].object, "旧承诺");
+        assert_eq!(
+            decisions[1].object, "旧承诺",
+            "the older decision must be listed second"
+        );
         assert!(
             store.get_decision(9999).expect("read").is_none(),
             "unknown id reads as None"
@@ -356,7 +369,11 @@ mod tests {
             closed.outcome,
             Some(crate::decision::DecisionOutcome::Fulfilled)
         );
-        assert_eq!(closed.status, crate::decision::DecisionStatus::Closed);
+        assert_eq!(
+            closed.status,
+            crate::decision::DecisionStatus::Closed,
+            "the close must be persisted"
+        );
 
         let again = store
             .set_decision_outcome(id, crate::decision::DecisionOutcome::Violated)
@@ -396,7 +413,10 @@ mod tests {
 
         let hits = store.search_decisions(7, "医院").expect("search decisions");
         assert_eq!(hits.len(), 1, "one matching decision in subject 7");
-        assert_eq!(hits[0].object, "陪用户明天去医院");
+        assert_eq!(
+            hits[0].object, "陪用户明天去医院",
+            "the search hit must echo the decision object"
+        );
 
         let no_hits = store
             .search_decisions(7, "不存在的关键词")
@@ -623,11 +643,17 @@ mod tests {
 
         let percent = store.search_decisions(7, "%").expect("search percent");
         assert_eq!(percent.len(), 1, "a `%` keyword must match literally");
-        assert_eq!(percent[0].object, "进度 100% 完成");
+        assert_eq!(
+            percent[0].object, "进度 100% 完成",
+            "an escaped percent must match literally"
+        );
 
         let underscore = store.search_decisions(7, "_").expect("search underscore");
         assert_eq!(underscore.len(), 1, "an `_` keyword must match literally");
-        assert_eq!(underscore[0].object, "文件 a_b 已归档");
+        assert_eq!(
+            underscore[0].object, "文件 a_b 已归档",
+            "an escaped underscore must match literally"
+        );
 
         let backslash = store.search_decisions(7, "\\").expect("search backslash");
         assert_eq!(
@@ -635,6 +661,9 @@ mod tests {
             1,
             "a backslash keyword must match literally"
         );
-        assert_eq!(backslash[0].object, "路径 C:\\data 已备份");
+        assert_eq!(
+            backslash[0].object, "路径 C:\\data 已备份",
+            "an escaped backslash must match literally"
+        );
     }
 }

@@ -130,10 +130,10 @@ mod tests {
     #[test]
     fn document_from_text_preserves_metadata() {
         let d = Document::from_text("测试文档", "test", "这是正文内容。");
-        assert_eq!(d.title, "测试文档");
-        assert_eq!(d.doc_type, "test");
-        assert_eq!(d.text, "这是正文内容。");
-        assert_eq!(d.source, "raw");
+        assert_eq!(d.title, "测试文档", "the JSON title must be read");
+        assert_eq!(d.doc_type, "test", "the JSON doc_type must be read");
+        assert_eq!(d.text, "这是正文内容。", "the JSON body must be read");
+        assert_eq!(d.source, "raw", "the source label must be preserved");
     }
 
     /// Objective: Verify that `from_messages` builds a document with concatenated text.
@@ -146,10 +146,22 @@ mod tests {
             Message::new("assistant", "天气很好。"),
         ];
         let d = Document::from_messages(&msgs);
-        assert_eq!(d.doc_type, "conversation");
-        assert!(d.text.contains("user: 今天天气怎么样？"));
-        assert!(d.text.contains("assistant: 天气很好。"));
-        assert_eq!(d.title, "今天天气怎么样？");
+        assert_eq!(
+            d.doc_type, "conversation",
+            "a conversation array maps to doc_type conversation"
+        );
+        assert!(
+            d.text.contains("user: 今天天气怎么样？"),
+            "the user turn must be prefixed and preserved"
+        );
+        assert!(
+            d.text.contains("assistant: 天气很好。"),
+            "the assistant turn must be prefixed and preserved"
+        );
+        assert_eq!(
+            d.title, "今天天气怎么样？",
+            "the first user turn supplies the title"
+        );
     }
 
     /// Objective: Verify behaviour with an empty message list.
@@ -157,8 +169,14 @@ mod tests {
     #[test]
     fn document_from_messages_empty() {
         let d = Document::from_messages(&[]);
-        assert_eq!(d.title, "conversation");
-        assert!(d.text.is_empty());
+        assert_eq!(
+            d.title, "conversation",
+            "an untitled conversation falls back to the literal title"
+        );
+        assert!(
+            d.text.is_empty(),
+            "an empty conversation body yields empty text"
+        );
     }
 
     /// Objective: Verify that `from_file` on a non-existent file returns an error.

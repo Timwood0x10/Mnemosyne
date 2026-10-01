@@ -166,8 +166,8 @@ async fn document_and_chapter_round_trip() {
         .await
         .expect("get chapter")
         .expect("chapter exists");
-    assert_eq!(got.id, cid);
-    assert_eq!(got.chapter_no, 3);
+    assert_eq!(got.id, cid, "the chapter must round-trip its id");
+    assert_eq!(got.chapter_no, 3, "the chapter must round-trip its number");
 }
 
 /// Objective: Verify `search_evidence` exposes the source byte span at the
@@ -409,7 +409,11 @@ async fn create_document_is_idempotent_by_identity() {
         Some("罗贯中"),
         "a caller without an author must not erase the recorded one"
     );
-    assert_eq!(stored.doc_type.as_deref(), Some("novel"));
+    assert_eq!(
+        stored.doc_type.as_deref(),
+        Some("novel"),
+        "the document type must round-trip"
+    );
 
     let other_source = Document {
         source: "corpus/sanguo_v2.txt".into(),

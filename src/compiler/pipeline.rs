@@ -441,13 +441,7 @@ pub async fn compile_source(
                 // bilingual() = zh defaults + en verb tables: the pipeline
                 // accepts any caller text, and `Config::default()` alone is
                 // Chinese-only (English prose yielded zero action events).
-                extract::compile(
-                    &mut ctx,
-                    &sent_spans,
-                    &dict,
-                    &extract::Config::bilingual(),
-                    None,
-                );
+                extract::compile(&mut ctx, &sent_spans, &dict, &extract::Config::bilingual());
                 for ev in &ctx.events {
                     let event_id = store
                         .upsert_world_event(NewWorldEvent {

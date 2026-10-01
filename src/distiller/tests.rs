@@ -301,9 +301,9 @@ async fn metrics_snapshot() {
     let d = PipelineDistiller::new(DistillationConfig::default(), embedder, store);
     let _ = d.distill("c1", &[], "t1", "u1").await;
     let snap = d.metrics();
-    assert_eq!(snap.attempts, 1);
-    assert_eq!(snap.success, 1);
-    assert_eq!(snap.failures, 0);
+    assert_eq!(snap.attempts, 1, "the snapshot must count one attempt");
+    assert_eq!(snap.success, 1, "the snapshot must count one success");
+    assert_eq!(snap.failures, 0, "the snapshot must count no failure");
 }
 
 /// Objective: Verify low min_importance lets through noise as memories.

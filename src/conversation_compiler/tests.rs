@@ -87,6 +87,8 @@ fn marker_files_partial_load_keeps_valid_file() {
     assert_eq!(pairs.len(), 1, "no extra markers from the missing file");
 }
 
+/// Objective: Verify a session that states facts records them as knowledge.
+/// Invariants: the session knowledge list is non-empty.
 #[test]
 fn compile_extracts_knowledge() {
     let compiler = ConversationCompiler::new();
@@ -95,18 +97,28 @@ fn compile_extracts_knowledge() {
         Message::new("assistant", "因为lancedb太重"),
     ];
     let r = compiler.compile("t1", &msgs);
-    assert!(!r.knowledge.is_empty());
+    assert!(!r.knowledge.is_empty(), "the session must record knowledge");
 }
 
+/// Objective: Verify the session tracks the files named in the conversation.
+/// Invariants: both compiler.rs and prompt.rs are tracked.
 #[test]
 fn compile_tracks_files() {
     let compiler = ConversationCompiler::new();
     let msgs = vec![Message::new("user", "修改compiler.rs 和 prompt.rs")];
     let r = compiler.compile("t1", &msgs);
-    assert!(r.session.current_files.contains(&"compiler.rs".to_string()));
-    assert!(r.session.current_files.contains(&"prompt.rs".to_string()));
+    assert!(
+        r.session.current_files.contains(&"compiler.rs".to_string()),
+        "the session must track compiler.rs"
+    );
+    assert!(
+        r.session.current_files.contains(&"prompt.rs".to_string()),
+        "the session must track prompt.rs"
+    );
 }
 
+/// Objective: Verify the first user message becomes the session goal.
+/// Invariants: the goal mentions prompt.
 #[test]
 fn compile_first_user_msg_is_goal() {
     let compiler = ConversationCompiler::new();
@@ -115,9 +127,14 @@ fn compile_first_user_msg_is_goal() {
         Message::new("assistant", "好的"),
     ];
     let r = compiler.compile("t1", &msgs);
-    assert!(r.session.current_goal.contains("prompt"));
+    assert!(
+        r.session.current_goal.contains("prompt"),
+        "the session goal must mention prompt"
+    );
 }
 
+/// Objective: Verify an unanswered complaint becomes an open problem.
+/// Invariants: an open problem records the performance complaint.
 #[test]
 fn compile_unanswered_is_open_problem() {
     let compiler = ConversationCompiler::new();
@@ -127,7 +144,10 @@ fn compile_unanswered_is_open_problem() {
         Message::new("user", "性能太差"),
     ];
     let r = compiler.compile("t1", &msgs);
-    assert!(r.session.open_problems.iter().any(|p| p.contains("性能")));
+    assert!(
+        r.session.open_problems.iter().any(|p| p.contains("性能")),
+        "the open problem must mention the performance complaint"
+    );
 }
 
 /// Objective: Verify ordinary emotion/preference messages now produce
@@ -267,6 +287,8 @@ fn same_action_markers_dedup_to_single_observation() {
     );
 }
 
+/// Objective: Verify a completed action is recorded as a decision.
+/// Invariants: a decision is extracted and it mentions lancedb.
 #[test]
 fn compile_detects_decision_via_done() {
     let compiler = ConversationCompiler::new();
@@ -275,10 +297,18 @@ fn compile_detects_decision_via_done() {
         Message::new("assistant", "Done，已经替换了"),
     ];
     let r = compiler.compile("t1", &msgs);
-    assert!(!r.decisions.is_empty());
-    assert!(r.decisions[0].decision.contains("lancedb"));
+    assert!(
+        !r.decisions.is_empty(),
+        "at least one decision must be extracted"
+    );
+    assert!(
+        r.decisions[0].decision.contains("lancedb"),
+        "the decision must mention lancedb"
+    );
 }
 
+/// Objective: Verify a repeated statement is de-duplicated in the session knowledge.
+/// Invariants: the knowledge list holds one entry per distinct fact.
 #[test]
 fn compile_knowledge_deduped() {
     let compiler = ConversationCompiler::new();

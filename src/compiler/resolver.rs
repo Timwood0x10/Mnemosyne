@@ -122,7 +122,10 @@ mod tests {
     fn punctuation_noise_handled() {
         let idx = NameIndex::build(&["徐庶".into()]);
         let (name, sim) = idx.best_match("徐庶，").unwrap();
-        assert_eq!(name, "徐庶");
+        assert_eq!(
+            name, "徐庶",
+            "a trailing comma must not break the bigram match"
+        );
         assert!(sim > 0.4, "similarity should be high despite comma");
     }
 

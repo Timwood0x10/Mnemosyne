@@ -63,6 +63,8 @@ pub fn build_alias_map_for_novel(novel: &str) -> HashMap<&'static str, &'static 
 mod tests {
     use super::*;
 
+    /// Objective: Verify every catalogued novel ships a non-empty cast.
+    /// Invariants: each entry of `NOVELS` returns at least one character.
     #[test]
     fn all_novels_have_characters() {
         for novel in NOVELS {
@@ -71,6 +73,8 @@ mod tests {
         }
     }
 
+    /// Objective: Verify a character's names and aliases are unique within one novel.
+    /// Invariants: no duplicate name or alias is inserted for a novel.
     #[test]
     fn all_names_are_unique_within_novel() {
         for novel in NOVELS {
@@ -90,6 +94,8 @@ mod tests {
         }
     }
 
+    /// Objective: Verify the alias map resolves every registered name back to its canonical name.
+    /// Invariants: both the canonical name and its aliases resolve.
     #[test]
     fn alias_map_resolves_all_names() {
         // Alias maps are per-novel: courtesy names like 公明 belong to both

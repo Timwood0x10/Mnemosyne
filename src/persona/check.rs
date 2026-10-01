@@ -677,7 +677,10 @@ mod tests {
             1,
             "two or more shared bigrams must be a topic match"
         );
-        assert_eq!(result.conflicts[0].stored_fact_id, 2);
+        assert_eq!(
+            result.conflicts[0].stored_fact_id, 2,
+            "the conflict must point at the stored fact id"
+        );
     }
 
     /// Objective: Verify unrelated same-type facts are never a conflict (the
@@ -814,6 +817,9 @@ mod tests {
     /// Invariants: the constant is non-empty.
     #[test]
     fn prototype_path_constant_defined() {
-        assert!(!config::PERSONA_PROTOTYPES_PATH.is_empty());
+        assert!(
+            !config::PERSONA_PROTOTYPES_PATH.is_empty(),
+            "the prototype path must be configured"
+        );
     }
 }

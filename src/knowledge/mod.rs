@@ -413,11 +413,30 @@ mod tests {
     /// Invariants: observed/derived parse back; unknown strings error.
     #[test]
     fn origin_round_trip_and_reject() {
-        assert_eq!(Origin::Observed.as_str(), "observed");
-        assert_eq!(Origin::Derived.as_str(), "derived");
-        assert_eq!("observed".parse::<Origin>().unwrap(), Origin::Observed);
-        assert_eq!("Derived".parse::<Origin>().unwrap(), Origin::Derived);
-        assert!("guessed".parse::<Origin>().is_err());
+        assert_eq!(
+            Origin::Observed.as_str(),
+            "observed",
+            "Observed must serialise to observed"
+        );
+        assert_eq!(
+            Origin::Derived.as_str(),
+            "derived",
+            "Derived must serialise to derived"
+        );
+        assert_eq!(
+            "observed".parse::<Origin>().unwrap(),
+            Origin::Observed,
+            "the lowercase tag must parse back to Observed"
+        );
+        assert_eq!(
+            "Derived".parse::<Origin>().unwrap(),
+            Origin::Derived,
+            "a capitalised tag must still parse to Derived"
+        );
+        assert!(
+            "guessed".parse::<Origin>().is_err(),
+            "an unknown origin tag must fail to parse"
+        );
     }
 
     /// Objective: Verify EvidenceSourceType round-trip.
@@ -432,6 +451,9 @@ mod tests {
             "EDGE".parse::<EvidenceSourceType>().unwrap(),
             EvidenceSourceType::Edge
         );
-        assert!("sentence".parse::<EvidenceSourceType>().is_err());
+        assert!(
+            "sentence".parse::<EvidenceSourceType>().is_err(),
+            "an unknown source type must fail to parse"
+        );
     }
 }

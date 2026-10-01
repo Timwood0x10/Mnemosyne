@@ -44,10 +44,6 @@ const RESOURCE_FILES: &[(&str, &str)] = &[
     ),
     ("config/faction_map.json", "faction map for corpus ingest"),
     (
-        "config/anchor_seeds.json",
-        "anchor seeds for value extraction",
-    ),
-    (
         "config/persona_prototypes.json",
         "prototypes used by the persona_check tool",
     ),
@@ -79,7 +75,6 @@ const JSON_RESOURCES: &[&str] = &[
     "config/relation_rules.json",
     "config/name_validation.json",
     "config/faction_map.json",
-    "config/anchor_seeds.json",
     "config/persona_prototypes.json",
     "config/persona_cards.json",
     "config/decay_config.json",

@@ -85,16 +85,25 @@ async fn inspect_entity_returns_full_picture() {
         .await
         .expect("inspect")
         .expect("entity found");
-    assert_eq!(result.object.name, "赵云");
+    assert_eq!(
+        result.object.name, "赵云",
+        "the view must resolve the entity"
+    );
     assert_eq!(result.relations.len(), 1, "one person↔person relation");
     assert_eq!(result.events.len(), 1, "one participated_in event");
-    assert_eq!(result.events[0].name, "单骑救主");
+    assert_eq!(
+        result.events[0].name, "单骑救主",
+        "the view must list the entity event"
+    );
     assert_eq!(
         result.evidences.len(),
         1,
         "evidence deduped across object+edge links"
     );
-    assert!(result.evidences.iter().any(|e| e.content.contains("阿斗")));
+    assert!(
+        result.evidences.iter().any(|e| e.content.contains("阿斗")),
+        "the evidence must mention the event text"
+    );
 }
 
 /// Objective: Verify `inspect_entity` returns None for an unknown entity
@@ -262,12 +271,22 @@ async fn timeline_orders_by_chapter() {
         .entity_timeline("吕布", Some("三国演义"))
         .await
         .expect("timeline");
-    assert_eq!(tl.len(), 2);
+    assert_eq!(tl.len(), 2, "two timeline entries are expected");
     assert_eq!(tl[0].chapter, Some(1), "serves@ch1 must come first");
-    assert_eq!(tl[0].predicate, "serves");
-    assert_eq!(tl[1].chapter, Some(3));
-    assert_eq!(tl[1].predicate, "kills");
-    assert_eq!(tl[0].target, "丁原");
+    assert_eq!(
+        tl[0].predicate, "serves",
+        "the first entry must be the serves relation"
+    );
+    assert_eq!(
+        tl[1].chapter,
+        Some(3),
+        "the second entry must record its chapter"
+    );
+    assert_eq!(
+        tl[1].predicate, "kills",
+        "the second entry must be the kills relation"
+    );
+    assert_eq!(tl[0].target, "丁原", "the serves relation must target 丁原");
 }
 
 /// Objective: Verify `relation_graph` BFS returns the root + 1-hop
@@ -305,8 +324,14 @@ async fn relation_graph_bfs_dedupes() {
         .expect("root found");
     assert_eq!(g.nodes.len(), 3, "root + 2 brothers");
     let names: HashSet<String> = g.nodes.iter().map(|n| n.name.clone()).collect();
-    assert!(names.contains("关羽"));
-    assert!(names.contains("张飞"));
+    assert!(
+        names.contains("关羽"),
+        "关羽 must appear in the relation graph"
+    );
+    assert!(
+        names.contains("张飞"),
+        "张飞 must appear in the relation graph"
+    );
     assert_eq!(g.edges.len(), 2, "two 结义 edges");
 }
 
@@ -420,10 +445,13 @@ async fn search_evidence_matches_content() {
         .search_evidence("阿斗", Some("三国演义"), 10)
         .await
         .expect("search");
-    assert_eq!(hits.len(), 1);
-    assert_eq!(hits[0].chapter, 41);
-    assert_eq!(hits[0].doc, "三国演义");
-    assert_eq!(hits[0].confidence, 1.0);
+    assert_eq!(hits.len(), 1, "exactly one evidence hit is expected");
+    assert_eq!(hits[0].chapter, 41, "the hit must record its chapter");
+    assert_eq!(hits[0].doc, "三国演义", "the hit must record its document");
+    assert_eq!(
+        hits[0].confidence, 1.0,
+        "a verbatim hit must score full confidence"
+    );
 }
 
 /// Objective: Verify a query containing a literal backslash (`C:\`) is
@@ -456,12 +484,18 @@ async fn search_evidence_escapes_backslash() {
         .await
         .expect("search with backslash");
     assert_eq!(hits.len(), 1, "backslash query must be exact");
-    assert_eq!(hits[0].text, "路径 C:\\data 在此");
+    assert_eq!(
+        hits[0].text, "路径 C:\\data 在此",
+        "an escaped backslash must match literally"
+    );
     // A bare `%` query must NOT act as a wildcard matching everything.
     let pct = store
         .search_evidence("%", Some("日志"), 10)
         .await
         .expect("search with percent");
     assert_eq!(pct.len(), 1, "`%` must be literal, not a wildcard");
-    assert_eq!(pct[0].text, "百分之五十 50%");
+    assert_eq!(
+        pct[0].text, "百分之五十 50%",
+        "an escaped percent must match literally"
+    );
 }

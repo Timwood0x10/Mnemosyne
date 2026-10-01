@@ -182,9 +182,15 @@ mod tests {
         );
         let docs = load_source(&source).expect("load");
         assert_eq!(docs.len(), 1, "one conversation → one document");
-        assert_eq!(docs[0].doc_type, "dialog");
-        assert_eq!(docs[0].title, "会话A");
-        assert_eq!(docs[0].source, "export.json");
+        assert_eq!(
+            docs[0].doc_type, "dialog",
+            "a dialog export must map to doc_type dialog"
+        );
+        assert_eq!(docs[0].title, "会话A", "the dialog title must be read");
+        assert_eq!(
+            docs[0].source, "export.json",
+            "the dialog source must be the export file"
+        );
         assert!(
             docs[0].text.contains("user: 我想要落地这个方案"),
             "user line with role prefix expected, got: {:?}",
@@ -242,8 +248,11 @@ mod tests {
         std::fs::write(&path, "测试文档内容\n").expect("write temp");
         let source = FileSource::new(&path);
         let docs = source.load().expect("load");
-        assert_eq!(docs.len(), 1);
-        assert!(docs[0].text.contains("测试文档内容"));
+        assert_eq!(docs.len(), 1, "the note source must load one document");
+        assert!(
+            docs[0].text.contains("测试文档内容"),
+            "the pasted body must be preserved"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -273,9 +282,15 @@ mod tests {
         );
         let docs = load_source(&source).expect("load");
         assert_eq!(docs.len(), 1, "one text blob → one document");
-        assert_eq!(docs[0].doc_type, "notes");
-        assert_eq!(docs[0].title, "我的记忆");
-        assert_eq!(docs[0].source, "paste");
+        assert_eq!(
+            docs[0].doc_type, "notes",
+            "a note source must map to doc_type notes"
+        );
+        assert_eq!(docs[0].title, "我的记忆", "the note title must be read");
+        assert_eq!(
+            docs[0].source, "paste",
+            "the pasted note must record its source"
+        );
         assert_eq!(
             docs[0].text, "我偏爱简洁的架构设计，反对过度抽象。",
             "trimmed"

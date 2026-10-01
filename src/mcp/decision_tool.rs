@@ -374,8 +374,16 @@ mod tests {
             .await
             .expect("trace succeeds");
         let body = parse_payload(&result);
-        assert_eq!(body["verb"], json!("decline"));
-        assert_eq!(body["status"], json!("open"));
+        assert_eq!(
+            body["verb"],
+            json!("decline"),
+            "the decision verb must be recorded"
+        );
+        assert_eq!(
+            body["status"],
+            json!("open"),
+            "a new decision must start open"
+        );
         assert!(body["outcome"].is_null(), "open decision has no outcome");
         let because = body["because"].as_array().expect("because array");
         assert_eq!(because.len(), 2, "both supporting ids reported");
@@ -457,7 +465,11 @@ mod tests {
         let body = parse_payload(&result);
         let hits = body["decisions"].as_array().expect("decisions array");
         assert_eq!(hits.len(), 1, "one match in the subject");
-        assert_eq!(hits[0]["object"], json!("陪用户明天去医院"));
+        assert_eq!(
+            hits[0]["object"],
+            json!("陪用户明天去医院"),
+            "the search hit must echo the decision object"
+        );
 
         let result = tool
             .call(&json!({"subject": subject, "keyword": "", "limit": 1}))
@@ -475,7 +487,10 @@ mod tests {
     #[test]
     fn decision_definitions_declare_contracts() {
         let trace = decision_trace_definition();
-        assert_eq!(trace.name, "decision_trace");
+        assert_eq!(
+            trace.name, "decision_trace",
+            "the tool must be named decision_trace"
+        );
         let trace_required: Vec<&str> = trace
             .input_schema
             .get("required")
@@ -484,10 +499,16 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert!(trace_required.contains(&"decision_id"));
+        assert!(
+            trace_required.contains(&"decision_id"),
+            "decision_trace must require decision_id"
+        );
 
         let search = decision_search_definition();
-        assert_eq!(search.name, "decision_search");
+        assert_eq!(
+            search.name, "decision_search",
+            "the tool must be named decision_search"
+        );
         let search_required: Vec<&str> = search
             .input_schema
             .get("required")
@@ -496,6 +517,9 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert!(search_required.contains(&"subject"));
+        assert!(
+            search_required.contains(&"subject"),
+            "decision_search must require subject"
+        );
     }
 }

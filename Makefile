@@ -24,10 +24,9 @@ check:
 
 # Run tests (requires cargo-nextest: cargo install cargo-nextest).
 #
-# Uses the default feature set (not --all-features): the local-embed ONNX
-# stack (fastembed) and the HTTP server integration tests are intentionally
-# excluded from the fast inner loop. The HTTP/SSE tests are marked #[ignore]
-# and can be run explicitly with:
+# Uses the default feature set (not --all-features): the HTTP/SSE integration
+# tests are marked #[ignore] and excluded from the fast inner loop. Run them
+# explicitly with:
 #   cargo nextest run --run-ignored all
 test:
 	$(CARGO_CACHE) cargo nextest run

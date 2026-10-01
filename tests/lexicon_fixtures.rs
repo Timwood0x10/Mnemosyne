@@ -37,14 +37,6 @@ fn chinese_fixture_compiles_expected_entities_and_events() {
         dict.register_discovered(&entity.name, &aliases);
     }
     profile::register_discovered_entities(&mut dict, &context);
-    let alias_pairs: Vec<(String, i64)> = dict
-        .alias_to_canonical
-        .iter()
-        .filter_map(|(a, c)| dict.name_to_id.get(c).map(|id| (a.clone(), *id)))
-        .collect();
-    let resolver = mnemosyne::entity_resolver::EntityResolver::new(
-        mnemosyne::entity_resolver::AliasResolver::from_pairs(alias_pairs),
-    );
 
     let chunks = chunk::plan(text, chunk::Config::default());
     let sentences = sentence::split_all(&chunks);
@@ -54,7 +46,7 @@ fn chinese_fixture_compiles_expected_entities_and_events() {
         .map(|s| (s.text.as_str(), s.start_offset, s.end_offset))
         .collect();
     let config = extract::Config::from_language(&lang);
-    extract::compile(&mut context, &sent_spans, &dict, &config, Some(&resolver));
+    extract::compile(&mut context, &sent_spans, &dict, &config);
 
     let names: Vec<&str> = context.entities.iter().map(|e| e.name.as_str()).collect();
     for expected in ["刘备", "关羽", "张飞", "曹操"] {

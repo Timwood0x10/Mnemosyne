@@ -6,111 +6,131 @@ use async_trait::async_trait;
 #[async_trait]
 impl ExperienceRepository for SQLiteVecStore {
     async fn create(&self, exp: &Experience) -> Result<()> {
-        let mut conn = self.conn.lock().await;
-        // Single transaction: `memories` and `vec_memories` must land (or
-        // neither). Without it a vec insert failure left the memory row
-        // persisted while the caller got an error — a retry then hit the PK
-        // conflict on `memories.id`.
-        let tx = conn.transaction()?;
-        insert_experience(&tx, exp)?;
-        tx.commit()?;
-        Ok(())
+        let exp = exp.clone();
+        self.with_conn(move |conn| {
+            // Single transaction: `memories` and `vec_memories` must land (or
+            // neither). Without it a vec insert failure left the memory row
+            // persisted while the caller got an error — a retry then hit the PK
+            // conflict on `memories.id`.
+            let tx = conn.transaction()?;
+            insert_experience(&tx, &exp)?;
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn get(&self, id: &str) -> Result<Option<Experience>> {
-        let conn = self.conn.lock().await;
-        // Expiry gate: an expired row must not be readable (it used to be
-        // returned forever and even served as a `memory_compile` dedup
-        // baseline). `expires_at` is an RFC3339 TEXT column, so a lexical
-        // comparison against an RFC3339 `now` is chronologically correct; the
-        // boundary matches `Experience::is_expired` (`expires_at <= now`).
-        let now = Utc::now();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM memories WHERE id = ?1 AND (expires_at = '' OR expires_at > ?2)",
-        )?;
-        let mut rows = stmt.query_map(params![id, now.to_rfc3339()], row_to_experience)?;
-        match rows.next() {
-            Some(Ok(exp)) if !exp.is_expired(now) => Ok(Some(exp)),
-            Some(Ok(_)) => Ok(None),
-            Some(Err(e)) => Err(StorageError::Sqlite(format!("get row: {e}")).into()),
-            None => Ok(None),
-        }
+        let id = id.to_owned();
+        self.with_conn(move |conn| {
+            // Expiry gate: an expired row must not be readable (it used to be
+            // returned forever and even served as a `memory_compile` dedup
+            // baseline). `expires_at` is an RFC3339 TEXT column, so a lexical
+            // comparison against an RFC3339 `now` is chronologically correct;
+            // the boundary matches `Experience::is_expired` (`expires_at <=
+            // now`).
+            let now = Utc::now();
+            let mut stmt = conn.prepare(
+                "SELECT * FROM memories WHERE id = ?1 AND (expires_at = '' OR expires_at > ?2)",
+            )?;
+            let mut rows = stmt.query_map(params![id, now.to_rfc3339()], row_to_experience)?;
+            match rows.next() {
+                Some(Ok(exp)) if !exp.is_expired(now) => Ok(Some(exp)),
+                Some(Ok(_)) => Ok(None),
+                Some(Err(e)) => Err(StorageError::Sqlite(format!("get row: {e}")).into()),
+                None => Ok(None),
+            }
+        })
+        .await
     }
 
     async fn update(&self, exp: &Experience) -> Result<()> {
-        let mut conn = self.conn.lock().await;
-        let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
-        // Single transaction: the memories UPDATE and the vec_memories
-        // upsert must land together, mirroring `create`.
-        let tx = conn.transaction()?;
-        let affected = tx.execute(
-            "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12, vector=?13, expires_at=?14 WHERE id=?1",
-            params![
-                exp.id, exp.tenant_id, exp.user_id,
-                memory_type_to_str(exp.memory_type),
-                exp.problem, exp.solution, exp.content,
-                exp.confidence, exp.source,
-                extraction_method_to_str(exp.extraction_method),
-                exp.created_at.to_rfc3339(),
-                serde_json::to_string(&exp.metadata).unwrap_or_default(),
-                vector_json,
-                exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
-            ],
-        )?;
-        if affected == 0 {
-            return Err(StorageError::NotFound(exp.id.clone()).into());
-        }
-        if !exp.vector.is_empty() {
-            let vec_json = serde_json::to_string(&exp.vector)
-                .map_err(|e| StorageError::Schema(format!("serialize vector: {e}")))?;
-            tx.execute(
-                "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
-                params![exp.id, vec_json],
+        let exp = exp.clone();
+        let dim = self.dim;
+        self.with_conn(move |conn| {
+            let vector_json =
+                serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
+            // Single transaction: the memories UPDATE and the vec_memories
+            // upsert must land together, mirroring `create`.
+            let tx = conn.transaction()?;
+            let affected = tx.execute(
+                "UPDATE memories SET tenant_id=?2, user_id=?3, memory_type=?4, problem=?5, solution=?6, content=?7, confidence=?8, source=?9, extraction_method=?10, created_at=?11, metadata=?12, vector=?13, expires_at=?14 WHERE id=?1",
+                params![
+                    exp.id, exp.tenant_id, exp.user_id,
+                    memory_type_to_str(exp.memory_type),
+                    exp.problem, exp.solution, exp.content,
+                    exp.confidence, exp.source,
+                    extraction_method_to_str(exp.extraction_method),
+                    exp.created_at.to_rfc3339(),
+                    serde_json::to_string(&exp.metadata).unwrap_or_default(),
+                    vector_json,
+                    exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
+                ],
             )?;
-        } else if self.dim > 0 {
-            // A cleared vector must also drop the stale index row, otherwise
-            // the old embedding keeps matching `search_by_vector` forever
-            // (phantom near-neighbor with an empty `vector` field).
-            tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![exp.id])?;
-        }
-        tx.commit()?;
-        Ok(())
+            if affected == 0 {
+                return Err(StorageError::NotFound(exp.id.clone()).into());
+            }
+            if !exp.vector.is_empty() {
+                let vec_json = serde_json::to_string(&exp.vector)
+                    .map_err(|e| StorageError::Schema(format!("serialize vector: {e}")))?;
+                tx.execute(
+                    "INSERT OR REPLACE INTO vec_memories (id, vector) VALUES (?1, ?2)",
+                    params![exp.id, vec_json],
+                )?;
+            } else if dim > 0 {
+                // A cleared vector must also drop the stale index row, else the
+                // old embedding keeps matching `search_by_vector` forever
+                // (phantom near-neighbor with an empty `vector` field).
+                tx.execute("DELETE FROM vec_memories WHERE id = ?1", params![exp.id])?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        let mut conn = self.conn.lock().await;
-        // Single transaction + dim guard: keyword-only mode (dim == 0) never
-        // creates `vec_memories`, so the vec delete must be skipped there —
-        // and the two-table delete must land together or not at all.
-        let tx = conn.transaction()?;
-        if delete_experience(&tx, id, self.dim)? == 0 {
-            // Dropping the transaction rolls it back.
-            return Err(StorageError::NotFound(id.to_string()).into());
-        }
-        tx.commit()?;
-        Ok(())
+        let id = id.to_owned();
+        let dim = self.dim;
+        self.with_conn(move |conn| {
+            // Single transaction + dim guard: keyword-only mode (dim == 0) never
+            // creates `vec_memories`, so the vec delete must be skipped there —
+            // and the two-table delete must land together or not at all.
+            let tx = conn.transaction()?;
+            if delete_experience(&tx, &id, dim)? == 0 {
+                // Dropping the transaction rolls it back.
+                return Err(StorageError::NotFound(id.clone()).into());
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn delete_batch(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
         }
-        let mut conn = self.conn.lock().await;
-        // Single transaction: either every id is removed from both tables or
-        // none is — a mid-batch failure must not leave a half-deleted state
-        // while reporting success (the previous per-row `let _ =` swallowed
-        // errors and could silently skip rows).
-        //
-        // `vec_memories` only exists when dim > 0; the default keyword-only
-        // config (dim == 0) created FTS tables instead, so the unconditional
-        // vec delete failed with "no such table" and capacity eviction
-        // (phase_enforce_capacity) could never run.
-        let tx = conn.transaction()?;
-        for id in ids {
-            delete_experience(&tx, id, self.dim)?;
-        }
-        tx.commit()?;
-        Ok(())
+        let ids = ids.to_vec();
+        let dim = self.dim;
+        self.with_conn(move |conn| {
+            // Single transaction: either every id is removed from both tables or
+            // none is — a mid-batch failure must not leave a half-deleted state
+            // while reporting success (the previous per-row `let _ =` swallowed
+            // errors and could silently skip rows).
+            //
+            // `vec_memories` only exists when dim > 0; the default keyword-only
+            // config (dim == 0) created FTS tables instead, so the unconditional
+            // vec delete failed with "no such table" and capacity eviction
+            // (phase_enforce_capacity) could never run.
+            let tx = conn.transaction()?;
+            for id in &ids {
+                delete_experience(&tx, id, dim)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn replace_batch(
@@ -118,46 +138,56 @@ impl ExperienceRepository for SQLiteVecStore {
         superseded: &[String],
         replacements: &[Experience],
     ) -> Result<()> {
-        let mut conn = self.conn.lock().await;
-        // ONE transaction for the whole replacement: the superseded rows only
-        // disappear once the replacements are stored. Split in two (the
-        // pipeline used to delete in its conflict phase and insert later), a
-        // failure in between lost the old memory and stored nothing.
-        let tx = conn.transaction()?;
-        for id in superseded {
-            delete_experience(&tx, id, self.dim)?;
-        }
-        for exp in replacements {
-            insert_experience(&tx, exp)?;
-        }
-        tx.commit()?;
-        Ok(())
+        let superseded = superseded.to_vec();
+        let replacements = replacements.to_vec();
+        let dim = self.dim;
+        self.with_conn(move |conn| {
+            // ONE transaction for the whole replacement: the superseded rows
+            // only disappear once the replacements are stored. Split in two
+            // (the pipeline used to delete in its conflict phase and insert
+            // later), a failure in between lost the old memory and stored
+            // nothing.
+            let tx = conn.transaction()?;
+            for id in &superseded {
+                delete_experience(&tx, id, dim)?;
+            }
+            for exp in &replacements {
+                insert_experience(&tx, exp)?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
     }
 
     async fn forget_expired(&self, tenant_id: &str, now: DateTime<Utc>) -> Result<usize> {
+        let tenant_id = tenant_id.to_owned();
         let now_str = now.to_rfc3339();
-        let mut conn = self.conn.lock().await;
-        // One transaction for select+delete: the previous loop ran in
-        // autocommit, so a failed vec delete (keyword-only mode, no
-        // `vec_memories`) left the memories row already gone and returned Err
-        // — a partial purge that never reported a success count.
-        let tx = conn.transaction()?;
-        let ids: Vec<String> = {
-            let mut stmt = tx.prepare(
-                "SELECT id FROM memories WHERE tenant_id = ?1 AND expires_at <> '' AND expires_at <= ?2",
-            )?;
-            let rows =
-                stmt.query_map(params![tenant_id, now_str], |row| row.get::<_, String>(0))?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let mut count = 0usize;
-        for id in &ids {
-            if delete_experience(&tx, id, self.dim)? > 0 {
-                count += 1;
+        let dim = self.dim;
+        self.with_conn(move |conn| {
+            // One transaction for select+delete: the previous loop ran in
+            // autocommit, so a failed vec delete (keyword-only mode, no
+            // `vec_memories`) left the memories row already gone and returned
+            // Err — a partial purge that never reported a success count.
+            let tx = conn.transaction()?;
+            let ids: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id FROM memories WHERE tenant_id = ?1 AND expires_at <> '' AND expires_at <= ?2",
+                )?;
+                let rows =
+                    stmt.query_map(params![tenant_id, now_str], |row| row.get::<_, String>(0))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            let mut count = 0usize;
+            for id in &ids {
+                if delete_experience(&tx, id, dim)? > 0 {
+                    count += 1;
+                }
             }
-        }
-        tx.commit()?;
-        Ok(count)
+            tx.commit()?;
+            Ok(count)
+        })
+        .await
     }
 
     async fn search_by_vector(
@@ -176,44 +206,50 @@ impl ExperienceRepository for SQLiteVecStore {
             }
             .into());
         }
-        let conn = self.conn.lock().await;
-        let vec_json = serde_json::to_string(&query_embedding)
-            .map_err(|e| StorageError::Schema(format!("serialize query: {e}")))?;
+        let query_embedding = query_embedding.to_vec();
+        let tenant_id = tenant_id.to_owned();
+        self.with_conn(move |conn| {
+            let vec_json = serde_json::to_string(&query_embedding)
+                .map_err(|e| StorageError::Schema(format!("serialize query: {e}")))?;
 
-        // Over-fetch before the tenant filter: kNN runs over the WHOLE table,
-        // so a small tenant whose rows rank outside the global top-k would
-        // otherwise get zero results even though matching rows exist. Pull up
-        // to `limit * 16` (capped) nearest neighbors, then filter by tenant
-        // and truncate to `limit`.
-        // `LIMIT -1` and `k = -1` mean "no limit" in SQLite, so clamp before
-        // the cast; an oversized request must not become an unbounded scan.
-        let limit = sql_limit(limit);
-        let overfetch = limit.saturating_mul(16).max(limit);
-        // Expiry gate (see `get`): filter out rows whose `expires_at` is at or
-        // before `now` so vector search never resurfaces expired memories.
-        let now = Utc::now();
-        let sql = "SELECT m.*, distance FROM memories m
-                   JOIN (SELECT id, distance FROM vec_memories
-                         WHERE vector MATCH ?1 AND k = ?2) v ON m.id = v.id
-                   WHERE m.tenant_id = ?3
-                     AND (m.expires_at = '' OR m.expires_at > ?5)
-                   ORDER BY v.distance ASC
-                   LIMIT ?4";
-        let mut stmt = conn.prepare(sql)?;
-        let rows = stmt.query_map(
-            params![vec_json, overfetch, tenant_id, limit, now.to_rfc3339()],
-            row_to_experience,
-        )?;
+            // Over-fetch before the tenant filter: kNN runs over the WHOLE
+            // table, so a small tenant whose rows rank outside the global top-k
+            // would otherwise get zero results even though matching rows exist.
+            // Pull up to `limit * 16` (capped) nearest neighbors, then filter by
+            // tenant and truncate to `limit`.
+            //
+            // `LIMIT -1` and `k = -1` mean "no limit" in SQLite, so clamp before
+            // the cast; an oversized request must not become an unbounded scan.
+            let limit = sql_limit(limit);
+            let overfetch = limit.saturating_mul(16).max(limit);
+            // Expiry gate (see `get`): filter out rows whose `expires_at` is at
+            // or before `now` so vector search never resurfaces expired
+            // memories.
+            let now = Utc::now();
+            let sql = "SELECT m.*, distance FROM memories m
+                       JOIN (SELECT id, distance FROM vec_memories
+                             WHERE vector MATCH ?1 AND k = ?2) v ON m.id = v.id
+                       WHERE m.tenant_id = ?3
+                         AND (m.expires_at = '' OR m.expires_at > ?5)
+                       ORDER BY v.distance ASC
+                       LIMIT ?4";
+            let mut stmt = conn.prepare(sql)?;
+            let rows = stmt.query_map(
+                params![vec_json, overfetch, tenant_id, limit, now.to_rfc3339()],
+                row_to_experience,
+            )?;
 
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        // `is_expired` is the authoritative boundary; the SQL predicate is the
-        // index-friendly prefilter and the two must agree.
-        results.retain(|e| !e.is_expired(now));
-        // SQL already ordered by distance ASC and limited to `limit`.
-        Ok(results)
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            // `is_expired` is the authoritative boundary; the SQL predicate is
+            // the index-friendly prefilter and the two must agree.
+            results.retain(|e| !e.is_expired(now));
+            // SQL already ordered by distance ASC and limited to `limit`.
+            Ok(results)
+        })
+        .await
     }
 
     async fn search_by_keyword(
@@ -225,129 +261,137 @@ impl ExperienceRepository for SQLiteVecStore {
     ) -> Result<Vec<Experience>> {
         if self.dim == 0 {
             // FTS5 path with LIKE fallback for CJK.
-            let conn = self.conn.lock().await;
-            // `LIMIT -1` means "no limit"; clamp before the `i64` cast.
-            let limit = sql_limit(limit);
-            // Escape the backslash FIRST: escaping `%`/`_` before it would
-            // leave a lone `\` in the pattern to combine with the following
-            // escape, so a query ending in `\` silently turned the trailing
-            // `%` wildcard into a literal percent sign.
-            let like = like_pattern(query);
-            let now = Utc::now();
-            let now_str = now.to_rfc3339();
-            let has_type_filter = memory_type.is_some();
-            let sql = if has_type_filter {
-                "SELECT m.* FROM memories m \
-                 WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
-                        OR m.content LIKE ?3 ESCAPE '\\' \
-                        OR m.problem LIKE ?3 ESCAPE '\\' \
-                        OR m.solution LIKE ?3 ESCAPE '\\') \
-                   AND m.tenant_id = ?2 AND m.memory_type = ?4 \
-                   AND (m.expires_at = '' OR m.expires_at > ?6) \
-                 ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
-                 LIMIT ?5"
-            } else {
-                "SELECT m.* FROM memories m \
-                 WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
-                        OR m.content LIKE ?3 ESCAPE '\\' \
-                        OR m.problem LIKE ?3 ESCAPE '\\' \
-                        OR m.solution LIKE ?3 ESCAPE '\\') \
-                   AND m.tenant_id = ?2 \
-                   AND (m.expires_at = '' OR m.expires_at > ?5) \
-                 ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
-                 LIMIT ?4"
-            };
-            let mut stmt = conn.prepare(sql)?;
-            let rows: Vec<rusqlite::Result<Experience>> = match memory_type {
-                Some(mt) => {
-                    let r = stmt.query_map(
-                        params![
-                            fts5_query(query),
-                            tenant_id,
-                            like,
-                            memory_type_to_str(mt),
-                            limit,
-                            now_str
-                        ],
-                        row_to_experience,
-                    )?;
-                    r.collect()
-                }
-                None => {
-                    let r = stmt.query_map(
-                        params![fts5_query(query), tenant_id, like, limit, now_str],
-                        row_to_experience,
-                    )?;
-                    r.collect()
-                }
-            };
-            let mut results = Vec::new();
-            for row in rows {
-                results.push(row?);
-            }
-            results.retain(|e| !e.is_expired(now));
-            Ok(results)
-        } else {
-            // vec0 path: full-scan + Rust BM25
-            use crate::config::{WEIGHT_IMPORTANCE_ONLY, WEIGHT_KEYWORD_ONLY};
-            use crate::retrieval::{bm25_score, tokenize};
-            let candidates = if let Some(mt) = memory_type {
-                self.get_by_memory_type(tenant_id, mt).await?
-            } else {
-                let mut all = Vec::new();
-                for mt in [
-                    MemoryType::Knowledge,
-                    MemoryType::Preference,
-                    MemoryType::Skill,
-                    MemoryType::Experience,
-                    MemoryType::Interaction,
-                    MemoryType::Profile,
-                ] {
-                    let exps = self.get_by_memory_type(tenant_id, mt).await?;
-                    all.extend(exps);
-                }
-                all
-            };
-            let query_terms = tokenize(query);
-            let mut scored: Vec<(f64, Experience)> = Vec::new();
-            for exp in candidates {
-                let kw = bm25_score(&query_terms, &exp.content);
-                if kw <= 0.0 {
-                    continue;
-                }
-                scored.push((
-                    kw * WEIGHT_KEYWORD_ONLY + exp.confidence * WEIGHT_IMPORTANCE_ONLY,
-                    exp,
-                ));
-            }
-            scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-            scored.truncate(limit);
-            Ok(scored.into_iter().map(|(_, e)| e).collect())
+            let query = query.to_owned();
+            let tenant_id = tenant_id.to_owned();
+            return self
+                .with_conn(move |conn| {
+                    // `LIMIT -1` means "no limit"; clamp before the `i64` cast.
+                    let limit = sql_limit(limit);
+                    // Escape the backslash FIRST: escaping `%`/`_` before it
+                    // would leave a lone `\` in the pattern to combine with the
+                    // following escape, so a query ending in `\` silently turned
+                    // the trailing `%` wildcard into a literal percent sign.
+                    let like = like_pattern(&query);
+                    let now = Utc::now();
+                    let now_str = now.to_rfc3339();
+                    let has_type_filter = memory_type.is_some();
+                    let sql = if has_type_filter {
+                        "SELECT m.* FROM memories m \
+                         WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
+                                OR m.content LIKE ?3 ESCAPE '\\' \
+                                OR m.problem LIKE ?3 ESCAPE '\\' \
+                                OR m.solution LIKE ?3 ESCAPE '\\') \
+                           AND m.tenant_id = ?2 AND m.memory_type = ?4 \
+                           AND (m.expires_at = '' OR m.expires_at > ?6) \
+                         ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
+                         LIMIT ?5"
+                    } else {
+                        "SELECT m.* FROM memories m \
+                         WHERE (m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) \
+                                OR m.content LIKE ?3 ESCAPE '\\' \
+                                OR m.problem LIKE ?3 ESCAPE '\\' \
+                                OR m.solution LIKE ?3 ESCAPE '\\') \
+                           AND m.tenant_id = ?2 \
+                           AND (m.expires_at = '' OR m.expires_at > ?5) \
+                         ORDER BY CASE WHEN m.rowid IN (SELECT rowid FROM memories_fts WHERE memories_fts MATCH ?1) THEN 0 ELSE 1 END \
+                         LIMIT ?4"
+                    };
+                    let mut stmt = conn.prepare(sql)?;
+                    let rows: Vec<rusqlite::Result<Experience>> = match memory_type {
+                        Some(mt) => {
+                            let r = stmt.query_map(
+                                params![
+                                    fts5_query(&query),
+                                    tenant_id,
+                                    like,
+                                    memory_type_to_str(mt),
+                                    limit,
+                                    now_str
+                                ],
+                                row_to_experience,
+                            )?;
+                            r.collect()
+                        }
+                        None => {
+                            let r = stmt.query_map(
+                                params![fts5_query(&query), tenant_id, like, limit, now_str],
+                                row_to_experience,
+                            )?;
+                            r.collect()
+                        }
+                    };
+                    let mut results = Vec::new();
+                    for row in rows {
+                        results.push(row?);
+                    }
+                    results.retain(|e| !e.is_expired(now));
+                    Ok(results)
+                })
+                .await;
         }
+
+        // vec0 path: full-scan + Rust BM25
+        use crate::config::{WEIGHT_IMPORTANCE_ONLY, WEIGHT_KEYWORD_ONLY};
+        use crate::retrieval::{bm25_score, tokenize};
+        let candidates = if let Some(mt) = memory_type {
+            self.get_by_memory_type(tenant_id, mt).await?
+        } else {
+            let mut all = Vec::new();
+            for mt in [
+                MemoryType::Knowledge,
+                MemoryType::Preference,
+                MemoryType::Skill,
+                MemoryType::Experience,
+                MemoryType::Interaction,
+                MemoryType::Profile,
+            ] {
+                let exps = self.get_by_memory_type(tenant_id, mt).await?;
+                all.extend(exps);
+            }
+            all
+        };
+        let query_terms = tokenize(query);
+        let mut scored: Vec<(f64, Experience)> = Vec::new();
+        for exp in candidates {
+            let kw = bm25_score(&query_terms, &exp.content);
+            if kw <= 0.0 {
+                continue;
+            }
+            scored.push((
+                kw * WEIGHT_KEYWORD_ONLY + exp.confidence * WEIGHT_IMPORTANCE_ONLY,
+                exp,
+            ));
+        }
+        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        scored.truncate(limit);
+        Ok(scored.into_iter().map(|(_, e)| e).collect())
     }
 
     async fn get_vector(&self, id: &str) -> Result<Vec<f32>> {
         if self.dim == 0 {
             return Ok(Vec::new());
         }
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare("SELECT vector FROM memories WHERE id = ?1")?;
-        let mut rows = stmt.query_map(params![id], |row| {
-            let s: String = row.get(0)?;
-            Ok(s)
-        })?;
-        match rows.next() {
-            Some(Ok(s)) => {
-                if s.is_empty() {
-                    Ok(Vec::new())
-                } else {
-                    serde_json::from_str(&s)
-                        .map_err(|e| StorageError::Schema(format!("parse vector: {e}")).into())
+        let id = id.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare("SELECT vector FROM memories WHERE id = ?1")?;
+            let mut rows = stmt.query_map(params![id], |row| {
+                let s: String = row.get(0)?;
+                Ok(s)
+            })?;
+            match rows.next() {
+                Some(Ok(s)) => {
+                    if s.is_empty() {
+                        Ok(Vec::new())
+                    } else {
+                        serde_json::from_str(&s)
+                            .map_err(|e| StorageError::Schema(format!("parse vector: {e}")).into())
+                    }
                 }
+                Some(Err(e)) => Err(StorageError::Sqlite(format!("get_vector: {e}")).into()),
+                None => Ok(Vec::new()),
             }
-            Some(Err(e)) => Err(StorageError::Sqlite(format!("get_vector: {e}")).into()),
-            None => Ok(Vec::new()),
-        }
+        })
+        .await
     }
 
     async fn get_by_memory_type(
@@ -355,60 +399,72 @@ impl ExperienceRepository for SQLiteVecStore {
         tenant_id: &str,
         memory_type: MemoryType,
     ) -> Result<Vec<Experience>> {
-        let conn = self.conn.lock().await;
-        // Expiry gate (see `get`): expired rows must not be listed by type —
-        // otherwise they leak even into keyword mode's BM25 candidate set,
-        // which funnels through this method.
-        let now = Utc::now();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM memories WHERE tenant_id = ?1 AND memory_type = ?2 \
-             AND (expires_at = '' OR expires_at > ?3) ORDER BY created_at DESC",
-        )?;
-        let rows = stmt.query_map(
-            params![tenant_id, memory_type_to_str(memory_type), now.to_rfc3339()],
-            row_to_experience,
-        )?;
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        results.retain(|e| !e.is_expired(now));
-        Ok(results)
+        let tenant_id = tenant_id.to_owned();
+        self.with_conn(move |conn| {
+            // Expiry gate (see `get`): expired rows must not be listed by type —
+            // otherwise they leak even into keyword mode's BM25 candidate set,
+            // which funnels through this method.
+            let now = Utc::now();
+            let mut stmt = conn.prepare(
+                "SELECT * FROM memories WHERE tenant_id = ?1 AND memory_type = ?2 \
+                 AND (expires_at = '' OR expires_at > ?3) ORDER BY created_at DESC",
+            )?;
+            let rows = stmt.query_map(
+                params![tenant_id, memory_type_to_str(memory_type), now.to_rfc3339()],
+                row_to_experience,
+            )?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            results.retain(|e| !e.is_expired(now));
+            Ok(results)
+        })
+        .await
     }
 
     async fn count_by_memory_type(&self, tenant_id: &str, memory_type: MemoryType) -> Result<i64> {
-        let conn = self.conn.lock().await;
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE tenant_id = ?1 AND memory_type = ?2",
-            params![tenant_id, memory_type_to_str(memory_type)],
-            |row| row.get(0),
-        )?)
+        let tenant_id = tenant_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE tenant_id = ?1 AND memory_type = ?2",
+                params![tenant_id, memory_type_to_str(memory_type)],
+                |row| row.get(0),
+            )?)
+        })
+        .await
     }
 
     async fn count_for_tenant(&self, tenant_id: &str) -> Result<i64> {
-        let conn = self.conn.lock().await;
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM memories WHERE tenant_id = ?1",
-            params![tenant_id],
-            |row| row.get(0),
-        )?)
+        let tenant_id = tenant_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM memories WHERE tenant_id = ?1",
+                params![tenant_id],
+                |row| row.get(0),
+            )?)
+        })
+        .await
     }
 
     async fn counts_by_type(&self, tenant_id: &str) -> Result<Vec<(MemoryType, i64)>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT memory_type, COUNT(*) as cnt FROM memories WHERE tenant_id = ?1 GROUP BY memory_type ORDER BY cnt DESC"
-        )?;
-        let rows = stmt.query_map(params![tenant_id], |row| {
-            let mt_str: String = row.get("memory_type")?;
-            let cnt: i64 = row.get("cnt")?;
-            Ok((memory_type_from_str(&mt_str), cnt))
-        })?;
-        let mut results = Vec::new();
-        for row in rows {
-            results.push(row?);
-        }
-        Ok(results)
+        let tenant_id = tenant_id.to_owned();
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT memory_type, COUNT(*) as cnt FROM memories WHERE tenant_id = ?1 GROUP BY memory_type ORDER BY cnt DESC"
+            )?;
+            let rows = stmt.query_map(params![tenant_id], |row| {
+                let mt_str: String = row.get("memory_type")?;
+                let cnt: i64 = row.get("cnt")?;
+                Ok((memory_type_from_str(&mt_str), cnt))
+            })?;
+            let mut results = Vec::new();
+            for row in rows {
+                results.push(row?);
+            }
+            Ok(results)
+        })
+        .await
     }
 }
 

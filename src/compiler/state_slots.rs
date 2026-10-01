@@ -241,8 +241,14 @@ mod tests {
         );
         let s = &slots[0];
         assert_eq!(s.entity, "董卓", "victim is the object, not the killer");
-        assert_eq!(s.slot, "status");
-        assert_eq!(s.value, "deceased");
+        assert_eq!(
+            s.slot, "status",
+            "a death sentence must record the status slot"
+        );
+        assert_eq!(
+            s.value, "deceased",
+            "a death sentence must record the deceased value"
+        );
         assert_eq!(s.chapter, Some(3), "chapter copied from the event");
         assert_eq!(
             s.start_offset,
@@ -261,8 +267,14 @@ mod tests {
         let src = "董卓死于渭水。";
         let slots = extract_state_slots(&action_event("董卓 死", "董卓", None, src), src);
         assert_eq!(slots.len(), 1, "got {slots:?}");
-        assert_eq!(slots[0].entity, "董卓");
-        assert_eq!(slots[0].value, "deceased");
+        assert_eq!(
+            slots[0].entity, "董卓",
+            "the subject of the death must be the entity"
+        );
+        assert_eq!(
+            slots[0].value, "deceased",
+            "the death slot must carry the deceased value"
+        );
     }
 
     /// Objective: Verify dialogue events never flip state (speech is not
@@ -353,7 +365,10 @@ mod tests {
             "",
         );
         assert_eq!(slots.len(), 1, "empty source → guard off, slot still found");
-        assert_eq!(slots[0].entity, "董卓");
+        assert_eq!(
+            slots[0].entity, "董卓",
+            "the subject must survive the later re-observation"
+        );
     }
 
     /// Objective: Verify multi-word English names ("Mr. Smith") still locate
@@ -378,9 +393,18 @@ mod tests {
             slots[0].entity, "Lord Blackwood",
             "victim is the object, not the multi-word subject"
         );
-        assert_eq!(slots[0].slot, "status");
-        assert_eq!(slots[0].value, "deceased");
-        assert_eq!(slots[0].confidence, 0.75);
+        assert_eq!(
+            slots[0].slot, "status",
+            "the refreshed slot must keep its name"
+        );
+        assert_eq!(
+            slots[0].value, "deceased",
+            "the refreshed slot must keep its value"
+        );
+        assert_eq!(
+            slots[0].confidence, 0.75,
+            "the refreshed slot must keep its confidence"
+        );
     }
 
     /// Objective: Verify an English intransitive death marks the SUBJECT and
@@ -397,8 +421,14 @@ mod tests {
             died_src,
         );
         assert_eq!(died.len(), 1, "died must flip the subject, got {died:?}");
-        assert_eq!(died[0].entity, "Lord Blackwood");
-        assert_eq!(died[0].confidence, 0.7);
+        assert_eq!(
+            died[0].entity, "Lord Blackwood",
+            "an English death sentence must yield its subject"
+        );
+        assert_eq!(
+            died[0].confidence, 0.7,
+            "the English death confidence must be 0.7"
+        );
 
         // "killing" (progressive): AC matches the "kill" pattern inside the
         // word — whole-word check must reject it as non-terminal.

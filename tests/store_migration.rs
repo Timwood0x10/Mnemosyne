@@ -477,7 +477,7 @@ async fn null_timestamps_do_not_break_reads() {
         .expect("open store");
 
     let documents = store.list_documents().await.expect("list documents");
-    assert_eq!(documents.len(), 1);
+    assert_eq!(documents.len(), 1, "exactly one document is expected");
     assert_eq!(
         documents[0].created_at, 0,
         "an unknown document time must read as 0, not fail the row"
@@ -487,17 +487,26 @@ async fn null_timestamps_do_not_break_reads() {
         .list_objects_by_document(1)
         .await
         .expect("list objects");
-    assert_eq!(objects.len(), 1);
-    assert_eq!(objects[0].created_at, 0);
+    assert_eq!(objects.len(), 1, "exactly one object is expected");
+    assert_eq!(
+        objects[0].created_at, 0,
+        "the object timestamp must default to 0"
+    );
 
     let edges = store.list_edges_by_document(1).await.expect("list edges");
-    assert_eq!(edges.len(), 1);
-    assert_eq!(edges[0].created_at, 0);
+    assert_eq!(edges.len(), 1, "exactly one edge is expected");
+    assert_eq!(
+        edges[0].created_at, 0,
+        "the edge timestamp must default to 0"
+    );
 
     let evidence = store
         .list_evidence_by_document(1)
         .await
         .expect("list evidence");
-    assert_eq!(evidence.len(), 1);
-    assert_eq!(evidence[0].created_at, 0);
+    assert_eq!(evidence.len(), 1, "exactly one evidence row is expected");
+    assert_eq!(
+        evidence[0].created_at, 0,
+        "the evidence timestamp must default to 0"
+    );
 }

@@ -247,7 +247,10 @@ mod tests {
             .as_array()
             .map(|a| a.iter().filter_map(|r| r["name"].as_str()).collect())
             .unwrap_or_default();
-        assert!(names.contains(&"张三") && names.contains(&"李四"));
+        assert!(
+            names.contains(&"张三") && names.contains(&"李四"),
+            "both entities must be discovered"
+        );
     }
 
     /// Objective: Verify a name-substring query narrows results.
@@ -263,7 +266,10 @@ mod tests {
         let text = result.content[0].text.clone().unwrap_or_default();
         let json: Value = serde_json::from_str(&text).expect("json");
         assert_eq!(json["total"], 1, "one match, got: {text}");
-        assert_eq!(json["results"][0]["name"], "张三");
+        assert_eq!(
+            json["results"][0]["name"], "张三",
+            "the graph hit must be the queried entity"
+        );
     }
 
     /// Objective: Verify an attribute filter matches on property values and
@@ -305,8 +311,14 @@ mod tests {
         let text = result.content[0].text.clone().unwrap_or_default();
         let json: Value = serde_json::from_str(&text).expect("json");
         assert_eq!(json["total"], 1, "one match, got: {text}");
-        assert_eq!(json["results"][0]["name"], "李四");
-        assert_eq!(json["results"][0]["doc_title"], "人物志");
+        assert_eq!(
+            json["results"][0]["name"], "李四",
+            "the reranked hit must come first"
+        );
+        assert_eq!(
+            json["results"][0]["doc_title"], "人物志",
+            "the hit must report its source document"
+        );
     }
 
     /// Objective: Verify the limit is honored.

@@ -778,6 +778,8 @@ mod tests {
     use super::*;
     use crate::character::SQLiteCharacterStore;
 
+    /// Objective: Verify `AddAssign` sums all three ingestion counters.
+    /// Invariants: characters, events and relations are summed field by field.
     #[test]
     fn ingestion_stats_add_assign() {
         let mut a = IngestionStats {
@@ -791,11 +793,19 @@ mod tests {
             relations: 30,
         };
         a += b;
-        assert_eq!(a.characters, 11);
-        assert_eq!(a.events, 22);
-        assert_eq!(a.relations, 33);
+        assert_eq!(
+            a.characters, 11,
+            "the merged stats must sum the character count"
+        );
+        assert_eq!(a.events, 22, "the merged stats must sum the event count");
+        assert_eq!(
+            a.relations, 33,
+            "the merged stats must sum the relation count"
+        );
     }
 
+    /// Objective: Verify an empty corpus directory is handled without panicking.
+    /// Invariants: the run either fails or reports zero characters.
     #[tokio::test]
     async fn pipeline_handles_empty_corpus_dir() {
         let tmp = tempfile::tempdir().unwrap();
@@ -803,26 +813,45 @@ mod tests {
         let pipeline = IngestionPipeline::new(store, tmp.path().to_str().unwrap());
         let stats = pipeline.run().await;
         // Should get an error or empty stats because no corpus files exist
-        assert!(stats.is_err() || stats.unwrap().characters == 0);
+        assert!(
+            stats.is_err() || stats.unwrap().characters == 0,
+            "an empty chapter must either fail or count zero"
+        );
     }
 
+    /// Objective: Verify a novel with no chapters contributes nothing.
+    /// Invariants: the run reports zero characters.
     #[tokio::test]
     async fn pipeline_distills_empty_novel() {
         let store = Arc::new(SQLiteCharacterStore::open_in_memory().await.unwrap());
         let tmp = tempfile::tempdir().unwrap();
         let pipeline = IngestionPipeline::new(store.clone(), tmp.path().to_str().unwrap());
         let stats = pipeline.distill_novel("不存在的小说").await.unwrap();
-        assert_eq!(stats.characters, 0);
+        assert_eq!(
+            stats.characters, 0,
+            "an empty chapter must contribute no characters"
+        );
     }
 
+    /// Objective: Verify a death is recorded on the character's chapter.
+    /// Invariants: a survival mention records no death chapter, and an assigned chapter is readable back.
     #[test]
     fn char_info_tracks_death() {
         let mut info = CharInfo::new(vec!["武松".to_string()]);
-        assert!(info.death_chapter.is_none());
+        assert!(
+            info.death_chapter.is_none(),
+            "a survival mention must not record a death chapter"
+        );
         info.death_chapter = Some(117);
-        assert_eq!(info.death_chapter, Some(117));
+        assert_eq!(
+            info.death_chapter,
+            Some(117),
+            "the recorded death chapter must be 117"
+        );
     }
 
+    /// Objective: Verify alias matches are ordered by start offset with longest-first tie-breaking.
+    /// Invariants: the sorted list starts with the earliest, longest alias.
     #[test]
     fn alias_match_sorting() {
         let matches = vec![
@@ -841,7 +870,13 @@ mod tests {
         ];
         let mut sorted = matches.clone();
         sorted.sort_by_key(|m| (m.start, std::cmp::Reverse(m.alias.len())));
-        assert_eq!(sorted[0].alias, "诸葛亮");
-        assert_eq!(sorted[1].alias, "丞相");
+        assert_eq!(
+            sorted[0].alias, "诸葛亮",
+            "the longest alias must sort first"
+        );
+        assert_eq!(
+            sorted[1].alias, "丞相",
+            "the shorter alias must sort second"
+        );
     }
 }

@@ -359,10 +359,26 @@ mod tests {
             .await
             .expect("call succeeds");
         let payload = parse_payload(&result);
-        assert_eq!(payload["intimacy"], json!(0.04));
-        assert_eq!(payload["stage"], json!("stranger"));
-        assert_eq!(payload["emotion_trend"], json!("rising"));
-        assert_eq!(payload["exists"], json!(true));
+        assert_eq!(
+            payload["intimacy"],
+            json!(0.04),
+            "one positive exchange must add 0.04 intimacy"
+        );
+        assert_eq!(
+            payload["stage"],
+            json!("stranger"),
+            "a fresh pair must be at the stranger stage"
+        );
+        assert_eq!(
+            payload["emotion_trend"],
+            json!("rising"),
+            "positive emotion must report a rising trend"
+        );
+        assert_eq!(
+            payload["exists"],
+            json!(true),
+            "the snapshot must report an existing relationship"
+        );
     }
 
     /// Objective: Verify `relationship_query` returns a default snapshot when
@@ -381,8 +397,16 @@ mod tests {
             .await
             .expect("call succeeds");
         let payload = parse_payload(&result);
-        assert_eq!(payload["exists"], json!(false));
-        assert_eq!(payload["intimacy"], json!(0.0));
+        assert_eq!(
+            payload["exists"],
+            json!(false),
+            "an unknown pair must not exist"
+        );
+        assert_eq!(
+            payload["intimacy"],
+            json!(0.0),
+            "an unknown pair must report zero intimacy"
+        );
     }
 
     /// Objective: Verify the three tool schemas declare the required fields.
@@ -399,13 +423,28 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert!(required_update.contains(&"agent_id"));
-        assert!(required_update.contains(&"user_id"));
-        assert!(required_update.contains(&"messages"));
-        assert_eq!(update.name, "relationship_update");
+        assert!(
+            required_update.contains(&"agent_id"),
+            "relationship_update must require agent_id"
+        );
+        assert!(
+            required_update.contains(&"user_id"),
+            "relationship_update must require user_id"
+        );
+        assert!(
+            required_update.contains(&"messages"),
+            "relationship_update must require messages"
+        );
+        assert_eq!(
+            update.name, "relationship_update",
+            "the tool must be named relationship_update"
+        );
 
         let query = relationship_query_definition();
-        assert_eq!(query.name, "relationship_query");
+        assert_eq!(
+            query.name, "relationship_query",
+            "the tool must be named relationship_query"
+        );
 
         let timeline = persona_timeline_definition();
         let required_timeline: Vec<&str> = timeline
@@ -416,7 +455,13 @@ mod tests {
             .iter()
             .filter_map(Value::as_str)
             .collect();
-        assert!(required_timeline.contains(&"entity_id"));
-        assert_eq!(timeline.name, "persona_timeline");
+        assert!(
+            required_timeline.contains(&"entity_id"),
+            "persona_timeline must require entity_id"
+        );
+        assert_eq!(
+            timeline.name, "persona_timeline",
+            "the tool must be named persona_timeline"
+        );
     }
 }

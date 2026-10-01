@@ -541,11 +541,19 @@ mod tests {
     #[test]
     fn status_deserializes_from_lowercase() {
         let parsed: LexemeStatus = serde_json::from_str("\"core\"").expect("core parses");
-        assert_eq!(parsed, LexemeStatus::Core);
+        assert_eq!(parsed, LexemeStatus::Core, "core must parse to Core");
         let parsed: LexemeStatus = serde_json::from_str("\"experimental\"").expect("parses");
-        assert_eq!(parsed, LexemeStatus::Experimental);
+        assert_eq!(
+            parsed,
+            LexemeStatus::Experimental,
+            "experimental must parse to Experimental"
+        );
         let parsed: LexemeStatus = serde_json::from_str("\"disabled\"").expect("parses");
-        assert_eq!(parsed, LexemeStatus::Disabled);
+        assert_eq!(
+            parsed,
+            LexemeStatus::Disabled,
+            "disabled must parse to Disabled"
+        );
     }
 
     /// Objective: Verify the rollback path reverses retirement (P6).

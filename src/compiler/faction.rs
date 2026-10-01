@@ -214,6 +214,8 @@ mod tests {
     /// transition is recorded. Note: 张辽 is already 魏 in faction_map.json
     /// (his end-state), so "张辽降曹操" records no transition — a known
     /// config/doc inconsistency tracked in CODE_REVIEW_FINDINGS.
+    /// Objective: Verify a surrender event switches the character's camp.
+    /// Invariants: the transition is recorded and the new camp is the victor's.
     #[test]
     fn surrender_changes_faction() {
         let mut ft = FactionTracker::from_file("三国演义", "config/faction_map.json").unwrap();
@@ -242,11 +244,25 @@ mod tests {
     }
 
     /// Verify faction graph groups entities correctly.
+    /// Objective: Verify the faction graph groups characters by their camp.
+    /// Invariants: the fixture names resolve to their documented camps.
     #[test]
     fn faction_graph_groups_correctly() {
         let ft = FactionTracker::from_file("三国演义", "config/faction_map.json").unwrap();
-        assert_eq!(ft.faction_of("刘备"), Some("蜀"));
-        assert_eq!(ft.faction_of("曹操"), Some("魏"));
-        assert_eq!(ft.faction_of("吕布"), Some("群雄"));
+        assert_eq!(
+            ft.faction_of("刘备"),
+            Some("蜀"),
+            "the fixture must start in 蜀"
+        );
+        assert_eq!(
+            ft.faction_of("曹操"),
+            Some("魏"),
+            "the fixture must start in 魏"
+        );
+        assert_eq!(
+            ft.faction_of("吕布"),
+            Some("群雄"),
+            "the fixture must start unattached (群雄)"
+        );
     }
 }

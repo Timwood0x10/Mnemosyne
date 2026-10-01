@@ -95,6 +95,11 @@ fn load_sanguo_messages() -> Vec<Message> {
 /// purges TTL-expired rows for the tenant.
 #[tokio::test]
 async fn sanguo_lifecycle_distill_conflict_forget() {
+    // Diagnostics go through `tracing` (the crate's tests must not print);
+    // run with `--nocapture` to see them.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .try_init();
     let store = Arc::new(SQLiteVecStore::open_in_memory(8).await.expect("open store"));
     let embedder: Arc<dyn EmbeddingService> = Arc::new(TestEmbedder);
     let cfg = DistillationConfig {
@@ -111,7 +116,7 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
         !msgs.is_empty(),
         "三国 corpus must yield extractable message turns"
     );
-    println!(
+    tracing::info!(
         "三国 lifecycle input: {} turns, first: {}",
         msgs.len(),
         msgs[0].content.chars().take(40).collect::<String>()
@@ -122,7 +127,7 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
         .distill("sanguo-1", &msgs, "t1", "u1")
         .await
         .expect("first distill");
-    println!("first distill -> {} memories", first.len());
+    tracing::info!("first distill -> {} memories", first.len());
     assert!(
         !first.is_empty(),
         "real 三国 text should yield at least one memory"
@@ -135,7 +140,7 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
         .await
         .expect("second distill");
     let m = d.metrics();
-    println!(
+    tracing::info!(
         "second distill -> {} new, conflicts_resolved={}, replaced={}",
         second.len(),
         m.conflicts_resolved,
@@ -144,7 +149,7 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
     // Either the duplicates were dropped (small/empty second) or replaced —
     // but total tenant rows must not be unbounded by content-hash dedup.
     let total = store.count_for_tenant("t1").await.expect("count tenant");
-    println!("tenant t1 total memories after two distills: {total}");
+    tracing::info!("tenant t1 total memories after two distills: {total}");
     assert!(
         total >= first.len() as i64,
         "tenant must retain the distilled memories"
@@ -169,7 +174,7 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
 
     let _ = d.distill("sanguo-empty", &[], "t1", "u1").await;
     let m2 = d.metrics();
-    println!(
+    tracing::info!(
         "after forget phase: memories_forgotten={}",
         m2.memories_forgotten
     );
@@ -182,5 +187,5 @@ async fn sanguo_lifecycle_distill_conflict_forget() {
         store.get("sanguo-expired-1").await.expect("get").is_none(),
         "TTL-expired memory must not be readable after the forget phase"
     );
-    println!("\n========== SANGUO LIFECYCLE COMPLETE ==========");
+    tracing::info!("\n========== SANGUO LIFECYCLE COMPLETE ==========");
 }

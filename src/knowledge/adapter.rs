@@ -458,8 +458,14 @@ mod tests {
         let mut c = IncrementalCursor::new();
         c.advance(Some(10), ["a".to_string(), "b".to_string()]);
         assert_eq!(c.watermark, Some(10), "first advance sets watermark");
-        assert!(c.has_seen("a") && c.has_seen("b"));
-        assert!(!c.has_seen("c"));
+        assert!(
+            c.has_seen("a") && c.has_seen("b"),
+            "the cursor must have seen both ids"
+        );
+        assert!(
+            !c.has_seen("c"),
+            "the cursor must not have seen an unknown id"
+        );
         // A lower watermark must not lower the high-water mark.
         c.advance(Some(5), ["a".to_string()]);
         assert_eq!(c.watermark, Some(10), "watermark is monotonic");
@@ -532,7 +538,11 @@ mod tests {
         );
         let got = adapter.search("anything", 5);
         assert_eq!(got, hits, "search must echo the closure's hits");
-        assert_eq!(adapter.adapter_kind(), AdapterKind::Db);
+        assert_eq!(
+            adapter.adapter_kind(),
+            AdapterKind::Db,
+            "a db-backed adapter must report AdapterKind::Db"
+        );
     }
 
     /// Objective: Verify DbAdapter fetch_documents dedups across fetches.
@@ -562,7 +572,7 @@ mod tests {
         let (out1, cursor) = adapter
             .fetch_documents(&IncrementalCursor::new())
             .expect("f1");
-        assert_eq!(out1.len(), 2);
+        assert_eq!(out1.len(), 2, "the adapter must return both documents");
         assert_eq!(out1[0].doc_type, "db", "materialized docs are tagged db");
         let (out2, _) = adapter.fetch_documents(&cursor).expect("f2");
         assert!(out2.is_empty(), "second fetch dedups against the cursor");
@@ -581,11 +591,21 @@ mod tests {
         }];
         let captured = hits.clone();
         let adapter = VectorAdapter::new("vec-store", Box::new(move |_, _| captured.clone()));
-        assert_eq!(adapter.adapter_kind(), AdapterKind::Vector);
+        assert_eq!(
+            adapter.adapter_kind(),
+            AdapterKind::Vector,
+            "a vector-backed adapter must report AdapterKind::Vector"
+        );
         let got = adapter.search("q", 3);
-        assert_eq!(got, hits);
+        assert_eq!(
+            got, hits,
+            "a pass-through adapter must return the hits unchanged"
+        );
         // entity_mapping defaults to empty when no links are attached.
-        assert!(adapter.entity_mapping().is_empty());
+        assert!(
+            adapter.entity_mapping().is_empty(),
+            "a pass-through adapter maps no entities"
+        );
     }
 
     /// Objective: Verify entity links attached via with_links are returned by
@@ -599,6 +619,10 @@ mod tests {
             source: "crm".into(),
         }];
         let adapter = DocumentAdapter::new("crm", Vec::new()).with_links(links.clone());
-        assert_eq!(adapter.entity_mapping(), links);
+        assert_eq!(
+            adapter.entity_mapping(),
+            links,
+            "the adapter must expose its entity mapping"
+        );
     }
 }

@@ -54,13 +54,8 @@ pub fn detect_format(path: &Path) -> FormatKind {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// FormatLoader trait + dispatchers
+// Format detection + loaders
 // ───────────────────────────────────────────────────────────────────────────
-
-/// A loader that converts bytes (+ a display name) into [`ExternalDoc`]s.
-pub trait FormatLoader: Send + Sync {
-    fn load_from_bytes(&self, name: &str, bytes: &[u8]) -> Result<Vec<ExternalDoc>>;
-}
 
 /// Load all documents from a file path, dispatching on extension.
 ///
@@ -80,16 +75,6 @@ pub fn load_document(path: &Path) -> Result<Vec<ExternalDoc>> {
 }
 
 /// Load all documents from raw bytes, dispatching on an explicit format.
-#[must_use]
-pub fn loader_for(kind: FormatKind) -> Box<dyn FormatLoader> {
-    match kind {
-        FormatKind::Text => Box::new(TextLoader),
-        FormatKind::Markdown => Box::new(MarkdownLoader),
-        FormatKind::Json => Box::new(JsonLoader),
-        FormatKind::Pdf => Box::new(PdfLoader),
-    }
-}
-
 fn load_kind_with_source(
     kind: FormatKind,
     name: &str,
@@ -143,18 +128,6 @@ impl SourceLoader for MarkdownLoader {
             doc_type: "markdown".into(),
             author: None,
         }])
-    }
-}
-
-impl FormatLoader for TextLoader {
-    fn load_from_bytes(&self, name: &str, bytes: &[u8]) -> Result<Vec<ExternalDoc>> {
-        self.load_with_source(name, name, bytes)
-    }
-}
-
-impl FormatLoader for MarkdownLoader {
-    fn load_from_bytes(&self, name: &str, bytes: &[u8]) -> Result<Vec<ExternalDoc>> {
-        self.load_with_source(name, name, bytes)
     }
 }
 
@@ -229,12 +202,6 @@ impl SourceLoader for JsonLoader {
     }
 }
 
-impl FormatLoader for JsonLoader {
-    fn load_from_bytes(&self, name: &str, bytes: &[u8]) -> Result<Vec<ExternalDoc>> {
-        self.load_with_source(name, name, bytes)
-    }
-}
-
 /// Human-readable JSON node kind for error messages.
 fn json_kind(v: &serde_json::Value) -> &'static str {
     match v {
@@ -265,12 +232,6 @@ impl SourceLoader for PdfLoader {
             doc_type: "pdf".into(),
             author: None,
         }])
-    }
-}
-
-impl FormatLoader for PdfLoader {
-    fn load_from_bytes(&self, name: &str, bytes: &[u8]) -> Result<Vec<ExternalDoc>> {
-        self.load_with_source(name, name, bytes)
     }
 }
 
@@ -322,12 +283,21 @@ mod tests {
         let docs = TextLoader
             .load_with_source("notes", "/tmp/notes.txt", b"hello world")
             .expect("load");
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].title, "notes");
-        assert_eq!(docs[0].text, "hello world");
-        assert_eq!(docs[0].doc_type, "text");
-        assert_eq!(docs[0].source, "/tmp/notes.txt");
-        assert!(docs[0].chapter.is_none());
+        assert_eq!(docs.len(), 1, "a single text file yields one document");
+        assert_eq!(docs[0].title, "notes", "the file stem supplies the title");
+        assert_eq!(
+            docs[0].text, "hello world",
+            "the file body must be read verbatim"
+        );
+        assert_eq!(docs[0].doc_type, "text", "a .txt file must be typed text");
+        assert_eq!(
+            docs[0].source, "/tmp/notes.txt",
+            "the source must be the full path"
+        );
+        assert!(
+            docs[0].chapter.is_none(),
+            "a plain text file has no chapter"
+        );
     }
 
     /// Objective: Verify MarkdownLoader tags doc_type as markdown.
@@ -337,8 +307,14 @@ mod tests {
         let docs = MarkdownLoader
             .load_with_source("readme", "/tmp/readme.md", b"# Title\nbody")
             .expect("load");
-        assert_eq!(docs[0].doc_type, "markdown");
-        assert!(docs[0].text.contains("# Title"));
+        assert_eq!(
+            docs[0].doc_type, "markdown",
+            "a .md file must be typed markdown"
+        );
+        assert!(
+            docs[0].text.contains("# Title"),
+            "the markdown body must be kept"
+        );
     }
 
     /// Objective: Verify JsonLoader accepts a bare array of entries.
@@ -354,13 +330,17 @@ mod tests {
             .load_with_source("data", "/tmp/data.json", json.as_bytes())
             .expect("load");
         assert_eq!(docs.len(), 2, "two array entries → two docs");
-        assert_eq!(docs[0].title, "A");
-        assert_eq!(docs[0].chapter, Some(1));
+        assert_eq!(docs[0].title, "A", "the first JSON entry keeps its title");
+        assert_eq!(
+            docs[0].chapter,
+            Some(1),
+            "the first JSON entry keeps its chapter"
+        );
         assert_eq!(
             docs[1].title, "data#1",
             "missing title defaults to name#index"
         );
-        assert_eq!(docs[1].text, "beta");
+        assert_eq!(docs[1].text, "beta", "the second JSON entry keeps its body");
         assert_eq!(
             docs[1].source, "/tmp/data.json",
             "missing source defaults to file path"
@@ -375,9 +355,13 @@ mod tests {
         let docs = JsonLoader
             .load_with_source("data", "data", json.as_bytes())
             .expect("load");
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].title, "X");
-        assert_eq!(docs[0].text, "x body");
+        assert_eq!(
+            docs.len(),
+            1,
+            "a bare-object JSON payload yields one document"
+        );
+        assert_eq!(docs[0].title, "X", "the object title must be read");
+        assert_eq!(docs[0].text, "x body", "the object body must be read");
     }
 
     /// Objective: Verify JsonLoader accepts a single object as one document.
@@ -388,8 +372,16 @@ mod tests {
         let docs = JsonLoader
             .load_with_source("data", "data", json.as_bytes())
             .expect("load");
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].author.as_deref(), Some("A"));
+        assert_eq!(
+            docs.len(),
+            1,
+            "a documents-wrapped payload yields one document"
+        );
+        assert_eq!(
+            docs[0].author.as_deref(),
+            Some("A"),
+            "the optional author must be read"
+        );
     }
 
     /// Objective: Verify malformed JSON returns a typed error, not a panic.
@@ -425,10 +417,16 @@ mod tests {
         let path = dir.path().join("chapter.txt");
         std::fs::write(&path, "the quick brown fox").expect("write");
         let docs = load_document(&path).expect("load");
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].title, "chapter");
-        assert_eq!(docs[0].doc_type, "text");
-        assert_eq!(docs[0].text, "the quick brown fox");
+        assert_eq!(docs.len(), 1, "a chapter file yields one document");
+        assert_eq!(docs[0].title, "chapter", "the chapter title must be read");
+        assert_eq!(
+            docs[0].doc_type, "text",
+            "an unknown extension falls back to text"
+        );
+        assert_eq!(
+            docs[0].text, "the quick brown fox",
+            "the chapter body must be read verbatim"
+        );
     }
 
     /// Objective: Verify load_document dispatches a .json file through the JSON
@@ -440,9 +438,9 @@ mod tests {
         let path = dir.path().join("data.json");
         std::fs::write(&path, r#"[{"title":"a","text":"alpha"}]"#).expect("write");
         let docs = load_document(&path).expect("load");
-        assert_eq!(docs.len(), 1);
-        assert_eq!(docs[0].doc_type, "json");
-        assert_eq!(docs[0].text, "alpha");
+        assert_eq!(docs.len(), 1, "an explicit JSON format yields one document");
+        assert_eq!(docs[0].doc_type, "json", "the document must be typed json");
+        assert_eq!(docs[0].text, "alpha", "the JSON body must be read");
     }
 
     /// Objective: Verify load_document rejects a missing file with Io error.
@@ -450,6 +448,9 @@ mod tests {
     #[test]
     fn load_document_missing_file_errors() {
         let err = load_document(&PathBuf::from("/nonexistent/nope.txt")).unwrap_err();
-        assert!(err.to_string().contains("I/O") || err.to_string().contains("No such"));
+        assert!(
+            err.to_string().contains("I/O") || err.to_string().contains("No such"),
+            "a missing file must report an I/O error"
+        );
     }
 }

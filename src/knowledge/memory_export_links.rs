@@ -332,16 +332,31 @@ mod tests {
             .find(|l| l.source_type == "edge")
             .expect("edge link exported");
         let key = edge_link.edge.as_ref().expect("edge key present");
-        assert_eq!(key.doc_title, "关系图");
-        assert_eq!(key.source_name, "甲");
-        assert_eq!(key.predicate, "结义");
-        assert_eq!(key.target_name, "乙");
+        assert_eq!(
+            key.doc_title, "关系图",
+            "the link key must carry its document title"
+        );
+        assert_eq!(
+            key.source_name, "甲",
+            "the link key must carry its source name"
+        );
+        assert_eq!(
+            key.predicate, "结义",
+            "the link key must carry its predicate"
+        );
+        assert_eq!(
+            key.target_name, "乙",
+            "the link key must carry its target name"
+        );
         let obj_link = bundle
             .evidence_links
             .iter()
             .find(|l| l.source_type == "object")
             .expect("object link exported");
-        assert_eq!(obj_link.source_name, "甲");
+        assert_eq!(
+            obj_link.source_name, "甲",
+            "the exported link must keep its source name"
+        );
         assert!(obj_link.edge.is_none(), "object link carries no edge key");
 
         let dst = SQLiteKnowledgeStore::open_in_memory().await.expect("dst");

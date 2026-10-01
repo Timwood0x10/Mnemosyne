@@ -234,13 +234,28 @@ mod tests {
             .await
             .expect("call succeeds");
         let payload = parse_payload(&result);
-        assert_eq!(payload["tenant_id"], json!("tenant-a"));
-        assert_eq!(payload["agent_id"], json!("agent-bailiusu"));
-        assert_eq!(payload["persona_card"]["identity"], json!("我是白流苏"));
+        assert_eq!(
+            payload["tenant_id"],
+            json!("tenant-a"),
+            "the injected card must carry the tenant id"
+        );
+        assert_eq!(
+            payload["agent_id"],
+            json!("agent-bailiusu"),
+            "the injected card must carry the agent id"
+        );
+        assert_eq!(
+            payload["persona_card"]["identity"],
+            json!("我是白流苏"),
+            "the identity line must be injected"
+        );
         let persona = payload["persona_card"]["persona"]
             .as_array()
             .expect("persona");
-        assert!(persona.iter().any(|v| v == &json!("我喜欢安稳")));
+        assert!(
+            persona.iter().any(|v| v == &json!("我喜欢安稳")),
+            "the stored preference must reach the card"
+        );
     }
 
     /// Objective: Verify `format=text` output contains the identity line.
@@ -327,7 +342,11 @@ mod tests {
             json!(["话少，克制，偶尔揶揄"]),
             "file style fills in"
         );
-        assert_eq!(card["taboos"], json!(["绝不说自己已经放下"]));
+        assert_eq!(
+            card["taboos"],
+            json!(["绝不说自己已经放下"]),
+            "the hand-authored taboos must win the merge"
+        );
         let persona = card["persona"].as_array().expect("persona");
         assert!(
             persona.iter().any(|v| v == &json!("我喜欢安稳")),
@@ -352,7 +371,10 @@ mod tests {
             matches!(err, Error::InvalidInput(_)),
             "expected InvalidInput, got {err:?}"
         );
-        assert!(err.to_string().contains("agent_id"));
+        assert!(
+            err.to_string().contains("agent_id"),
+            "a missing agent_id must be named in the error"
+        );
     }
 
     /// Objective: Verify the tool schema requires `agent_id`.
@@ -367,6 +389,9 @@ mod tests {
             .expect("required array");
         let names: Vec<&str> = required.iter().filter_map(Value::as_str).collect();
         assert!(names.contains(&"agent_id"), "schema requires agent_id");
-        assert_eq!(def.name, "persona_inject");
+        assert_eq!(
+            def.name, "persona_inject",
+            "the tool must be named persona_inject"
+        );
     }
 }

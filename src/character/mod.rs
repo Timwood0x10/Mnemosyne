@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::error::{Error, Result, StorageError};
 use crate::types::Metadata;
@@ -7,7 +8,6 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
 
 static CHAR_SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS character_attributes (
@@ -293,9 +293,40 @@ pub struct SQLiteCharacterStore {
 }
 
 impl SQLiteCharacterStore {
+    /// Run `work` on the blocking pool with the connection locked.
+    ///
+    /// `rusqlite` is synchronous, so executing it straight from an `async fn`
+    /// blocks a tokio worker thread for the whole query and stalls every
+    /// unrelated task the runtime is driving (audit 09-26/H7). The `Arc` is
+    /// cloned first so the closure owns its handle, and the guard is taken
+    /// *inside* the closure, so no lock is ever held across an `await`.
+    ///
+    /// A poisoned mutex is recovered rather than propagated: the connection is
+    /// a serialized resource whose statements are individually atomic, and the
+    /// `tokio::sync::Mutex` this replaced had no poisoning at all — surfacing
+    /// poison would let one panicking caller brick the store for every later
+    /// one.
+    async fn with_conn<T, F>(&self, work: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        crate::blocking::run(move || {
+            let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            work(&guard)
+        })
+        .await
+    }
+
     pub async fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)
-            .map_err(|e| StorageError::Schema(format!("open character store: {e}")))?;
+        let path = path.to_owned();
+        let conn = crate::blocking::run(move || {
+            let conn = Connection::open(&path)
+                .map_err(|e| StorageError::Schema(format!("open character store: {e}")))?;
+            Ok(conn)
+        })
+        .await?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -304,8 +335,12 @@ impl SQLiteCharacterStore {
     }
 
     pub async fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| StorageError::Schema(format!("open in-memory: {e}")))?;
+        let conn = crate::blocking::run(|| {
+            let conn = Connection::open_in_memory()
+                .map_err(|e| StorageError::Schema(format!("open in-memory: {e}")))?;
+            Ok(conn)
+        })
+        .await?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -314,22 +349,25 @@ impl SQLiteCharacterStore {
     }
 
     async fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        // busy_timeout makes concurrent connections wait (up to 5s) for a lock
-        // instead of failing immediately. foreign_keys enforces declared FK
-        // constraints. WAL is intentionally NOT enabled: the knowledge store
-        // uses the same rollback-journal mode, and mixing WAL on one connection
-        // with rollback journal on another connection to the SAME file leaves
-        // `-wal`/`-shm` sidecars that the next process reads as "file is not a
-        // database". Both stores must agree on the journal mode for a shared
-        // DB file (e.g. integration-test fixtures).
-        conn.execute_batch(
-            "PRAGMA busy_timeout = 5000;
+        self.with_conn(|conn| {
+            // busy_timeout makes concurrent connections wait (up to 5s) for a
+            // lock instead of failing immediately. foreign_keys enforces
+            // declared FK constraints. WAL is intentionally NOT enabled: the
+            // knowledge store uses the same rollback-journal mode, and mixing
+            // WAL on one connection with rollback journal on another connection
+            // to the SAME file leaves `-wal`/`-shm` sidecars that the next
+            // process reads as "file is not a database". Both stores must agree
+            // on the journal mode for a shared DB file (e.g. integration-test
+            // fixtures).
+            conn.execute_batch(
+                "PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;",
-        )?;
-        conn.execute_batch(CHAR_SCHEMA)
-            .map_err(|e| StorageError::Schema(format!("init character schema: {e}")))?;
-        Ok(())
+            )?;
+            conn.execute_batch(CHAR_SCHEMA)
+                .map_err(|e| StorageError::Schema(format!("init character schema: {e}")))?;
+            Ok(())
+        })
+        .await
     }
 }
 
@@ -393,6 +431,8 @@ mod tests {
         }
     }
 
+    /// Objective: Verify a created character round-trips through `get_character`.
+    /// Invariants: the name and novel come back unchanged.
     #[tokio::test]
     async fn create_and_get_character() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -403,10 +443,18 @@ mod tests {
             .await
             .expect("get")
             .expect("exists");
-        assert_eq!(got.name, "扈三娘");
-        assert_eq!(got.novel, "水浒传");
+        assert_eq!(
+            got.name, "扈三娘",
+            "the created character must round-trip its name"
+        );
+        assert_eq!(
+            got.novel, "水浒传",
+            "the created character must keep its novel"
+        );
     }
 
+    /// Objective: Verify an exact-name search returns only the matching character.
+    /// Invariants: exactly one hit and it is the queried character.
     #[tokio::test]
     async fn search_by_name_exact() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -422,10 +470,15 @@ mod tests {
             .search_characters_by_name("武松", "novels", None)
             .await
             .expect("search");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].name, "武松");
+        assert_eq!(results.len(), 1, "exactly one search hit is expected");
+        assert_eq!(
+            results[0].name, "武松",
+            "the search must find the queried character"
+        );
     }
 
+    /// Objective: Verify a description keyword finds the character through the LIKE path.
+    /// Invariants: at least one hit is returned.
     #[tokio::test]
     async fn fts_search_works() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -466,6 +519,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify both created events are returned for the character.
+    /// Invariants: the event list holds two entries.
     #[tokio::test]
     async fn create_and_query_events() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -483,9 +538,11 @@ mod tests {
             .get_character_events("扈三娘", "novels", None)
             .await
             .expect("get");
-        assert_eq!(events.len(), 2);
+        assert_eq!(events.len(), 2, "two events are expected");
     }
 
+    /// Objective: Verify a created relation is returned with its type.
+    /// Invariants: exactly one relation, typed 被擒.
     #[tokio::test]
     async fn create_and_query_relations() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -505,19 +562,29 @@ mod tests {
             .get_relations_for_character("扈三娘", "novels", None)
             .await
             .expect("get");
-        assert_eq!(rels.len(), 1);
-        assert_eq!(rels[0].relation_type, "被擒");
+        assert_eq!(rels.len(), 1, "exactly one relation is expected");
+        assert_eq!(
+            rels[0].relation_type, "被擒",
+            "the relation must keep its type"
+        );
     }
 
+    /// Objective: Verify `delete_character` removes the row.
+    /// Invariants: reading the id afterwards returns `None`.
     #[tokio::test]
     async fn delete_character() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
         let c = sample_char("武松", "水浒传");
         store.create_character(&c).await.expect("create");
         store.delete_character(&c.id).await.expect("delete");
-        assert!(store.get_character(&c.id).await.expect("get").is_none());
+        assert!(
+            store.get_character(&c.id).await.expect("get").is_none(),
+            "the deleted character must be gone"
+        );
     }
 
+    /// Objective: Verify the count helpers agree with what was written.
+    /// Invariants: the character, event and relation counts match the fixtures.
     #[tokio::test]
     async fn count_aggregations() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -553,6 +620,8 @@ mod tests {
         );
     }
 
+    /// Objective: Verify network traversal returns the character with its events and relations.
+    /// Invariants: the node centres on the queried character, lists both events and both relations, and is connected to 林冲.
     #[tokio::test]
     async fn network_traversal() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
@@ -590,9 +659,12 @@ mod tests {
         let node = traverse_character_network(&store, "扈三娘", "novels", None, 2)
             .await
             .expect("traverse");
-        assert_eq!(node.character.name, "扈三娘");
-        assert_eq!(node.events.len(), 2);
-        assert_eq!(node.relations.len(), 2);
+        assert_eq!(
+            node.character.name, "扈三娘",
+            "the node must centre on the queried character"
+        );
+        assert_eq!(node.events.len(), 2, "the node must list both events");
+        assert_eq!(node.relations.len(), 2, "the node must list both relations");
         assert!(
             !node.connections.is_empty(),
             "should have connected characters"

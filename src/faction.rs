@@ -126,6 +126,8 @@ pub fn same_faction_or_unknown(novel: &str, a: &str, b: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// Objective: Verify the 三国演义 faction map resolves the 蜀 camp.
+    /// Invariants: 刘备, 诸葛亮 and 关羽 all map to 蜀.
     #[test]
     fn test_sanguo_shu() {
         assert_eq!(get_faction("三国演义", "刘备"), Some("蜀"));
@@ -133,34 +135,46 @@ mod tests {
         assert_eq!(get_faction("三国演义", "关羽"), Some("蜀"));
     }
 
+    /// Objective: Verify the 三国演义 faction map resolves the 魏 camp.
+    /// Invariants: 曹操 and 司马懿 map to 魏.
     #[test]
     fn test_sanguo_wei() {
         assert_eq!(get_faction("三国演义", "曹操"), Some("魏"));
         assert_eq!(get_faction("三国演义", "司马懿"), Some("魏"));
     }
 
+    /// Objective: Verify the 三国演义 faction map resolves the 吴 camp.
+    /// Invariants: 孙权 and 周瑜 map to 吴.
     #[test]
     fn test_sanguo_wu() {
         assert_eq!(get_faction("三国演义", "孙权"), Some("吴"));
         assert_eq!(get_faction("三国演义", "周瑜"), Some("吴"));
     }
 
+    /// Objective: Verify unknown names and unknown novels resolve to no faction.
+    /// Invariants: both lookups return `None` instead of a guessed camp.
     #[test]
     fn test_unknown_character() {
         assert_eq!(get_faction("三国演义", "无名氏"), None);
         assert_eq!(get_faction("未知小说", "刘备"), None);
     }
 
+    /// Objective: Verify two characters of the same camp earn the ranking bonus.
+    /// Invariants: the bonus is exactly 1.2.
     #[test]
     fn test_faction_bonus_same() {
         assert_eq!(faction_bonus("三国演义", "刘备", "诸葛亮"), Some(1.2));
     }
 
+    /// Objective: Verify two characters of opposing camps are damped.
+    /// Invariants: the bonus is exactly 0.8.
     #[test]
     fn test_faction_bonus_different() {
         assert_eq!(faction_bonus("三国演义", "刘备", "曹操"), Some(0.8));
     }
 
+    /// Objective: Verify a pair with an unknown member yields no bonus.
+    /// Invariants: the call returns `None` rather than inventing a multiplier.
     #[test]
     fn test_faction_bonus_unknown() {
         assert_eq!(faction_bonus("三国演义", "刘备", "无名氏"), None);

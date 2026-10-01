@@ -286,9 +286,18 @@ mod tests {
         let bridged = bridge_story_events_to_persona(&kstore, &fstore, "default", "不存在的人")
             .await
             .expect("noop bridge");
-        assert_eq!(bridged.story_events, 0);
-        assert_eq!(bridged.persona_facts, 0);
-        assert_eq!(bridged.event_facts, 0);
+        assert_eq!(
+            bridged.story_events, 0,
+            "an empty bridge run must produce no story events"
+        );
+        assert_eq!(
+            bridged.persona_facts, 0,
+            "an empty bridge run must produce no persona facts"
+        );
+        assert_eq!(
+            bridged.event_facts, 0,
+            "an empty bridge run must produce no event facts"
+        );
     }
 
     /// Objective: verify the logical-time accumulation never overflows for a

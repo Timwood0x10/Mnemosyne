@@ -323,7 +323,10 @@ mod tests {
     #[test]
     fn definition_exposes_memory_decay_schema() {
         let def = memory_decay_definition();
-        assert_eq!(def.name, "memory_decay");
+        assert_eq!(
+            def.name, "memory_decay",
+            "the tool must be named memory_decay"
+        );
         let strategies = def
             .input_schema
             .get("properties")

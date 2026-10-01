@@ -220,9 +220,20 @@ mod tests {
 
         let exported = export_mentions(&store).await.expect("export");
         assert_eq!(exported.len(), 1, "the mention is exported");
-        assert_eq!(exported[0].object_name, "刘备");
-        assert_eq!(exported[0].start_offset, Some(5));
-        assert_eq!(exported[0].alias_used.as_deref(), Some("玄德"));
+        assert_eq!(
+            exported[0].object_name, "刘备",
+            "the exported mention must name its object"
+        );
+        assert_eq!(
+            exported[0].start_offset,
+            Some(5),
+            "the exported mention must keep its byte offset"
+        );
+        assert_eq!(
+            exported[0].alias_used.as_deref(),
+            Some("玄德"),
+            "the exported mention must record the alias used"
+        );
 
         let dst = crate::knowledge::SQLiteKnowledgeStore::open_in_memory()
             .await
@@ -275,7 +286,11 @@ mod tests {
             .expect("read mentions");
         assert_eq!(stored.len(), 1, "exactly one mention row exists");
         assert_eq!(stored[0].start_offset, Some(5), "the span round-trips");
-        assert_eq!(stored[0].alias_used.as_deref(), Some("玄德"));
+        assert_eq!(
+            stored[0].alias_used.as_deref(),
+            Some("玄德"),
+            "the stored mention must keep the alias used"
+        );
 
         // A mention naming a document the bundle does not carry is skipped.
         let orphan = ExportMention {

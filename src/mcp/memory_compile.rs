@@ -712,7 +712,10 @@ mod tests {
             .expect("decisions are readable after the compile");
         assert_eq!(decisions.len(), 1, "exactly one decision is persisted");
         assert_eq!(decisions[0].verb, "promise", "答应 compiles to a promise");
-        assert_eq!(decisions[0].object, "我答应你明天陪你去医院");
+        assert_eq!(
+            decisions[0].object, "我答应你明天陪你去医院",
+            "the compiled decision must keep its object"
+        );
         assert_eq!(
             decisions[0].status,
             crate::decision::DecisionStatus::Open,

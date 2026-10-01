@@ -588,12 +588,32 @@ mod tests {
                 .find(|fact| fact.payload["attribute"] == name)
                 .unwrap_or_else(|| panic!("missing `{name}` disclosure: {facts:?}"))
         };
-        assert_eq!(attribute("name").payload["content"], "小林");
-        assert_eq!(attribute("age").payload["content"], "26");
-        assert_eq!(attribute("location").payload["content"], "杭州");
-        assert_eq!(attribute("occupation").payload["content"], "后端开发");
+        assert_eq!(
+            attribute("name").payload["content"],
+            "小林",
+            "the name disclosure must be captured"
+        );
+        assert_eq!(
+            attribute("age").payload["content"],
+            "26",
+            "the age disclosure must be captured"
+        );
+        assert_eq!(
+            attribute("location").payload["content"],
+            "杭州",
+            "the location disclosure must be captured"
+        );
+        assert_eq!(
+            attribute("occupation").payload["content"],
+            "后端开发",
+            "the occupation disclosure must be captured"
+        );
         for fact in &facts {
-            assert_eq!(fact.fact_type, FactType::Identity);
+            assert_eq!(
+                fact.fact_type,
+                FactType::Identity,
+                "self-disclosure attributes must be Identity facts"
+            );
             assert_eq!(
                 fact.payload["evidence"]["text"],
                 "你好呀，我叫小林，26 岁，在杭州做后端开发"
@@ -682,12 +702,22 @@ mod tests {
     fn relatives_and_pets_become_relationships() {
         let family = disclosures("我妈最近总催我相亲");
         assert_eq!(family.len(), 1, "one relation, got {family:?}");
-        assert_eq!(family[0].fact_type, FactType::Relationship);
-        assert_eq!(family[0].payload["target"], "妈");
+        assert_eq!(
+            family[0].fact_type,
+            FactType::Relationship,
+            "a family statement must compile to a Relationship fact"
+        );
+        assert_eq!(
+            family[0].payload["target"], "妈",
+            "the relationship target must be the family member"
+        );
 
         let pet = disclosures("我养了一只猫");
         assert_eq!(pet.len(), 1, "one relation, got {pet:?}");
-        assert_eq!(pet[0].payload["target"], "猫");
+        assert_eq!(
+            pet[0].payload["target"], "猫",
+            "a pet statement must target the animal"
+        );
     }
 
     /// Objective: Verify interests and habits are captured, and that a cue with
@@ -698,12 +728,23 @@ mod tests {
     fn interests_and_habits_need_a_value() {
         let interest = disclosures("平时会去爬山，算是为数不多的爱好");
         assert_eq!(interest.len(), 1, "one interest, got {interest:?}");
-        assert_eq!(interest[0].fact_type, FactType::Interest);
-        assert_eq!(interest[0].payload["content"], "爬山");
+        assert_eq!(
+            interest[0].fact_type,
+            FactType::Interest,
+            "a pastime statement must compile to an Interest fact"
+        );
+        assert_eq!(
+            interest[0].payload["content"], "爬山",
+            "the interest content must be the activity"
+        );
 
         let habit = disclosures("每天都要喝两杯咖啡");
         assert_eq!(habit.len(), 1, "one habit, got {habit:?}");
-        assert_eq!(habit[0].fact_type, FactType::Habit);
+        assert_eq!(
+            habit[0].fact_type,
+            FactType::Habit,
+            "a habit statement must compile to a Habit fact"
+        );
     }
 
     /// Objective: Verify the channel refuses to guess. A role must look like a

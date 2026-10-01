@@ -36,12 +36,15 @@ fn search_json_db_matches_substring_and_sorts() {
     let hits = search_json_db(&rows, "alpha", 10);
     assert_eq!(hits.len(), 2, "two rows match 'alpha'");
     assert_eq!(hits[0].id, "high", "higher score ranks first");
-    assert_eq!(hits[1].id, "low");
+    assert_eq!(
+        hits[1].id, "low",
+        "the lower-ranked hit must still be returned"
+    );
 
     // Limit truncates after sorting.
     let top1 = search_json_db(&rows, "alpha", 1);
-    assert_eq!(top1.len(), 1);
-    assert_eq!(top1[0].id, "high");
+    assert_eq!(top1.len(), 1, "the top-k request must return one hit");
+    assert_eq!(top1[0].id, "high", "the highest-ranked hit must come first");
 
     // Empty query matches all rows (materialize-all path).
     let all = search_json_db(&rows, "", 10);
@@ -144,8 +147,16 @@ async fn knowledge_attach_document_registers_and_rebuilds_linker() {
     // Verify the response payload.
     let payload: Value = serde_json::from_str(&result.content[0].text.clone().unwrap_or_default())
         .expect("response is JSON");
-    assert_eq!(payload["documents_loaded"].as_u64(), Some(1));
-    assert_eq!(payload["format"].as_str(), Some("text"));
+    assert_eq!(
+        payload["documents_loaded"].as_u64(),
+        Some(1),
+        "the dialog export must load one document"
+    );
+    assert_eq!(
+        payload["format"].as_str(),
+        Some("text"),
+        "a .txt attachment must report the text format"
+    );
 
     let _ = std::fs::remove_file(&path);
 }
@@ -185,7 +196,10 @@ async fn knowledge_attach_db_registers_signal_provider() {
     // search_all forwards to the JSON DB adapter.
     let hits = registry.search_all("rust", 5);
     assert_eq!(hits.len(), 1, "one row matches 'rust'");
-    assert_eq!(hits[0].id, "r1");
+    assert_eq!(
+        hits[0].id, "r1",
+        "the created row must be retrievable by id"
+    );
 
     let _ = std::fs::remove_file(&db_path);
 }
@@ -232,8 +246,16 @@ async fn knowledge_ingest_materializes_into_graph() {
     assert!(!result.is_error, "ingest must not error");
     let payload: Value = serde_json::from_str(&result.content[0].text.clone().unwrap_or_default())
         .expect("ingest response is JSON");
-    assert_eq!(payload["documents_created"].as_u64(), Some(1));
-    assert_eq!(payload["evidence_created"].as_u64(), Some(1));
+    assert_eq!(
+        payload["documents_created"].as_u64(),
+        Some(1),
+        "the attachment must create one document"
+    );
+    assert_eq!(
+        payload["evidence_created"].as_u64(),
+        Some(1),
+        "the attachment must create one evidence row"
+    );
 
     // The evidence tool can now find the materialized content.
     let hits = store
@@ -291,9 +313,21 @@ async fn knowledge_ingest_reingest_is_fully_idempotent() {
     let first_payload: Value =
         serde_json::from_str(&first.content[0].text.clone().unwrap_or_default())
             .expect("first response JSON");
-    assert_eq!(first_payload["documents_created"].as_u64(), Some(1));
-    assert_eq!(first_payload["chapters_created"].as_u64(), Some(1));
-    assert_eq!(first_payload["evidence_created"].as_u64(), Some(1));
+    assert_eq!(
+        first_payload["documents_created"].as_u64(),
+        Some(1),
+        "the novel attachment must create one document"
+    );
+    assert_eq!(
+        first_payload["chapters_created"].as_u64(),
+        Some(1),
+        "the novel attachment must create one chapter"
+    );
+    assert_eq!(
+        first_payload["evidence_created"].as_u64(),
+        Some(1),
+        "the novel attachment must create one evidence row"
+    );
 
     // Second ingest: everything reused, nothing duplicated.
     let second = ingest.call(&args).await.expect("second ingest");

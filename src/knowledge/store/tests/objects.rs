@@ -18,7 +18,10 @@ async fn object_round_trip_and_lookup() {
     let oid = seed_person(&store, did, "宋江", props.clone()).await;
 
     let got = store.get_object(oid).await.expect("get").expect("exists");
-    assert_eq!(got.name, "宋江");
+    assert_eq!(
+        got.name, "宋江",
+        "the created object must round-trip its name"
+    );
     assert_eq!(got.properties, props, "properties JSON must round-trip");
 
     let found = store
@@ -26,7 +29,7 @@ async fn object_round_trip_and_lookup() {
         .await
         .expect("find")
         .expect("found by name");
-    assert_eq!(found.id, oid);
+    assert_eq!(found.id, oid, "the lookup must return the created id");
 
     let missing = store
         .find_object_by_name("不存在的角色", Some(did))
@@ -271,7 +274,10 @@ async fn search_objects_filters_and_limits() {
         .await
         .expect("search by type");
     let person_names: Vec<&str> = persons.iter().map(|o| o.name.as_str()).collect();
-    assert!(person_names.contains(&"张三") && person_names.contains(&"李四"));
+    assert!(
+        person_names.contains(&"张三") && person_names.contains(&"李四"),
+        "both discovered names must be persons"
+    );
     assert!(!person_names.contains(&"江南"), "place excluded");
 
     // By name substring.
@@ -280,7 +286,7 @@ async fn search_objects_filters_and_limits() {
         .await
         .expect("search by name");
     assert_eq!(zhang.len(), 1, "one name match");
-    assert_eq!(zhang[0].name, "张三");
+    assert_eq!(zhang[0].name, "张三", "the LIKE search must find the row");
 
     // By property value.
     let go = store
@@ -339,7 +345,10 @@ async fn search_objects_escapes_like_wildcards() {
         .await
         .expect("search percent");
     assert_eq!(pct.len(), 1, "`%` must be literal, got {} rows", pct.len());
-    assert_eq!(pct[0].name, "100%完成");
+    assert_eq!(
+        pct[0].name, "100%完成",
+        "an escaped percent must match literally"
+    );
 
     // `_` must NOT act as the single-char wildcard matching 张三/a_b.
     let us = store
@@ -347,7 +356,10 @@ async fn search_objects_escapes_like_wildcards() {
         .await
         .expect("search underscore");
     assert_eq!(us.len(), 1, "`_` must be literal, got {} rows", us.len());
-    assert_eq!(us[0].name, "a_b");
+    assert_eq!(
+        us[0].name, "a_b",
+        "an escaped underscore must match literally"
+    );
 }
 
 /// Objective: Verify `graph_counts` reports accurate row counts.
@@ -415,8 +427,15 @@ async fn edge_touches_both_endpoints() {
     let from_b = store.get_edges_touching(b).await.expect("edges b");
     assert_eq!(from_a.len(), 1, "source endpoint sees the edge");
     assert_eq!(from_b.len(), 1, "target endpoint also sees the edge");
-    assert_eq!(from_a[0].predicate, "结义");
-    assert_eq!(from_a[0].valid_from, Some(1));
+    assert_eq!(
+        from_a[0].predicate, "结义",
+        "the edge must keep its predicate"
+    );
+    assert_eq!(
+        from_a[0].valid_from,
+        Some(1),
+        "the edge must keep its validity start"
+    );
 }
 
 /// Objective: Verify evidence linking is idempotent (UNIQUE constraint)
@@ -457,5 +476,8 @@ async fn evidence_link_is_idempotent() {
         .await
         .expect("get evidence");
     assert_eq!(evs.len(), 1, "duplicate link must not duplicate rows");
-    assert_eq!(evs[0].content, "赵云单骑救主");
+    assert_eq!(
+        evs[0].content, "赵云单骑救主",
+        "the event must keep its content"
+    );
 }

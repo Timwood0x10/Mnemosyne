@@ -102,12 +102,19 @@ mod tests {
     use super::*;
     use crate::types::{Decision, Memory, MemoryType};
 
+    /// Objective: Verify the prompt renders when no session state is present.
+    /// Invariants: the session-state section is still announced.
     #[test]
     fn build_empty() {
         let p = PromptBuilder.build(&[], &CompiledConversation::default());
-        assert!(p.contains("Session State"));
+        assert!(
+            p.contains("Session State"),
+            "the prompt must announce the session state section"
+        );
     }
 
+    /// Objective: Verify stated project facts reach the rendered prompt.
+    /// Invariants: the prompt carries the project name and the stated percentage.
     #[test]
     fn build_shows_knowledge() {
         let mut mem = Memory::new("t1", MemoryType::Knowledge, "full", 0.8);
@@ -117,10 +124,18 @@ mod tests {
             ..Default::default()
         };
         let p = PromptBuilder.build(&[], &c);
-        assert!(p.contains("sqlite-vec"));
-        assert!(p.contains("80%"));
+        assert!(
+            p.contains("sqlite-vec"),
+            "the prompt must carry the stated project fact"
+        );
+        assert!(
+            p.contains("80%"),
+            "the prompt must carry the stated percentage"
+        );
     }
 
+    /// Objective: Verify recorded decisions reach the rendered prompt.
+    /// Invariants: the decisions section is announced and the project fact survives the rebuild.
     #[test]
     fn build_shows_decision() {
         let c = CompiledConversation {
@@ -133,10 +148,18 @@ mod tests {
             ..Default::default()
         };
         let p = PromptBuilder.build(&[], &c);
-        assert!(p.contains("Decisions"));
-        assert!(p.contains("sqlite-vec"));
+        assert!(
+            p.contains("Decisions"),
+            "the prompt must announce the decisions section"
+        );
+        assert!(
+            p.contains("sqlite-vec"),
+            "the rebuilt prompt must keep the project fact"
+        );
     }
 
+    /// Objective: Verify open problems reach the rendered prompt.
+    /// Invariants: the prompt lists the open problem.
     #[test]
     fn build_includes_recent() {
         let msgs = vec![
@@ -144,6 +167,6 @@ mod tests {
             Message::new("assistant", "回答1"),
         ];
         let p = PromptBuilder.build(&msgs, &CompiledConversation::default());
-        assert!(p.contains("问题1"));
+        assert!(p.contains("问题1"), "the prompt must list the open problem");
     }
 }

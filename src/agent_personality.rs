@@ -246,7 +246,11 @@ mod tests {
         let messages = vec![Message::new("assistant", "我不喜欢虚伪的应酬，太累了。")];
         let facts = agent_personality_facts_from_messages(&messages, 3, 1);
         assert_eq!(facts.len(), 1, "the stance-against phrase is the signal");
-        assert_eq!(facts[0].fact_type, FactType::Preference);
+        assert_eq!(
+            facts[0].fact_type,
+            FactType::Preference,
+            "an agent preference must compile to a Preference fact"
+        );
         assert_eq!(
             facts[0].payload["negated"], true,
             "negated marker must be preserved so like/dislike stay separate"
@@ -278,7 +282,10 @@ mod tests {
             .filter(|f| f.fact_type == FactType::Emotion)
             .collect();
         assert_eq!(emotions.len(), 1, "one emotion-bearing agent line");
-        assert_eq!(emotions[0].payload["negated"], false);
+        assert_eq!(
+            emotions[0].payload["negated"], false,
+            "an affirmative emotion must not be marked negated"
+        );
 
         let goals: Vec<&Fact> = facts
             .iter()

@@ -560,9 +560,20 @@ mod tests {
             vec!["我喜欢 Python", "开始喜欢 Rust", "主要使用 Rust"],
             "interval values carry the content for each state"
         );
-        assert_eq!(evolution.intervals[0].from, 2024);
-        assert_eq!(evolution.intervals[0].to, Some(2025));
-        assert_eq!(evolution.intervals[1].to, Some(2026));
+        assert_eq!(
+            evolution.intervals[0].from, 2024,
+            "the first interval must start in 2024"
+        );
+        assert_eq!(
+            evolution.intervals[0].to,
+            Some(2025),
+            "the first interval must close in 2025"
+        );
+        assert_eq!(
+            evolution.intervals[1].to,
+            Some(2026),
+            "the second interval must close in 2026"
+        );
         assert_eq!(
             evolution.intervals[2].to, None,
             "latest interval stays current"
