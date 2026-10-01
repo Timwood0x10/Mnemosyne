@@ -336,131 +336,148 @@ struct KnowledgeAttachHandler {
 #[async_trait::async_trait]
 impl ToolHandler for KnowledgeAttachHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let source_type = req_str(args, "source_type")?;
-        match source_type.as_str() {
-            "document" => self.attach_document(args).await,
-            "db" => self.attach_db(args).await,
-            other => Ok(err_result(format!(
-                "unknown source_type `{other}`; expected `document` or `db`"
-            ))),
-        }
+        // Attaching reads files and mutates the shared registry; the whole body
+        // is synchronous, so hand it to the blocking pool and keep a large
+        // document load off the tokio worker (audit 09-26/H7).
+        let registry = Arc::clone(&self.registry);
+        let linker = Arc::clone(&self.linker);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_attach_tool(&registry, &linker, &args)).await
     }
 }
 
-impl KnowledgeAttachHandler {
-    /// Attach a document file (PDF/JSON/TXT/MD) as a materialization-only
-    /// adapter. The file is loaded immediately via the format loader; the
-    /// resulting `ExternalDoc`s are wrapped in a `DocumentAdapter` and
-    /// registered with the shared registry.
-    async fn attach_document(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let path = req_str(args, "path")?;
-        let source_name = opt_str(args, "source_name")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                // Default: derive from the file stem so provenance is readable.
-                PathBuf::from(&path)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("document")
-                    .to_string()
-            });
-        let links = parse_entity_links(args)?;
+/// Synchronous body of `knowledge_attach`, executed on the blocking pool.
+fn run_attach_tool(
+    registry: &crate::knowledge::ExternalKnowledgeRegistry,
+    linker: &SharedEntityLinker,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let source_type = req_str(args, "source_type")?;
+    match source_type.as_str() {
+        "document" => attach_document(registry, linker, args),
+        "db" => attach_db(registry, linker, args),
+        other => Ok(err_result(format!(
+            "unknown source_type `{other}`; expected `document` or `db`"
+        ))),
+    }
+}
 
-        // Path sandbox: reject absolute paths and `..` escapes (mirror of
-        // `memory_transfer_tools::resolve_transfer_path`). Without it a
-        // client could `knowledge_attach {path:"/etc/passwd"}` then
-        // `knowledge_ingest` and read arbitrary host files through `evidence`.
-        let load_path = resolve_knowledge_path(&path)?;
-        // The rule is "the loader is about to treat these bytes as prose": a
-        // `.txt` file promises to be text and a PDF is expected to be binary, but
-        // an extension the loader does not recognise (`notes.bin`, or none at
-        // all) falls back to `Text` and would be decoded as prose — which is the
-        // case that has to be checked.
-        let declared_text = load_path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"));
-        if format::detect_format(&load_path) == FormatKind::Text && !declared_text {
-            reject_binary_content(&load_path, &path)?;
-        }
-
-        // Load the file through the multi-format loader (PDF/JSON/TXT/MD).
-        // File reads (and PDF inflation for large PDFs) are blocking, so the
-        // work is moved off the tokio worker thread via `spawn_blocking` —
-        // mirroring the project's own async discipline in `transport.rs`.
-        let docs = tokio::task::spawn_blocking(move || format::load_document(&load_path))
-            .await
-            .map_err(|e| Error::Internal(format!("load document task joined with error: {e}")))??;
-        let doc_count = docs.len();
-        let kind = format::detect_format(&PathBuf::from(&path));
-
-        // Build the adapter and attach entity links if any were supplied.
-        let adapter = DocumentAdapter::new(source_name.clone(), docs).with_links(links);
-        self.registry.register_document(Arc::new(adapter));
-        // Rebuild the linker so inspect_entity sees the new cross-source names.
-        rebuild_linker(&self.registry, &self.linker);
-
-        let payload = serde_json::json!({
-            "source_name": source_name,
-            "source_type": "document",
-            "format": format_kind_str(kind),
-            "documents_loaded": doc_count,
-            "entity_links_registered": self.registry.collect_entity_links().len(),
-            "mode": "materialize-only (documents are NOT query-forwarded; use knowledge_ingest to materialize into the graph)",
+/// Attach a document file (PDF/JSON/TXT/MD) as a materialization-only
+/// adapter. The file is loaded immediately via the format loader; the
+/// resulting `ExternalDoc`s are wrapped in a `DocumentAdapter` and
+/// registered with the shared registry.
+///
+/// Runs on the blocking pool (see [`run_attach_tool`]), so the load is inline.
+fn attach_document(
+    registry: &crate::knowledge::ExternalKnowledgeRegistry,
+    linker: &SharedEntityLinker,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let path = req_str(args, "path")?;
+    let source_name = opt_str(args, "source_name")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            // Default: derive from the file stem so provenance is readable.
+            PathBuf::from(&path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("document")
+                .to_string()
         });
-        json_ok(&payload)
+    let links = parse_entity_links(args)?;
+
+    // Path sandbox: reject absolute paths and `..` escapes (mirror of
+    // `memory_transfer_tools::resolve_transfer_path`). Without it a
+    // client could `knowledge_attach {path:"/etc/passwd"}` then
+    // `knowledge_ingest` and read arbitrary host files through `evidence`.
+    let load_path = resolve_knowledge_path(&path)?;
+    // The rule is "the loader is about to treat these bytes as prose": a
+    // `.txt` file promises to be text and a PDF is expected to be binary, but
+    // an extension the loader does not recognise (`notes.bin`, or none at
+    // all) falls back to `Text` and would be decoded as prose — which is the
+    // case that has to be checked.
+    let declared_text = load_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"));
+    if format::detect_format(&load_path) == FormatKind::Text && !declared_text {
+        reject_binary_content(&load_path, &path)?;
     }
 
-    /// Attach a JSON-backed DB as an index-mode (query-forwarded) adapter.
-    ///
-    /// The `connection` argument is a path to a JSON file containing either a
-    /// bare array of `{id, text, score?}` objects or a `{"documents": [...]}`
-    /// wrapper. On `search`, the adapter does case-insensitive substring
-    /// matching against `text` and returns hits sorted by score. This avoids a
-    /// heavy SQL dependency while demonstrating the DB index-mode path
-    /// (rules.md: no network, fast builds).
-    async fn attach_db(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let connection = req_str(args, "connection")?;
-        let source_name = opt_str(args, "source_name")
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| {
-                PathBuf::from(&connection)
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("db")
-                    .to_string()
-            });
-        let links = parse_entity_links(args)?;
+    // Load the file through the multi-format loader (PDF/JSON/TXT/MD). The
+    // handler already runs on the blocking pool (see `run_attach_tool`), so
+    // the file read — and PDF inflation for large PDFs — happens inline.
+    let docs = format::load_document(&load_path)?;
+    let doc_count = docs.len();
+    let kind = format::detect_format(&PathBuf::from(&path));
 
-        // Path sandbox: same rule as attach_document (no absolute / no `..`).
-        let db_path = resolve_knowledge_path(&connection)?;
-        let db_path_str = db_path.to_string_lossy().into_owned();
+    // Build the adapter and attach entity links if any were supplied.
+    let adapter = DocumentAdapter::new(source_name.clone(), docs).with_links(links);
+    registry.register_document(Arc::new(adapter));
+    // Rebuild the linker so inspect_entity sees the new cross-source names.
+    rebuild_linker(registry, linker);
 
-        // Load the JSON DB file once and snapshot it into the query closure.
-        // The file read is blocking, so it runs on a blocking thread to keep
-        // the tokio worker free (consistent with `transport.rs`).
-        let rows = tokio::task::spawn_blocking(move || load_json_db(&db_path_str))
-            .await
-            .map_err(|e| Error::Internal(format!("load db task joined with error: {e}")))??;
-        let row_count = rows.len();
-        let query_fn: ExternalQueryFn =
-            Box::new(move |query: &str, limit: usize| search_json_db(&rows, query, limit));
+    let payload = serde_json::json!({
+        "source_name": source_name,
+        "source_type": "document",
+        "format": format_kind_str(kind),
+        "documents_loaded": doc_count,
+        "entity_links_registered": registry.collect_entity_links().len(),
+        "mode": "materialize-only (documents are NOT query-forwarded; use knowledge_ingest to materialize into the graph)",
+    });
+    json_ok(&payload)
+}
 
-        let adapter = DbAdapter::new(source_name.clone(), SchemaMapping::default(), query_fn)
-            .with_links(links);
-        self.registry.register_signal(adapter);
-        rebuild_linker(&self.registry, &self.linker);
-
-        let payload = serde_json::json!({
-            "source_name": source_name,
-            "source_type": "db",
-            "connection": connection,
-            "rows_indexed": row_count,
-            "entity_links_registered": self.registry.collect_entity_links().len(),
-            "mode": "index-mode (query-forwarded into hybrid search via RRF; not materialized by default)",
+/// Attach a JSON-backed DB as an index-mode (query-forwarded) adapter.
+///
+/// The `connection` argument is a path to a JSON file containing either a
+/// bare array of `{id, text, score?}` objects or a `{"documents": [...]}`
+/// wrapper. On `search`, the adapter does case-insensitive substring
+/// matching against `text` and returns hits sorted by score. This avoids a
+/// heavy SQL dependency while demonstrating the DB index-mode path
+/// (rules.md: no network, fast builds).
+fn attach_db(
+    registry: &crate::knowledge::ExternalKnowledgeRegistry,
+    linker: &SharedEntityLinker,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let connection = req_str(args, "connection")?;
+    let source_name = opt_str(args, "source_name")
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            PathBuf::from(&connection)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("db")
+                .to_string()
         });
-        json_ok(&payload)
-    }
+    let links = parse_entity_links(args)?;
+
+    // Path sandbox: same rule as attach_document (no absolute / no `..`).
+    let db_path = resolve_knowledge_path(&connection)?;
+    let db_path_str = db_path.to_string_lossy().into_owned();
+
+    // Load the JSON DB file once and snapshot it into the query closure.
+    // Already on the blocking pool, so the read happens inline.
+    let rows = load_json_db(&db_path_str)?;
+    let row_count = rows.len();
+    let query_fn: ExternalQueryFn =
+        Box::new(move |query: &str, limit: usize| search_json_db(&rows, query, limit));
+
+    let adapter =
+        DbAdapter::new(source_name.clone(), SchemaMapping::default(), query_fn).with_links(links);
+    registry.register_signal(adapter);
+    rebuild_linker(registry, linker);
+
+    let payload = serde_json::json!({
+        "source_name": source_name,
+        "source_type": "db",
+        "connection": connection,
+        "rows_indexed": row_count,
+        "entity_links_registered": registry.collect_entity_links().len(),
+        "mode": "index-mode (query-forwarded into hybrid search via RRF; not materialized by default)",
+    });
+    json_ok(&payload)
 }
 
 /// One row of a JSON-backed DB, snapshot into the query closure.
@@ -580,15 +597,13 @@ impl ToolHandler for KnowledgeIngestHandler {
 
         match mode {
             "index" => {
-                // Index mode: report current state without materializing.
-                let payload = serde_json::json!({
-                    "source_name": source_name,
-                    "mode": "index",
-                    "status": "index-mode sources are query-forwarded; no materialization performed",
-                    "signal_providers": self.registry.signal_provider_count(),
-                });
-                json_ok(&payload)
+                // Reporting the registry state is synchronous; run it on the
+                // blocking pool (audit 09-26/H7).
+                let registry = Arc::clone(&self.registry);
+                crate::mcp::blocking::run(move || run_ingest_index(&registry, &source_name)).await
             }
+            // Materialize persists through the async `KnowledgeStore`, so those
+            // awaits stay on the async shell (see `materialize`).
             "materialize" => self.materialize(&source_name).await,
             other => Ok(err_result(format!(
                 "unknown mode `{other}`; expected `index` or `materialize`"
@@ -597,15 +612,48 @@ impl ToolHandler for KnowledgeIngestHandler {
     }
 }
 
+/// Synchronous body of the `index` mode of `knowledge_ingest`: report the
+/// current registry state without materializing anything.
+fn run_ingest_index(
+    registry: &crate::knowledge::ExternalKnowledgeRegistry,
+    source_name: &str,
+) -> Result<ToolCallResult, Error> {
+    let payload = serde_json::json!({
+        "source_name": source_name,
+        "mode": "index",
+        "status": "index-mode sources are query-forwarded; no materialization performed",
+        "signal_providers": registry.signal_provider_count(),
+    });
+    json_ok(&payload)
+}
+
+/// Collect the documents of `source_name` (or every source when `"all"`) from
+/// the registry, on the blocking pool.
+fn materialize_docs(
+    registry: &crate::knowledge::ExternalKnowledgeRegistry,
+    source_name: &str,
+) -> Result<Vec<crate::knowledge::adapter::ExternalDoc>, Error> {
+    if source_name == "all" {
+        registry.materialize_all()
+    } else {
+        registry.materialize_source(source_name)
+    }
+}
+
 impl KnowledgeIngestHandler {
     /// Materialize docs from `source_name` (or all sources when `"all"`) into
     /// the knowledge store as documents + chapters + evidence.
+    ///
+    /// Collecting the documents from the registry is synchronous work, so it is
+    /// handed to the blocking pool; the per-document store writes all go
+    /// through the async [`KnowledgeStore`] and therefore stay on this shell
+    /// (audit 09-26/H7).
+    ///
+    /// [`KnowledgeStore`]: crate::knowledge::store::KnowledgeStore
     async fn materialize(&self, source_name: &str) -> Result<ToolCallResult, Error> {
-        let docs = if source_name == "all" {
-            self.registry.materialize_all()?
-        } else {
-            self.registry.materialize_source(source_name)?
-        };
+        let registry = Arc::clone(&self.registry);
+        let source = source_name.to_owned();
+        let docs = crate::mcp::blocking::run(move || materialize_docs(&registry, &source)).await?;
         if docs.is_empty() {
             return Ok(err_result(format!(
                 "source `{source_name}` has no documents to materialize"
@@ -711,81 +759,93 @@ struct AgentFactCompileHandler {
 #[async_trait::async_trait]
 impl ToolHandler for AgentFactCompileHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let messages_raw = args
-            .get("messages")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
-        let messages = parse_messages(messages_raw)?;
-        let tenant_id = identity_arg(args, "tenant_id");
-        let user_id = identity_arg(args, "user_id");
-        let agent_id = opt_str(args, "agent_id").unwrap_or("");
-        let include_agent_facts = args
-            .get("include_agent_facts")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        // The compiler and the fact-store writes are synchronous `rusqlite`;
+        // run them on the blocking pool (audit 09-26/H7).
+        let fact_store = Arc::clone(&self.fact_store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_agent_fact_compile_tool(&fact_store, &args)).await
+    }
+}
 
-        // Resolve the User and Agent entity ids. resolve_user/resolve_agent
-        // namespace by external_key so the two channels never collide
-        // (plan §C2: "agent 不替用户表态").
-        let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-        let agent_entity_id = self.fact_store.resolve_agent(tenant_id, agent_id)?;
+/// Synchronous body of `agent_fact_compile`, executed on the blocking pool.
+fn run_agent_fact_compile_tool(
+    fact_store: &SqliteFactStore,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let messages_raw = args
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
+    let messages = parse_messages(messages_raw)?;
+    let tenant_id = identity_arg(args, "tenant_id");
+    let user_id = identity_arg(args, "user_id");
+    let agent_id = opt_str(args, "agent_id").unwrap_or("");
+    let include_agent_facts = args
+        .get("include_agent_facts")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
 
-        // Logical time: use the current epoch second so facts are chronologically
-        // orderable alongside compiler-emitted facts.
-        let logical_time = chrono::Utc::now().timestamp();
+    // Resolve the User and Agent entity ids. resolve_user/resolve_agent
+    // namespace by external_key so the two channels never collide
+    // (plan §C2: "agent 不替用户表态").
+    let user_entity_id = fact_store.resolve_user(tenant_id, user_id)?;
+    let agent_entity_id = fact_store.resolve_agent(tenant_id, agent_id)?;
 
-        let compiler = CognitionCompiler::new();
-        let facts = compiler.compile_conversation_facts(
-            &messages,
-            user_entity_id,
-            agent_entity_id,
-            logical_time,
-        );
+    // Logical time: use the current epoch second so facts are chronologically
+    // orderable alongside compiler-emitted facts.
+    let logical_time = chrono::Utc::now().timestamp();
 
-        // Always persist user facts (first-hand user cognition).
-        let user_count = if facts.user_facts.is_empty() {
+    let compiler = CognitionCompiler::new();
+    let facts = compiler.compile_conversation_facts(
+        &messages,
+        user_entity_id,
+        agent_entity_id,
+        logical_time,
+    );
+
+    // Always persist user facts (first-hand user cognition).
+    let user_count = if facts.user_facts.is_empty() {
+        0
+    } else {
+        fact_store.insert_batch(&facts.user_facts)?
+    };
+
+    // Agent + derived facts are opt-in: only persist when the caller
+    // explicitly enables the agent channel.
+    let (agent_count, derived_count) = if include_agent_facts {
+        let a = if facts.agent_facts.is_empty() {
             0
         } else {
-            self.fact_store.insert_batch(&facts.user_facts)?
+            fact_store.insert_batch(&facts.agent_facts)?
         };
-
-        // Agent + derived facts are opt-in: only persist when the caller
-        // explicitly enables the agent channel.
-        let (agent_count, derived_count) = if include_agent_facts {
-            let a = if facts.agent_facts.is_empty() {
-                0
-            } else {
-                self.fact_store.insert_batch(&facts.agent_facts)?
-            };
-            let d = if facts.derived_facts.is_empty() {
-                0
-            } else {
-                self.fact_store.insert_batch(&facts.derived_facts)?
-            };
-            (a, d)
+        let d = if facts.derived_facts.is_empty() {
+            0
         } else {
-            (0, 0)
+            fact_store.insert_batch(&facts.derived_facts)?
         };
+        (a, d)
+    } else {
+        (0, 0)
+    };
 
-        let payload = serde_json::json!({
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "agent_id": agent_id,
-            "user_entity_id": user_entity_id,
-            "agent_entity_id": agent_entity_id,
-            "include_agent_facts": include_agent_facts,
-            "user_facts_persisted": user_count,
-            "agent_facts_persisted": agent_count,
-            "derived_facts_persisted": derived_count,
-            "total_extracted": facts.total(),
-            "note": if include_agent_facts {
-                "agent channel enabled; agent events + derived restatements persisted with attribution"
-            } else {
-                "agent channel disabled (default); only user facts persisted. set include_agent_facts=true to enable agent + derived channels"
-            },
-        });
-        json_ok(&payload)
-    }
+    let payload = serde_json::json!({
+        "tenant_id": tenant_id,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "user_entity_id": user_entity_id,
+        "agent_entity_id": agent_entity_id,
+        "include_agent_facts": include_agent_facts,
+        "user_facts_persisted": user_count,
+        "agent_facts_persisted": agent_count,
+        "derived_facts_persisted": derived_count,
+        "total_extracted": facts.total(),
+        "note": if include_agent_facts {
+            "agent channel enabled; agent events + derived restatements persisted with attribution"
+        } else {
+            "agent channel disabled (default); only user facts persisted. set include_agent_facts=true to enable agent + derived channels"
+        },
+    });
+    json_ok(&payload)
 }
 
 /// Build an error [`ToolCallResult`] whose content is a human-readable message.

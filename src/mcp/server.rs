@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::sync::Mutex;
@@ -35,6 +36,13 @@ pub const ERR_METHOD_NOT_FOUND: i64 = -32601;
 pub const ERR_INVALID_PARAMS: i64 = -32602;
 /// JSON-RPC error code: internal error.
 pub const ERR_INTERNAL: i64 = -32603;
+
+/// Default wall-clock budget for a single `tools/call`.
+///
+/// A handler that outlives this budget is answered with a structured
+/// `isError: true` result. Before this gate a wedged tool produced *no*
+/// response at all and the client waited forever (audit 09-27/M6).
+pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(60);
 
 type ToolEntry = (ToolDefinition, Arc<dyn ToolHandler>);
 
@@ -115,6 +123,7 @@ impl Default for ToolRegistry {
 pub struct ServerBuilder {
     implementation: Implementation,
     registry: Arc<ToolRegistry>,
+    tool_timeout: Duration,
 }
 
 impl ServerBuilder {
@@ -124,6 +133,7 @@ impl ServerBuilder {
         Self {
             implementation,
             registry: Arc::new(ToolRegistry::new()),
+            tool_timeout: DEFAULT_TOOL_TIMEOUT,
         }
     }
 
@@ -133,12 +143,20 @@ impl ServerBuilder {
         self
     }
 
+    /// Override the per-`tools/call` wall-clock budget.
+    #[must_use]
+    pub fn tool_timeout(mut self, timeout: Duration) -> Self {
+        self.tool_timeout = timeout;
+        self
+    }
+
     /// Finalize the builder into an [`MCPServer`].
     #[must_use]
     pub fn build(self) -> MCPServer {
         MCPServer {
             implementation: Arc::new(self.implementation),
             registry: self.registry,
+            tool_timeout: self.tool_timeout,
         }
     }
 }
@@ -147,6 +165,7 @@ impl ServerBuilder {
 pub struct MCPServer {
     implementation: Arc<Implementation>,
     registry: Arc<ToolRegistry>,
+    tool_timeout: Duration,
 }
 
 impl MCPServer {
@@ -342,7 +361,29 @@ impl MCPServer {
                 }),
             });
         }
-        match handler.call(&arguments).await {
+        // Bound every tool call: a handler that never returns (a wedged query,
+        // a deadlocked store) used to leave the client with no response at all.
+        // The budget is answered with a structured `isError: true` result, so
+        // the JSON-RPC pairing (one request → one response) is preserved.
+        let outcome = match tokio::time::timeout(self.tool_timeout, handler.call(&arguments)).await
+        {
+            Ok(outcome) => outcome,
+            Err(_elapsed) => {
+                return Ok(JSONRPCResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: Some(serde_json::json!({
+                        "content": [ContentBlock::text(format!(
+                            "tool `{tool_name}` timed out after {}s",
+                            self.tool_timeout.as_secs_f64()
+                        ))],
+                        "isError": true,
+                    })),
+                    error: None,
+                });
+            }
+        };
+        match outcome {
             Ok(tcr) => {
                 let result = serde_json::json!({
                     "content": tcr.content,
@@ -404,6 +445,16 @@ mod tests {
     impl ToolHandler for NoopHandler {
         async fn call(&self, _args: &Value) -> Result<ToolCallResult> {
             Ok(ToolCallResult::text("noop"))
+        }
+    }
+
+    /// A handler that never answers within any practical budget.
+    struct NeverHandler;
+    #[async_trait]
+    impl ToolHandler for NeverHandler {
+        async fn call(&self, _args: &Value) -> Result<ToolCallResult> {
+            tokio::time::sleep(Duration::from_secs(3600)).await;
+            Ok(ToolCallResult::text("unreachable"))
         }
     }
 
@@ -690,5 +741,68 @@ mod tests {
         };
         server.serve(&mut t).await.expect("serve");
         assert!(t.outbox.is_empty(), "no response to notification");
+    }
+
+    /// Objective: Verify a tool that outlives the per-call budget is answered
+    /// with a structured timeout result instead of no response at all
+    /// (audit 09-27/M6: a slow tool lost its response and hung the client).
+    /// Invariants: exactly one response; `isError == true`; the text names the
+    /// tool; the JSON-RPC id is echoed.
+    #[tokio::test(start_paused = true)]
+    async fn tools_call_timeout_is_reported() {
+        let mut builder = ServerBuilder::new(Implementation {
+            name: "test".into(),
+            version: "1.0.0".into(),
+        })
+        .tool_timeout(Duration::from_millis(50));
+        builder = builder
+            .tool(
+                ToolDefinition {
+                    name: "slow".into(),
+                    description: "never returns".into(),
+                    input_schema: serde_json::json!({"type": "object"}),
+                },
+                Arc::new(NeverHandler),
+            )
+            .await;
+        let server = builder.build();
+        let mut t = VecTransport {
+            inbox: vec![JSONRPCMessage::Request(JSONRPCRequest {
+                jsonrpc: "2.0".into(),
+                id: Value::from(7),
+                method: "tools/call".into(),
+                params: Some(serde_json::json!({"name": "slow", "arguments": {}})),
+            })],
+            outbox: vec![],
+        };
+        server.serve(&mut t).await.expect("serve");
+        assert_eq!(
+            t.outbox.len(),
+            1,
+            "a timed-out call still gets exactly one response"
+        );
+        match &t.outbox[0] {
+            JSONRPCMessage::Response(resp) => {
+                assert_eq!(resp.id, Value::from(7), "id echoed");
+                let result = resp.result.as_ref().expect("result present");
+                assert_eq!(
+                    result.get("isError").and_then(Value::as_bool),
+                    Some(true),
+                    "timeout must be reported as a tool error"
+                );
+                let text = result
+                    .get("content")
+                    .and_then(Value::as_array)
+                    .and_then(|blocks| blocks.first())
+                    .and_then(|block| block.get("text"))
+                    .and_then(Value::as_str)
+                    .expect("text block");
+                assert!(
+                    text.contains("slow"),
+                    "timeout message must name the tool; got: {text}"
+                );
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
     }
 }

@@ -458,7 +458,7 @@ cargo run --bin mnemosyne \
 
 ```bash
 make check      # cargo clippy + cargo check (0 errors)
-make test       # 800+ unit + integration tests (nextest, ~1s warm)
+make test       # 970+ unit + integration tests (nextest, ~1s warm)
 ```
 
 The suite is **self-contained**: each test builds its own synthetic corpus and
@@ -511,13 +511,16 @@ the novel's canonical entity names/aliases for the compiler's dictionary
 | `MEMORY_VECTOR_DIM` | `0` | 0 = pure keyword (FTS5), >0 = vector search |
 | `MEMORY_EMBEDDING_PROVIDER` | `none` | `none` / `openai` / `ollama` |
 | `MEMORY_RETRIEVAL_MODE` | `keyword` | `keyword` / `vector` / `hybrid` |
-| `FACTION_MAP_PATH` | `config/faction_map.json` | Faction map configuration |
+| `MNEMOSYNE_HOME` | — | Resource root override (marker word lists, `config/` files); auto-detected when unset |
+
+> The individual resource-path overrides (`FACTION_MAP_PATH`, `DICTIONARY_PATH`, …)
+> were removed in 0.1.2 — use `MNEMOSYNE_HOME` to point at a different resource root.
 
 ### Development
 
 ```bash
 make check      # cargo clippy + cargo check
-make test       # All 800+ tests
+make test       # All 970+ tests
 make fmt        # Format code
 ```
 

@@ -39,25 +39,38 @@ impl RelationshipUpdateTool {
 #[async_trait]
 impl ToolHandler for RelationshipUpdateTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let agent_id = args
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidInput("missing `agent_id`".into()))?;
-        let user_id = args
-            .get("user_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidInput("missing `user_id`".into()))?;
-        let messages = parse_messages(args.get("messages"))?;
-
-        let rel = RelationshipStore::new(self.store.clone());
-        let state = rel.apply_messages(tenant_id, agent_id, user_id, &messages)?;
-        let payload = serialize_state(&state, agent_id, user_id);
-        Ok(ToolCallResult::text(payload.to_string()))
+        // The deterministic relationship rules read and write synchronous
+        // `rusqlite`; hand them to the blocking pool so a slow write cannot
+        // stall the tokio worker (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_relationship_update(store, &args)).await
     }
+}
+
+/// Synchronous body of `relationship_update`, executed on the blocking pool.
+fn run_relationship_update(
+    store: Arc<SqliteFactStore>,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let tenant_id = args
+        .get("tenant_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let agent_id = args
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidInput("missing `agent_id`".into()))?;
+    let user_id = args
+        .get("user_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidInput("missing `user_id`".into()))?;
+    let messages = parse_messages(args.get("messages"))?;
+
+    let rel = RelationshipStore::new(store);
+    let state = rel.apply_messages(tenant_id, agent_id, user_id, &messages)?;
+    let payload = serialize_state(&state, agent_id, user_id);
+    Ok(ToolCallResult::text(payload.to_string()))
 }
 
 /// Handler for the `relationship_query` tool.
@@ -76,77 +89,86 @@ impl RelationshipQueryTool {
 #[async_trait]
 impl ToolHandler for RelationshipQueryTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let agent_id = args
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidInput("missing `agent_id`".into()))?;
-        let user_id = args
-            .get("user_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidInput("missing `user_id`".into()))?;
-
-        // READ-ONLY: use find_entity, not resolve_*. resolve_* creates a row
-        // for an unknown id — a typo'd agent_id on a documented read-only tool
-        // silently polluted the entity table.
-        let agent_norm = if agent_id.trim().is_empty() {
-            "default".to_string()
-        } else {
-            agent_id.trim().to_string()
-        };
-        let user_norm = if user_id.trim().is_empty() {
-            "default".to_string()
-        } else {
-            user_id.trim().to_string()
-        };
-        let agent_name = if agent_norm == "default" {
-            "Agent".to_string()
-        } else {
-            format!("Agent:{agent_norm}")
-        };
-        let user_name = if user_norm == "default" {
-            "User".to_string()
-        } else {
-            format!("User:{user_norm}")
-        };
-        let agent_key = format!("agent:{agent_norm}");
-        let agent_entity_id = self
-            .store
-            .find_entity(tenant_id, Some(&agent_key), &agent_name)?
-            .map(|(id, _, _)| id);
-        let user_entity_id = self
-            .store
-            .find_entity(tenant_id, Some(&user_norm), &user_name)?
-            .map(|(id, _, _)| id);
-
-        let default_payload = json!({
-            "tenant_id": tenant_id,
-            "agent_id": agent_id,
-            "user_id": user_id,
-            "exists": false,
-            "intimacy": 0.0,
-            "stage": "stranger",
-            "emotion_trend": "stable",
-            "recent_topics": [],
-            "updated_at": 0,
-        });
-        let (Some(agent_entity_id), Some(user_entity_id)) = (agent_entity_id, user_entity_id)
-        else {
-            // Unknown pair → default snapshot, no entity is created.
-            return Ok(ToolCallResult::text(default_payload.to_string()));
-        };
-        let rel = RelationshipStore::new(self.store.clone());
-        let state = rel.get_relationship(tenant_id, agent_entity_id, user_entity_id)?;
-
-        let payload = match state {
-            Some(s) => serialize_state(&s, agent_id, user_id),
-            None => default_payload,
-        };
-        Ok(ToolCallResult::text(payload.to_string()))
+        // The snapshot read is synchronous `rusqlite`; hand it to the blocking
+        // pool so a slow query cannot stall the tokio worker (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_relationship_query(store, &args)).await
     }
+}
+
+/// Synchronous body of `relationship_query`, executed on the blocking pool.
+fn run_relationship_query(
+    store: Arc<SqliteFactStore>,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let tenant_id = args
+        .get("tenant_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let agent_id = args
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidInput("missing `agent_id`".into()))?;
+    let user_id = args
+        .get("user_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidInput("missing `user_id`".into()))?;
+
+    // READ-ONLY: use find_entity, not resolve_*. resolve_* creates a row
+    // for an unknown id — a typo'd agent_id on a documented read-only tool
+    // silently polluted the entity table.
+    let agent_norm = if agent_id.trim().is_empty() {
+        "default".to_string()
+    } else {
+        agent_id.trim().to_string()
+    };
+    let user_norm = if user_id.trim().is_empty() {
+        "default".to_string()
+    } else {
+        user_id.trim().to_string()
+    };
+    let agent_name = if agent_norm == "default" {
+        "Agent".to_string()
+    } else {
+        format!("Agent:{agent_norm}")
+    };
+    let user_name = if user_norm == "default" {
+        "User".to_string()
+    } else {
+        format!("User:{user_norm}")
+    };
+    let agent_key = format!("agent:{agent_norm}");
+    let agent_entity_id = store
+        .find_entity(tenant_id, Some(&agent_key), &agent_name)?
+        .map(|(id, _, _)| id);
+    let user_entity_id = store
+        .find_entity(tenant_id, Some(&user_norm), &user_name)?
+        .map(|(id, _, _)| id);
+
+    let default_payload = json!({
+        "tenant_id": tenant_id,
+        "agent_id": agent_id,
+        "user_id": user_id,
+        "exists": false,
+        "intimacy": 0.0,
+        "stage": "stranger",
+        "emotion_trend": "stable",
+        "recent_topics": [],
+        "updated_at": 0,
+    });
+    let (Some(agent_entity_id), Some(user_entity_id)) = (agent_entity_id, user_entity_id) else {
+        // Unknown pair → default snapshot, no entity is created.
+        return Ok(ToolCallResult::text(default_payload.to_string()));
+    };
+    let rel = RelationshipStore::new(store);
+    let state = rel.get_relationship(tenant_id, agent_entity_id, user_entity_id)?;
+
+    let payload = match state {
+        Some(s) => serialize_state(&s, agent_id, user_id),
+        None => default_payload,
+    };
+    Ok(ToolCallResult::text(payload.to_string()))
 }
 
 /// Handler for the `persona_timeline` tool.
@@ -165,37 +187,50 @@ impl PersonaTimelineTool {
 #[async_trait]
 impl ToolHandler for PersonaTimelineTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let entity_id = args
-            .get("entity_id")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::InvalidInput("missing `entity_id`".into()))?;
-        // Tenant scoping, matching state_timeline / fact_provenance /
-        // decision_trace: a raw entity id carries no label, so it is enforced
-        // before the persona evolution is read. An omitted `tenant_id` means the
-        // LOCAL tenant, not "skip the check" (audit C1).
-        crate::mcp::tenant_scope::ensure_entity_tenant(
-            &self.store,
-            entity_id,
-            crate::mcp::types::identity_arg(args, "tenant_id"),
-        )?;
-        let timeline = build_timeline_for_entity(self.store.as_ref(), entity_id)?;
-        let payload = json!({
-            "entity_id": entity_id,
-            "start": timeline.start,
-            "milestones": timeline
-                .milestones
-                .iter()
-                .map(|m| json!({
-                    "type": m.milestone_type,
-                    "note": m.note,
-                    "fact": m.fact,
-                }))
-                .collect::<Vec<_>>(),
-            "current": timeline.current,
-            "trajectory": timeline.trajectory,
-        });
-        Ok(ToolCallResult::text(payload.to_string()))
+        // The timeline rebuild is synchronous `rusqlite`; hand it to the
+        // blocking pool so a slow read cannot stall the tokio worker
+        // (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_persona_timeline(store, &args)).await
     }
+}
+
+/// Synchronous body of `persona_timeline`, executed on the blocking pool.
+fn run_persona_timeline(
+    store: Arc<SqliteFactStore>,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let entity_id = args
+        .get("entity_id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::InvalidInput("missing `entity_id`".into()))?;
+    // Tenant scoping, matching state_timeline / fact_provenance /
+    // decision_trace: a raw entity id carries no label, so it is enforced
+    // before the persona evolution is read. An omitted `tenant_id` means the
+    // LOCAL tenant, not "skip the check" (audit C1).
+    crate::mcp::tenant_scope::ensure_entity_tenant(
+        &store,
+        entity_id,
+        crate::mcp::types::identity_arg(args, "tenant_id"),
+    )?;
+    let timeline = build_timeline_for_entity(store.as_ref(), entity_id)?;
+    let payload = json!({
+        "entity_id": entity_id,
+        "start": timeline.start,
+        "milestones": timeline
+            .milestones
+            .iter()
+            .map(|m| json!({
+                "type": m.milestone_type,
+                "note": m.note,
+                "fact": m.fact,
+            }))
+            .collect::<Vec<_>>(),
+        "current": timeline.current,
+        "trajectory": timeline.trajectory,
+    });
+    Ok(ToolCallResult::text(payload.to_string()))
 }
 
 /// Serialize a relationship state into a client-friendly JSON object.

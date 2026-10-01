@@ -38,50 +38,59 @@ pub struct MemoryExportHandler {
 #[async_trait::async_trait]
 impl ToolHandler for MemoryExportHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
+        // Reading the graph is async (`export_store` awaits the store), so that
+        // part stays on the shell. The file write and JSON serialization that
+        // follow are blocking and go to the blocking pool (audit 09-26/H7).
         let bundle = export_store(self.store.as_ref()).await?;
-        let documents = bundle.documents.len();
-        let objects = bundle.objects.len();
-        let edges = bundle.edges.len();
-        let evidence = bundle.evidence.len();
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_export_tool(&args, bundle)).await
+    }
+}
 
-        // Write to a file when a path is supplied; otherwise return the JSON.
-        if let Some(path) = args.get("path").and_then(Value::as_str) {
-            let resolved = match resolve_transfer_path(path) {
-                Ok(p) => p,
-                Err(e) => return Ok(err_result(e.to_string())),
-            };
-            if let Some(parent) = resolved.parent() {
-                std::fs::create_dir_all(parent).map_err(Error::Io)?;
-            }
-            let json = serde_json::to_string_pretty(&bundle)
-                .map_err(|e| Error::Internal(format!("serialize bundle: {e}")))?;
-            std::fs::write(&resolved, json).map_err(Error::Io)?;
-            return json_block(
-                &serde_json::json!({
-                    "exported": true,
-                    "path": resolved.to_string_lossy(),
-                    "documents": documents,
-                    "objects": objects,
-                    "edges": edges,
-                    "evidence": evidence,
-                }),
-                false,
-            );
+/// Synchronous tail of `memory_export`, executed on the blocking pool.
+fn run_export_tool(args: &Value, bundle: ExportBundle) -> Result<ToolCallResult> {
+    let documents = bundle.documents.len();
+    let objects = bundle.objects.len();
+    let edges = bundle.edges.len();
+    let evidence = bundle.evidence.len();
+
+    // Write to a file when a path is supplied; otherwise return the JSON.
+    if let Some(path) = args.get("path").and_then(Value::as_str) {
+        let resolved = match resolve_transfer_path(path) {
+            Ok(p) => p,
+            Err(e) => return Ok(err_result(e.to_string())),
+        };
+        if let Some(parent) = resolved.parent() {
+            std::fs::create_dir_all(parent).map_err(Error::Io)?;
         }
-
-        json_block(
+        let json = serde_json::to_string_pretty(&bundle)
+            .map_err(|e| Error::Internal(format!("serialize bundle: {e}")))?;
+        std::fs::write(&resolved, json).map_err(Error::Io)?;
+        return json_block(
             &serde_json::json!({
                 "exported": true,
-                "inline": true,
+                "path": resolved.to_string_lossy(),
                 "documents": documents,
                 "objects": objects,
                 "edges": edges,
                 "evidence": evidence,
-                "bundle": bundle,
             }),
             false,
-        )
+        );
     }
+
+    json_block(
+        &serde_json::json!({
+            "exported": true,
+            "inline": true,
+            "documents": documents,
+            "objects": objects,
+            "edges": edges,
+            "evidence": evidence,
+            "bundle": bundle,
+        }),
+        false,
+    )
 }
 
 /// `memory_import` handler.
@@ -191,27 +200,60 @@ fn err_result(message: impl Into<String>) -> ToolCallResult {
     }
 }
 
+/// Outcome of the synchronous `memory_import` prelude.
+enum ImportPrelude {
+    /// The bundle parsed; replay it into the store. Boxed so the enum's size is
+    /// not dominated by this variant (clippy `large_enum_variant`).
+    Bundle(Box<ExportBundle>),
+    /// The input was rejected with this client-facing message.
+    Rejected(String),
+}
+
+/// Synchronous prelude of `memory_import`: resolve the file (if any), read it,
+/// and parse the bundle. Runs on the blocking pool.
+fn read_import_bundle(args: &Value) -> Result<ImportPrelude> {
+    let raw = if let Some(path) = args.get("path").and_then(Value::as_str) {
+        let resolved = match resolve_transfer_path(path) {
+            Ok(p) => p,
+            Err(e) => return Ok(ImportPrelude::Rejected(e.to_string())),
+        };
+        match std::fs::read_to_string(&resolved) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(ImportPrelude::Rejected(format!(
+                    "read import file {path}: {e}"
+                )));
+            }
+        }
+    } else if let Some(content) = args.get("content").and_then(Value::as_str) {
+        content.to_string()
+    } else {
+        return Ok(ImportPrelude::Rejected(
+            "memory_import requires `content` or `path`".to_string(),
+        ));
+    };
+
+    let bundle: ExportBundle = match serde_json::from_str(&raw) {
+        Ok(b) => b,
+        Err(e) => {
+            return Ok(ImportPrelude::Rejected(format!(
+                "invalid memory bundle: {e}"
+            )));
+        }
+    };
+    Ok(ImportPrelude::Bundle(Box::new(bundle)))
+}
+
 #[async_trait::async_trait]
 impl ToolHandler for MemoryImportHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
-        let raw = if let Some(path) = args.get("path").and_then(Value::as_str) {
-            let resolved = match resolve_transfer_path(path) {
-                Ok(p) => p,
-                Err(e) => return Ok(err_result(e.to_string())),
-            };
-            match std::fs::read_to_string(&resolved) {
-                Ok(s) => s,
-                Err(e) => return Ok(err_result(format!("read import file {path}: {e}"))),
-            }
-        } else if let Some(content) = args.get("content").and_then(Value::as_str) {
-            content.to_string()
-        } else {
-            return Ok(err_result("memory_import requires `content` or `path`"));
-        };
-
-        let bundle: ExportBundle = match serde_json::from_str(&raw) {
-            Ok(b) => b,
-            Err(e) => return Ok(err_result(format!("invalid memory bundle: {e}"))),
+        // Reading the file and parsing the bundle is blocking; run it on the
+        // blocking pool. `import_bundle` is async, so the replay stays on this
+        // shell (audit 09-26/H7).
+        let args = args.clone();
+        let bundle = match crate::mcp::blocking::run(move || read_import_bundle(&args)).await? {
+            ImportPrelude::Bundle(bundle) => bundle,
+            ImportPrelude::Rejected(message) => return Ok(err_result(message)),
         };
         match import_bundle(self.store.as_ref(), &bundle).await {
             Ok(stats) => json_block(

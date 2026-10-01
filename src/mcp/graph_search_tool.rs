@@ -66,7 +66,10 @@ impl ToolHandler for GraphSearchTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
         let name_contains = args.get("query").and_then(Value::as_str);
         let object_type = args.get("object_type").and_then(Value::as_str);
-        let attribute = args.get("attribute").and_then(Value::as_str);
+        let attribute = args
+            .get("attribute")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let limit = args
             .get("limit")
             .and_then(Value::as_u64)
@@ -85,38 +88,54 @@ impl ToolHandler for GraphSearchTool {
 
         let objects = self
             .store
-            .search_objects(name_contains, object_type, attribute, doc_id, limit)
+            .search_objects(
+                name_contains,
+                object_type,
+                attribute.as_deref(),
+                doc_id,
+                limit,
+            )
             .await?;
         let titles = doc_title_by_id(self.store.as_ref()).await?;
 
-        let mut results = Vec::with_capacity(objects.len());
+        // The per-object edge count is fetched here (async); the attribute
+        // matching and JSON assembly that follow are synchronous, so they run
+        // on the blocking pool (audit 09-26/H7).
+        let mut edge_counts = Vec::with_capacity(objects.len());
         for obj in &objects {
-            let edge_count = self.store.get_edges_touching(obj.id).await?.len();
-            let attrs = matched_attributes(&obj.properties, attribute);
-            results.push(serde_json::json!({
-                "name": obj.name,
-                "object_type": obj.object_type.as_str(),
-                "doc_title": titles.get(&obj.doc_id).cloned().unwrap_or_default(),
-                "confidence": obj.confidence,
-                "edge_count": edge_count,
-                "matched_attributes": attrs,
-            }));
+            edge_counts.push(self.store.get_edges_touching(obj.id).await?.len());
         }
 
-        let text = serde_json::to_string_pretty(&serde_json::json!({
-            "total": results.len(),
-            "results": results,
-        }))
-        .map_err(|e| crate::error::Error::Internal(format!("serialize results: {e}")))?;
+        crate::mcp::blocking::run(move || {
+            let mut results = Vec::with_capacity(objects.len());
+            for (obj, edge_count) in objects.iter().zip(edge_counts.iter()) {
+                let attrs = matched_attributes(&obj.properties, attribute.as_deref());
+                results.push(serde_json::json!({
+                    "name": obj.name,
+                    "object_type": obj.object_type.as_str(),
+                    "doc_title": titles.get(&obj.doc_id).cloned().unwrap_or_default(),
+                    "confidence": obj.confidence,
+                    "edge_count": edge_count,
+                    "matched_attributes": attrs,
+                }));
+            }
 
-        Ok(ToolCallResult {
-            content: vec![ContentBlock {
-                block_type: "text".into(),
-                text: Some(text),
-                mime_type: Some("application/json".into()),
-            }],
-            is_error: false,
+            let text = serde_json::to_string_pretty(&serde_json::json!({
+                "total": results.len(),
+                "results": results,
+            }))
+            .map_err(|e| crate::error::Error::Internal(format!("serialize results: {e}")))?;
+
+            Ok(ToolCallResult {
+                content: vec![ContentBlock {
+                    block_type: "text".into(),
+                    text: Some(text),
+                    mime_type: Some("application/json".into()),
+                }],
+                is_error: false,
+            })
         })
+        .await
     }
 }
 

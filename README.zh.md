@@ -411,7 +411,7 @@ cargo run --bin mnemosyne \
 
 ```bash
 make check      # cargo clippy + cargo check（0 error）
-make test       # 800+ 单元 + 集成测试（nextest，热缓存约 1s）
+make test       # 970+ 单元 + 集成测试（nextest，热缓存约 1s）
 ```
 
 测试套件**自包含**：每个用例自建合成语料与内存 SQLite，全新 checkout 即可通过，
@@ -474,7 +474,10 @@ cargo test --test cognitive_state_e2e -- --nocapture
 | `MEMORY_VECTOR_DIM` | `0` | 0 = 纯关键词（FTS5），>0 = 向量检索 |
 | `MEMORY_EMBEDDING_PROVIDER` | `none` | `none` / `openai` / `ollama` |
 | `MEMORY_RETRIEVAL_MODE` | `keyword` | `keyword` / `vector` / `hybrid` |
-| `FACTION_MAP_PATH` | `config/faction_map.json` | 阵营映射配置 |
+| `MNEMOSYNE_HOME` | — | 资源根目录覆盖（词表与 `config/` 文件）；未设置时自动探测 |
+
+> 各资源路径的环境变量（`FACTION_MAP_PATH`、`DICTIONARY_PATH` 等）已在 0.1.2
+> 移除——请用 `MNEMOSYNE_HOME` 指定资源根目录。
 
 ---
 
@@ -482,7 +485,7 @@ cargo test --test cognitive_state_e2e -- --nocapture
 
 ```bash
 make check      # cargo clippy + cargo check
-make test       # 全部 800+ 测试
+make test       # 全部 970+ 测试
 make fmt        # 格式化代码
 ```
 

@@ -83,30 +83,34 @@ impl DecisionTraceTool {
 #[async_trait]
 impl ToolHandler for DecisionTraceTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
-        let decision_id = args
-            .get("decision_id")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::InvalidInput("missing required argument `decision_id`".into()))?;
-        if decision_id <= 0 {
-            return Err(Error::InvalidInput(format!(
-                "decision_id must be positive, got {decision_id}"
-            )));
-        }
-        let decision = self
-            .store
-            .get_decision(decision_id)?
-            .ok_or_else(|| Error::NotFound(format!("no decision with id {decision_id}")))?;
-        // A decision id alone does not say which label it carries: enforce it
-        // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
-        // not "skip the check" (audit C1).
-        tenant_scope::ensure_entity_tenant(
-            &self.store,
-            decision.subject,
-            identity_arg(args, "tenant_id"),
-        )?;
-        let payload = decision_json(self.store.as_ref(), &decision)?;
-        Ok(ToolCallResult::text(payload.to_string()))
+        // Tracing reads `rusqlite` synchronously; hand it to the blocking pool
+        // (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_decision_trace(&store, &args)).await
     }
+}
+
+/// Synchronous body of `decision_trace`, executed on the blocking pool.
+fn run_decision_trace(store: &SqliteFactStore, args: &Value) -> Result<ToolCallResult> {
+    let decision_id = args
+        .get("decision_id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::InvalidInput("missing required argument `decision_id`".into()))?;
+    if decision_id <= 0 {
+        return Err(Error::InvalidInput(format!(
+            "decision_id must be positive, got {decision_id}"
+        )));
+    }
+    let decision = store
+        .get_decision(decision_id)?
+        .ok_or_else(|| Error::NotFound(format!("no decision with id {decision_id}")))?;
+    // A decision id alone does not say which label it carries: enforce it
+    // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
+    // not "skip the check" (audit C1).
+    tenant_scope::ensure_entity_tenant(store, decision.subject, identity_arg(args, "tenant_id"))?;
+    let payload = decision_json(store, &decision)?;
+    Ok(ToolCallResult::text(payload.to_string()))
 }
 
 /// Handler for the `decision_search` tool.
@@ -125,39 +129,48 @@ impl DecisionSearchTool {
 #[async_trait]
 impl ToolHandler for DecisionSearchTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
-        let subject = parse_subject(args)?;
-        let keyword = match args.get("keyword") {
-            Some(Value::Null) | None => String::new(),
-            Some(value) => value
-                .as_str()
-                .ok_or_else(|| Error::InvalidInput("`keyword` must be a string".into()))?
-                .to_string(),
-        };
-        let limit = match args.get("limit") {
-            Some(Value::Null) | None => 10usize,
-            Some(value) => {
-                let requested = value
-                    .as_u64()
-                    .ok_or_else(|| Error::InvalidInput("`limit` must be an integer".into()))?;
-                // Clamp to the schema maximum; `min` keeps the cast to `usize`
-                // in range on every target.
-                requested.min(MAX_DECISION_SEARCH_LIMIT) as usize
-            }
-        };
-        // A subject id alone does not say which label it carries: enforce it
-        // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
-        // not "skip the check" (audit C1).
-        tenant_scope::ensure_entity_tenant(&self.store, subject, identity_arg(args, "tenant_id"))?;
-
-        let decisions = self.store.search_decisions(subject, &keyword)?;
-        let mut payloads = Vec::new();
-        for decision in decisions.into_iter().take(limit) {
-            payloads.push(decision_json(self.store.as_ref(), &decision)?);
-        }
-        Ok(ToolCallResult::text(
-            json!({ "decisions": payloads }).to_string(),
-        ))
+        // Searching reads `rusqlite` synchronously; hand it to the blocking pool
+        // (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_decision_search(&store, &args)).await
     }
+}
+
+/// Synchronous body of `decision_search`, executed on the blocking pool.
+fn run_decision_search(store: &SqliteFactStore, args: &Value) -> Result<ToolCallResult> {
+    let subject = parse_subject(args)?;
+    let keyword = match args.get("keyword") {
+        Some(Value::Null) | None => String::new(),
+        Some(value) => value
+            .as_str()
+            .ok_or_else(|| Error::InvalidInput("`keyword` must be a string".into()))?
+            .to_string(),
+    };
+    let limit = match args.get("limit") {
+        Some(Value::Null) | None => 10usize,
+        Some(value) => {
+            let requested = value
+                .as_u64()
+                .ok_or_else(|| Error::InvalidInput("`limit` must be an integer".into()))?;
+            // Clamp to the schema maximum; `min` keeps the cast to `usize`
+            // in range on every target.
+            requested.min(MAX_DECISION_SEARCH_LIMIT) as usize
+        }
+    };
+    // A subject id alone does not say which label it carries: enforce it
+    // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
+    // not "skip the check" (audit C1).
+    tenant_scope::ensure_entity_tenant(store, subject, identity_arg(args, "tenant_id"))?;
+
+    let decisions = store.search_decisions(subject, &keyword)?;
+    let mut payloads = Vec::new();
+    for decision in decisions.into_iter().take(limit) {
+        payloads.push(decision_json(store, &decision)?);
+    }
+    Ok(ToolCallResult::text(
+        json!({ "decisions": payloads }).to_string(),
+    ))
 }
 
 /// Return the stable MCP schema for `decision_trace`.

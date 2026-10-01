@@ -85,71 +85,76 @@ fn transition_json(transition: &crate::state::StateTransition) -> Value {
 #[async_trait]
 impl ToolHandler for StateTimelineTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
-        let entity_id = args
-            .get("entity_id")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::InvalidInput("missing required argument `entity_id`".into()))?;
-
-        let dimension_filter = match args.get("dimension") {
-            Some(Value::Null) | None => None,
-            Some(value) => {
-                let name = value
-                    .as_str()
-                    .ok_or_else(|| Error::InvalidInput("`dimension` must be a string".into()))?;
-                let known = state_timeline_dimensions();
-                if !known.contains(&name) {
-                    return Err(Error::InvalidInput(format!(
-                        "unknown dimension `{name}`, expected one of {known:?}"
-                    )));
-                }
-                Some(name.to_string())
-            }
-        };
-
-        // An id alone does not say which label it carries: enforce it before
-        // reading, always. An omitted `tenant_id` means the LOCAL tenant, not
-        // "skip the check" (audit C1).
-        tenant_scope::ensure_entity_tenant(
-            &self.store,
-            entity_id,
-            identity_arg(args, "tenant_id"),
-        )?;
-
-        let facts = self.store.get_facts(entity_id)?;
-        let engine = StateEngine::new();
-        let evolutions = engine.aggregate_intervals(&facts);
-
-        let filtered: Vec<Value> = evolutions
-            .iter()
-            .filter(|evolution| {
-                dimension_filter
-                    .as_deref()
-                    .map(|name| evolution.key == name)
-                    .unwrap_or(true)
-            })
-            .map(|evolution| {
-                json!({
-                    "dimension": evolution.key,
-                    "intervals": evolution
-                        .intervals
-                        .iter()
-                        .map(interval_json)
-                        .collect::<Vec<_>>(),
-                    "transitions": evolution
-                        .transitions
-                        .iter()
-                        .map(transition_json)
-                        .collect::<Vec<_>>(),
-                })
-            })
-            .collect();
-
-        let payload = json!({
-            "entity_id": entity_id,
-            "dimensions": filtered,
-        });
-        Ok(ToolCallResult::text(payload.to_string()))
+        // The projection is synchronous `rusqlite` work; hand it to the
+        // blocking pool so it cannot stall the tokio worker (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_state_timeline(&store, &args)).await
     }
+}
+
+/// Synchronous body of `state_timeline`, executed on the blocking pool.
+fn run_state_timeline(store: &SqliteFactStore, args: &Value) -> Result<ToolCallResult> {
+    let entity_id = args
+        .get("entity_id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::InvalidInput("missing required argument `entity_id`".into()))?;
+
+    let dimension_filter = match args.get("dimension") {
+        Some(Value::Null) | None => None,
+        Some(value) => {
+            let name = value
+                .as_str()
+                .ok_or_else(|| Error::InvalidInput("`dimension` must be a string".into()))?;
+            let known = state_timeline_dimensions();
+            if !known.contains(&name) {
+                return Err(Error::InvalidInput(format!(
+                    "unknown dimension `{name}`, expected one of {known:?}"
+                )));
+            }
+            Some(name.to_string())
+        }
+    };
+
+    // An id alone does not say which label it carries: enforce it before
+    // reading, always. An omitted `tenant_id` means the LOCAL tenant, not
+    // "skip the check" (audit C1).
+    tenant_scope::ensure_entity_tenant(store, entity_id, identity_arg(args, "tenant_id"))?;
+
+    let facts = store.get_facts(entity_id)?;
+    let engine = StateEngine::new();
+    let evolutions = engine.aggregate_intervals(&facts);
+
+    let filtered: Vec<Value> = evolutions
+        .iter()
+        .filter(|evolution| {
+            dimension_filter
+                .as_deref()
+                .map(|name| evolution.key == name)
+                .unwrap_or(true)
+        })
+        .map(|evolution| {
+            json!({
+                "dimension": evolution.key,
+                "intervals": evolution
+                    .intervals
+                    .iter()
+                    .map(interval_json)
+                    .collect::<Vec<_>>(),
+                "transitions": evolution
+                    .transitions
+                    .iter()
+                    .map(transition_json)
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    let payload = json!({
+        "entity_id": entity_id,
+        "dimensions": filtered,
+    });
+    Ok(ToolCallResult::text(payload.to_string()))
 }
 
 /// Return the stable MCP schema for `state_timeline`.

@@ -149,23 +149,15 @@ impl ToolHandler for TracePathTool {
         // still enforced as an error rather than an `expect`: this runs inside
         // a request handler, so a future break of that invariant must fail the
         // call, not panic the server for every other client.
-        let mut node_ids = vec![tgt.id];
-        let mut rels = Vec::new();
-        let mut cur = tgt.id;
-        while cur != src.id {
-            let (parent, edge) = prev.get(&cur).cloned().ok_or_else(|| {
-                Error::Internal(format!("path node {cur} is absent from the BFS tree"))
-            })?;
-            let edge = edge.ok_or_else(|| {
-                Error::Internal(format!("path node {cur} has no discovering edge"))
-            })?;
-            // The predicate is read off the edge regardless of direction.
-            rels.push(edge.predicate.clone());
-            node_ids.push(parent);
-            cur = parent;
-        }
-        node_ids.reverse();
-        rels.reverse();
+        //
+        // The graph reads above go through `SQLiteKnowledgeStore`'s async API,
+        // so those awaits stay on the worker; the synchronous backtracking that
+        // rebuilds the path is handed to the blocking pool instead, so the walk
+        // cannot stall the worker (audit 09-26/H7).
+        let src_id = src.id;
+        let tgt_id = tgt.id;
+        let (node_ids, rels) =
+            crate::mcp::blocking::run(move || reconstruct_path(&prev, src_id, tgt_id)).await?;
 
         // Map ids back to names for a readable path.
         let mut names = Vec::with_capacity(node_ids.len());
@@ -189,6 +181,34 @@ impl ToolHandler for TracePathTool {
             false,
         )
     }
+}
+
+/// Synchronous path reconstruction for `trace_path`, executed on the blocking
+/// pool: walk `prev` back from the target to the source, returning the ordered
+/// node ids and the relation predicate on each hop (both reversed to read
+/// source → target).
+fn reconstruct_path(
+    prev: &HashMap<i64, (i64, Option<KnowledgeEdge>)>,
+    src_id: i64,
+    tgt_id: i64,
+) -> Result<(Vec<i64>, Vec<String>)> {
+    let mut node_ids = vec![tgt_id];
+    let mut rels = Vec::new();
+    let mut cur = tgt_id;
+    while cur != src_id {
+        let (parent, edge) = prev.get(&cur).cloned().ok_or_else(|| {
+            Error::Internal(format!("path node {cur} is absent from the BFS tree"))
+        })?;
+        let edge = edge
+            .ok_or_else(|| Error::Internal(format!("path node {cur} has no discovering edge")))?;
+        // The predicate is read off the edge regardless of direction.
+        rels.push(edge.predicate.clone());
+        node_ids.push(parent);
+        cur = parent;
+    }
+    node_ids.reverse();
+    rels.reverse();
+    Ok((node_ids, rels))
 }
 
 /// Register the `trace_path` tool on `builder`.

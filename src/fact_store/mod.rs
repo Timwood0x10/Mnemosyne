@@ -4,7 +4,7 @@
 //! crate-wide storage error type. No database or serialization failure is
 //! converted into a successful-looking zero or empty result.
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -134,8 +134,14 @@ const INSERT_FACT_SQL: &str =
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
 /// SQLite-backed fact store.
+///
+/// The handle is `Clone`: every clone shares the SAME connection through the
+/// inner `Arc`, so a clone can be moved into `spawn_blocking` (see
+/// `crate::blocking`) to run synchronous rusqlite off the async workers while
+/// keeping one serialized connection.
+#[derive(Clone)]
 pub struct SqliteFactStore {
-    conn: Mutex<Connection>,
+    conn: Arc<Mutex<Connection>>,
 }
 
 impl SqliteFactStore {
@@ -151,7 +157,7 @@ impl SqliteFactStore {
         conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         Self::initialize_schema(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 
@@ -165,7 +171,7 @@ impl SqliteFactStore {
         conn.execute_batch("PRAGMA busy_timeout = 5000;")?;
         Self::initialize_schema(&conn)?;
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
         })
     }
 

@@ -1,23 +1,27 @@
-# 评审状态总表（唯一权威状态文档）— 2026-09-29
+# 评审状态总表（唯一权威状态文档）— 2026-09-30
 
-> 本文件是仓库内**唯一**的评审状态来源。四份历史评审文件（`review-2026-09-25.md`、`review-2026-09-26.md`、
-> `review-2026-09-27.md`、`review-fixes-2026-09-27.md`）的编号彼此冲突，**已被冻结为历史**，仅保留其正文作为过程记录
-> （文件顶部均已加状态横幅）。任何 ID 引用一律按「**报告日期/ID**」消歧，例如 `09-26/H7` 与 `09-27/H1` 是两条不同的缺陷。
+> 本文件是仓库内**唯一**的评审状态来源。历史上的四份评审正文（`review-2026-09-25.md`、`review-2026-09-26.md`、
+> `review-2026-09-27.md`、`review-fixes-2026-09-27.md`）编号彼此冲突，且前三份已在**收敛时并入本文件**并随之移除
+> （保留的第四份 `review-fixes-2026-09-27.md` 仍在仓库中作为过程记录）。因此历史条目的**正文不再单独存在**，其
+> 结论一律以本文件的 CLOSED / OPEN 两张表为准；任何 ID 引用一律按「**报告日期/ID**」消歧，例如 `09-26/H7` 与
+> `09-27/H1` 是两条不同的缺陷。
 >
 > 治理规则以 **`plan/rules/rules.md`** 为准（仓库内**不存在** `code_rules.md`）。
 
 ---
 
-## 1. 门禁快照（2026-09-29）
+## 1. 门禁快照（2026-09-30）
 
 | 检查 | 结果 |
 |---|---|
 | `make check`（`cargo clippy --all-targets --all-features` + check） | ✅ **0 error / 0 warning** |
-| `make test`（cargo nextest） | ✅ **972 passed / 0 failed / 12 skipped** |
+| `make test`（cargo nextest） | ✅ **977 passed / 0 failed / 12 skipped** |
 | `cargo fmt --all --check` | ✅ clean |
-| 最长源文件 | 950 行（`src/ingest/characters/data.rs`）→ 规则 §1（≤1000）通过 |
+| `cargo clippy --all-targets -- -D warnings`（release.yml lint 门禁） | ✅ clean |
+| `cargo test --doc` | ✅ 4 passed / 0 failed（6 ignored） |
+| 最长源文件 | 980 行（`src/mcp/memory_compile.rs`）→ 规则 §1（≤1000）通过 |
 | `#[allow(...)]` 属性 | 0 处（仅注释中提及该属性） |
-| 基线 / 变更 | `dev @ e05442e` 基础上叠加**未提交**的 A–D 批次与「后续」批次 |
+| 基线 / 变更 | `dev @ e05442e` 基础上叠加**未提交**的 A–F、G 批次与「后续」批次 |
 | 依据规则 | `plan/rules/rules.md`（无 `code_rules.md`） |
 
 ---
@@ -96,6 +100,31 @@
 | D | 运维 / 安全 / 配置 | `09-26/H14,H16,H17,H18,H19`、`09-26/L9` | 已修；`try_init`/`config-check` 已接入启动路径 |
 | 后续 | 其余可局部修项 | `09-26/H9,H13,H15`、`09-27/M7,M8` | 已修 |
 | E | 文档收敛 | 四份历史评审消歧 | 已完成（本文件 + 4 处横幅） |
+| F | MCP 分发架构 | `09-26/H7`、`09-27/M6` | 已完成（见 §2.6） |
+| G | 架构：store 层下沉 | 「store 层阻塞」（同级 H7 的下一层） | 已完成（见 §2.7） |
+
+### 2.6 批次 F 明细（2026-09-30）
+
+| 子项 | 处置 | 落点 |
+|---|---|---|
+| H7：同步 `rusqlite` 跑在 async worker 上 | 新增阻塞池桥 `mcp::blocking::run`（`spawn_blocking` + `JoinError`→`Error::Internal`），17 个 handler 文件、27 个 handler 改为「薄 async 壳 + 同步自由函数」；凡 handler 内含真实 `.await`（embedding / distiller / 网络）者，仅把**同步** store/compiler/JSON 段移入闭包，await 留在壳内 | [blocking.rs](src/mcp/blocking.rs)、`src/mcp/*_tool.rs`、`src/mcp/knowledge_tools.rs`、`src/mcp/external_knowledge_tools.rs`、`src/mcp/memory_compile.rs`、`src/mcp/memory_transfer_tools.rs` |
+| M6：慢工具无响应、分发无超时 | `MCPServer` 新增 `tool_timeout`（默认 [`DEFAULT_TOOL_TIMEOUT`](src/mcp/server.rs) = 60s，可经 `ServerBuilder::tool_timeout` 覆盖）；超时返回结构化 `isError: true` 结果而非丢弃响应，保持「一请求一响应」 | [server.rs](src/mcp/server.rs) |
+
+> 遗留（**不属**本批次范围，已记入 §3）：部分 handler 的 SQL 实际位于 store 的 `async fn` 内部（tokio `Mutex` 后仍跑同步 rusqlite），
+> 真正的阻塞源在 store 层；handler 层已把自身同步计算移出，store 层下沉由批次 G 收口（见 §2.7）。
+
+### 2.7 批次 G 明细（2026-09-30）
+
+| 子项 | 处置 | 落点 |
+|---|---|---|
+| store 层同步 `rusqlite` 跑在 async worker 上（H7 的下一层） | 新增中立阻塞池桥 [`crate::blocking::run`](src/blocking.rs)（`spawn_blocking` + `JoinError`→`Error::Internal`），`src/mcp/blocking.rs` 改为 `pub use` 转发（不删文件，handler 调用点零改动，且避免 storage→mcp 的分层倒置） | [blocking.rs](src/blocking.rs)、[mcp/blocking.rs](src/mcp/blocking.rs)、[lib.rs](src/lib.rs) |
+| 知识库 store 的连接与锁 | `conn: tokio::Mutex<Connection>` → `Arc<std::sync::Mutex<Connection>>`（`spawn_blocking` 的闭包必须 `'static`，无法在阻塞线程内 `await` 取 tokio 锁）；新增 `with_conn(work)` 把「克隆 Arc → 同步 lock → 执行 SQL」整体放进阻塞池，**锁绝不跨 `await`**；std Mutex 毒化按 `into_inner()` 恢复（与替换前 tokio Mutex 无毒化行为等价） | [store/mod.rs](src/knowledge/store/mod.rs)、[world_io.rs](src/knowledge/store/world_io.rs)、[trait_impl.rs](src/knowledge/store/trait_impl.rs)、[queries.rs](src/knowledge/store/queries.rs) |
+| `Box<dyn ToSql>` 跨线程 | `find_object_by_name` / `resolve_chapter_nos` / `search_evidence_query` / `get_evidence_for_many_query` 的参数对象补 `+ Send`，否则无法移入阻塞闭包 | [trait_impl.rs](src/knowledge/store/trait_impl.rs)、[queries.rs](src/knowledge/store/queries.rs) |
+| story_bridge 的 fact-store 调用 | `bridge_story_events_to_persona` 保持 `&SqliteFactStore` 签名（不改调用点），新增 `on_blocking` 把 4 处同步调用（`resolve_agent` / `get_facts` ×2 / `insert_batch`）送入阻塞池；`SqliteFactStore` 改 `Arc<Mutex<Connection>>` + `#[derive(Clone)]`，克隆共享同一连接 | [story_bridge.rs](src/story_bridge.rs)、[fact_store/mod.rs](src/fact_store/mod.rs) |
+
+> 语义保持：JSON 负载、错误类型、事务边界（`BEGIN`/`COMMIT`/`ROLLBACK` 仍各自独立取锁，行为与批次 G 之前一致）均未变。
+> **有意收紧的两处**：`link_event_participant_row`、`upsert_world_state_row` 原先「两次上锁」合并为一次阻塞跳 + 一次锁，
+> 更原子（并发写者无法在 entity upsert 与 participant/state 插入之间删除该 entity），已在代码注释中说明。
 
 ---
 
@@ -103,11 +132,11 @@
 
 | 消歧 ID | 位置（file:line） | 问题一句话 | 严重度 | 批次 |
 |---|---|---|---|---|
-| 09-26/H7 | `src/mcp/context_aware.rs:153`、`src/mcp/server.rs:196` | 同步 rusqlite 跑在 async worker 上；分发串行且无超时（与 `09-27/M6` 慢工具响应丢失同源） | High | **F（架构，待设计）** |
-| 09-26/M1–M58 | 全库（见 09-26 §4） | Medium 批（未逐条复核，保留原报告清单） | Medium | 后续 |
-| 09-26/L1–L42 | 全库（见 09-26 §5） | Low 批（未逐条复核，保留原报告清单） | Low | 后续 |
-| 09-27/M2,M3,M6,M11,M12 | `src/observation_compiler.rs`、`src/compiler/extract.rs`、`src/mcp/http_server.rs`、`src/knowledge/memory_export.rs` | evidence 链未端到端、relation 无锚点、慢工具响应丢失、导出边去重丢时序、同名文档关联丢失 | Medium | 后续 |
-| 09-27/L1–L14 | 全库（见 09-27 §Low） | Low 批（`L9` 空 token 已修，其余含时序输出非确定、阈值缝隙等） | Low | 后续 |
+| 09-27/M2,M3,M11,M12 | `src/observation_compiler.rs`、`src/compiler/extract.rs`、`src/knowledge/memory_export.rs` | evidence 链未端到端、relation 无锚点、导出边去重丢时序、同名文档关联丢失 | Medium | 后续 |
+| 同层残留（非本批次） | `src/store/repository.rs`、`src/store/mod.rs`、`src/character/store.rs`、`src/character/mod.rs` | 与 store 层同一形态的「`async fn` 内 tokio `Mutex` 后跑同步 rusqlite」；批次 G 范围仅限 `src/knowledge/store/*` 与 `story_bridge.rs`，故此处备案为后续 | Medium | 后续 |
+| 09-26/M1–M58 | 全库 | Medium 批（未逐条复核；原报告正文已并入本文件时收敛，清单不再单独保留） | Medium | 后续 |
+| 09-26/L1–L42 | 全库 | Low 批（未逐条复核；同上，清单不再单独保留） | Low | 后续 |
+| 09-27/L1–L14 | 全库 | Low 批（`L9` 空 token 已修，其余含时序输出非确定、阈值缝隙等；原清单不再单独保留） | Low | 后续 |
 | 复核/R5 | `src/store/tests.rs`（多处，如 :54,:60,:80,:256,:263,:305,:493,:516） | 存量测试缺 `Objective:`/`Invariants:` 文档注释（规则 §IV.1） | Low | 后续 |
 
 ### 3.1 复核结论中「不采纳」的一条
@@ -122,8 +151,7 @@
 
 | 批次 | 主题 | 包含条目 | 目标 |
 |---|---|---|---|
-| **F** | 架构：MCP 分发 | `09-26/H7` + `09-27/M6` | 同步 SQLite 移出 async worker（`spawn_blocking`）、分发去串行化、加请求超时；需先做设计评审，不适合一次性热修 |
-| 后续 | 其余 | `09-26/M1–M58`、`09-26/L1–L42`、`09-27` 其余 M/L、复核/R5 | 按迭代清理 |
+| 后续 | 其余 | `09-26/M1–M58`、`09-26/L1–L42`、`09-27` 其余 M/L、复核/R5、§3「同层残留」 | 按迭代清理 |
 
 ---
 
@@ -142,6 +170,20 @@
 复核确认无发现的契约：`resolver.rs` 恒等捷径与双空集、四处 `LeftmostLongest`（失败路径未变 panic）、
 存储四类读路径的过期门与 LIKE 转义、hybrid 候选并集、FTS 回填、`self_disclosure` 精确 offset/length、规则合规（无 `#[allow]`）。
 
+### 5.1 批次 G 复核（2026-09-30）
+
+对批次 G 改动逐文件复核（`blocking.rs`、`knowledge/store/{mod,world_io,trait_impl,queries}.rs`、`story_bridge.rs`、`fact_store/mod.rs`）：
+
+| 检查项 | 结论 |
+|---|---|
+| 是否有锁跨 `await` | 无。`with_conn` 的连接 guard 完全在阻塞闭包内创建并析构；`with_foreign_keys_disabled` 等组合方法每次只取一次锁 |
+| 是否有同锁重入（std `Mutex` 不可重入 → 自死锁） | 无。闭包类型为 `FnOnce(&Connection) -> Result<T>` 且 `'static`，无法捕获 `self`，编译器即排除了嵌套调用 store 方法 |
+| 阻塞池内是否有嵌套运行时（`block_on`） | 全库 `src/` 无 `block_on` 调用，不存在「阻塞线程等自己」的路径 |
+| 事务边界是否变化 | 未变：`BEGIN`/`COMMIT`/`ROLLBACK` 仍各自独立取锁（与 G 之前一致，属既有设计）；PRAGMA/`is_autocommit` 为连接级，跨不同阻塞线程使用同一连接由 std `Mutex` 串行化 |
+| 语义/负载/错误类型 | 未变（见 §2.7 尾注）；仅 `link_event_participant_row`/`upsert_world_state_row` 由两次上锁合并为一次，属收紧 |
+| 性能副作用 | 每次 SQL 增加一次阻塞池调度；`entity_timeline`/`relation_graph` 的逐邻居 `get_object` 循环会放大该开销。属既有循环结构，未在本批次改变算法，备案为后续可选优化 |
+| 规则合规 | 最长文件 980 行（≤1000）、`#[allow(...)]` 0 处、注释全英文、改动后 `cargo fmt --all` 已执行 |
+
 ---
 
 ## 6. 编号消歧约定与历史文件冻结
@@ -149,5 +191,6 @@
 由于四份历史评审文件的编号（`C`/`H`/`M`/`L`）在各自文件内独立编号、**彼此冲突**（例如同写 `H1`，`09-26/H1` 指
 `knowledge_attach` 路径穿越，而 `09-27/H1` 指单字 Jaccard 相似度 bug；`H2`/`H3`/`H5` 亦同样撞号），
 **任何引用一律写成 `<报告日期>/<ID>`**（如 `09-26/H7`、`09-27/H1`），不得裸引 ID。
-四份历史文件已**冻结为历史**：其正文不再更新，仅在文件顶部加了指向本文件的状态横幅；本文件是唯一的权威状态与
-「未关闭清单」来源。
+其中 `review-2026-09-25.md` / `review-2026-09-26.md` / `review-2026-09-27.md` 三份已在收敛时**并入本文件并移除**，
+`review-fixes-2026-09-27.md` 保留在仓库中；被并入条目的正文不再单独维护，其状态一律以本文件的 CLOSED / OPEN
+两节为准，本文件是唯一的权威状态与「未关闭清单」来源。

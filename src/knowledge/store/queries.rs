@@ -1,6 +1,12 @@
 //! Query projections: entity views, timelines, relation graphs and evidence
 //! search. Kept as inherent methods so the single `KnowledgeStore` trait impl
-//! can stay in `mod.rs` (Rust forbids splitting one trait impl across files).
+//! can stay in `trait_impl.rs` (Rust forbids splitting one trait impl across
+//! files).
+//!
+//! Composed queries (`inspect_entity`, `entity_timeline`, `relation_graph`)
+//! stay `async` and combine the store's own blocking-pool methods; each
+//! *statement* the store issues runs on the blocking pool through
+//! [`SQLiteKnowledgeStore::with_conn`] (batch G), never on a tokio worker.
 
 use super::*;
 
@@ -11,36 +17,40 @@ impl SQLiteKnowledgeStore {
         properties: &serde_json::Value,
         confidence: Option<f64>,
     ) -> Result<usize> {
+        let properties = properties.clone();
         // Read-modify-write runs inside a SINGLE lock critical section (the
         // conn guard is held across SELECT and UPDATE), so concurrent callers
         // serialize and no lost update occurs.
-        let conn = self.conn.lock().await;
-        let existing: Option<(String, f64)> = conn
-            .query_row(
-                "SELECT properties, confidence FROM knowledge_objects WHERE id = ?1",
-                params![id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let Some((raw, stored_confidence)) = existing else {
-            return Ok(0);
-        };
-        let mut merged = serde_json::from_str::<serde_json::Value>(&raw)
-            .unwrap_or_else(|_| serde_json::json!({}));
-        if let (Some(merged_obj), Some(new_obj)) = (merged.as_object_mut(), properties.as_object())
-        {
-            for (k, v) in new_obj {
-                merged_obj.insert(k.clone(), v.clone());
+        self.with_conn(move |conn| {
+            let existing: Option<(String, f64)> = conn
+                .query_row(
+                    "SELECT properties, confidence FROM knowledge_objects WHERE id = ?1",
+                    params![id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+            let Some((raw, stored_confidence)) = existing else {
+                return Ok(0);
+            };
+            let mut merged = serde_json::from_str::<serde_json::Value>(&raw)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            if let (Some(merged_obj), Some(new_obj)) =
+                (merged.as_object_mut(), properties.as_object())
+            {
+                for (k, v) in new_obj {
+                    merged_obj.insert(k.clone(), v.clone());
+                }
             }
-        }
-        // `None` keeps the stored confidence (properties-only merge must not
-        // clobber it with a hardcoded value); `Some(c)` raises/lowers it.
-        let new_confidence = confidence.unwrap_or(stored_confidence);
-        let n = conn.execute(
-            "UPDATE knowledge_objects SET properties = ?1, confidence = ?2 WHERE id = ?3",
-            params![json_to_string(&merged), new_confidence, id],
-        )?;
-        Ok(n)
+            // `None` keeps the stored confidence (properties-only merge must not
+            // clobber it with a hardcoded value); `Some(c)` raises/lowers it.
+            let new_confidence = confidence.unwrap_or(stored_confidence);
+            let n = conn.execute(
+                "UPDATE knowledge_objects SET properties = ?1, confidence = ?2 WHERE id = ?3",
+                params![json_to_string(&merged), new_confidence, id],
+            )?;
+            Ok(n)
+        })
+        .await
     }
 
     pub(super) async fn find_object_by_alias_query(
@@ -78,20 +88,25 @@ impl SQLiteKnowledgeStore {
         let candidates: Vec<KnowledgeObject> = match doc_id {
             Some(d) => self.list_objects_by_document(d).await?,
             None => {
-                let conn = self.conn.lock().await;
-                let mut stmt = conn.prepare(
-                    "SELECT * FROM knowledge_objects \
+                let query_name = name.to_string();
+                let pattern = escaped;
+                self.with_conn(move |conn| {
+                    let mut stmt = conn.prepare(
+                        "SELECT * FROM knowledge_objects \
                      WHERE name != ?1 \
                        AND (name LIKE '%' || ?2 || '%' ESCAPE '\\' \
                             OR ?3 LIKE '%' || name || '%') \
                      ORDER BY id ASC",
-                )?;
-                let rows = stmt.query_map(params![name, escaped, name], row_to_object)?;
-                let mut out = Vec::new();
-                for r in rows {
-                    out.push(r?);
-                }
-                out
+                    )?;
+                    let rows =
+                        stmt.query_map(params![query_name, pattern, query_name], row_to_object)?;
+                    let mut out = Vec::new();
+                    for r in rows {
+                        out.push(r?);
+                    }
+                    Ok(out)
+                })
+                .await?
             }
         };
         let matched: Vec<KnowledgeObject> = candidates
@@ -137,23 +152,26 @@ impl SQLiteKnowledgeStore {
              WHERE ke.source_type = ?1 AND ke.source_id IN ({placeholders})
              ORDER BY e.id ASC"
         );
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(&sql)?;
-        // First param is the source_type string, then the id list.
-        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql>> =
+        // First param is the source_type string, then the id list. The boxed
+        // parameter list must be `Send` to cross into the blocking pool.
+        let mut params_vec: Vec<Box<dyn rusqlite::types::ToSql + Send>> =
             vec![Box::new(source_type.as_str().to_string())];
         for id in source_ids {
             params_vec.push(Box::new(*id));
         }
-        let rows = stmt.query_map(
-            rusqlite::params_from_iter(params_vec.iter()),
-            row_to_evidence,
-        )?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(params_vec.iter()),
+                row_to_evidence,
+            )?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     pub(super) async fn inspect_entity_query(
@@ -479,7 +497,6 @@ impl SQLiteKnowledgeStore {
         doc_title: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EvidenceHit>> {
-        let conn = self.conn.lock().await;
         // Clamp to avoid `usize::MAX as i64` overflow (which becomes -1 and is
         // treated as "no limit" by SQLite) and to bound memory use.
         let limit = limit.min(10_000) as i64;
@@ -492,59 +509,65 @@ impl SQLiteKnowledgeStore {
             .replace('%', "\\%")
             .replace('_', "\\_");
         let like = format!("%{escaped}%");
-        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match doc_title {
-            Some(t) => (
-                "SELECT e.content, c.chapter_no, d.title, e.start_offset, e.end_offset
+        // The boxed parameter list must be `Send` to cross into the blocking
+        // pool, hence the `+ Send` on the trait object.
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql + Send>>) =
+            match doc_title {
+                Some(t) => (
+                    "SELECT e.content, c.chapter_no, d.title, e.start_offset, e.end_offset
                  FROM evidence e
                  JOIN chapters c ON c.id = e.chapter_id
                  JOIN documents d ON d.id = e.doc_id
                  WHERE e.content LIKE ?1 ESCAPE '\\' AND d.title = ?2
                  ORDER BY e.id ASC LIMIT ?3"
-                    .to_string(),
-                vec![
-                    Box::new(like) as Box<dyn rusqlite::types::ToSql>,
-                    Box::new(t.to_string()),
-                    Box::new(limit),
-                ],
-            ),
-            None => (
-                "SELECT e.content, c.chapter_no, d.title, e.start_offset, e.end_offset
+                        .to_string(),
+                    vec![
+                        Box::new(like) as Box<dyn rusqlite::types::ToSql + Send>,
+                        Box::new(t.to_string()),
+                        Box::new(limit),
+                    ],
+                ),
+                None => (
+                    "SELECT e.content, c.chapter_no, d.title, e.start_offset, e.end_offset
                  FROM evidence e
                  JOIN chapters c ON c.id = e.chapter_id
                  JOIN documents d ON d.id = e.doc_id
                  WHERE e.content LIKE ?1 ESCAPE '\\'
                  ORDER BY e.id ASC LIMIT ?2"
-                    .to_string(),
-                vec![
-                    Box::new(like) as Box<dyn rusqlite::types::ToSql>,
-                    Box::new(limit),
-                ],
-            ),
-        };
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map(
-            rusqlite::params_from_iter(params_vec.iter().map(|p| p.as_ref())),
-            |row| {
-                let content: String = row.get(0)?;
-                let chapter: i32 = row.get(1)?;
-                let doc: String = row.get(2)?;
-                Ok(EvidenceHit {
-                    text: content,
-                    chapter,
-                    doc,
-                    // Observed text evidence has no separate confidence score;
-                    // it is authoritative by construction.
-                    confidence: 1.0,
-                    start_offset: row.get(3)?,
-                    end_offset: row.get(4)?,
-                })
-            },
-        )?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+                        .to_string(),
+                    vec![
+                        Box::new(like) as Box<dyn rusqlite::types::ToSql + Send>,
+                        Box::new(limit),
+                    ],
+                ),
+            };
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(
+                rusqlite::params_from_iter(params_vec.iter().map(|p| p.as_ref())),
+                |row| {
+                    let content: String = row.get(0)?;
+                    let chapter: i32 = row.get(1)?;
+                    let doc: String = row.get(2)?;
+                    Ok(EvidenceHit {
+                        text: content,
+                        chapter,
+                        doc,
+                        // Observed text evidence has no separate confidence score;
+                        // it is authoritative by construction.
+                        confidence: 1.0,
+                        start_offset: row.get(3)?,
+                        end_offset: row.get(4)?,
+                    })
+                },
+            )?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// Find an evidence row with the same identity, or insert one.
@@ -562,25 +585,28 @@ impl SQLiteKnowledgeStore {
         end_offset: Option<i64>,
         content: &str,
     ) -> Result<(i64, bool)> {
-        let conn = self.conn.lock().await;
-        let existing: Option<i64> = conn
-            .query_row(
-                "SELECT id FROM evidence \
+        let content = content.to_string();
+        self.with_conn(move |conn| {
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM evidence \
                  WHERE doc_id = ?1 AND start_offset IS ?2 AND end_offset IS ?3 \
                    AND content = ?4 \
                  LIMIT 1",
-                params![doc_id, start_offset, end_offset, content],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(id) = existing {
-            return Ok((id, false));
-        }
-        conn.execute(
-            "INSERT INTO evidence (doc_id, chapter_id, start_offset, end_offset, content, created_at) \
+                    params![doc_id, start_offset, end_offset, content],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing {
+                return Ok((id, false));
+            }
+            conn.execute(
+                "INSERT INTO evidence (doc_id, chapter_id, start_offset, end_offset, content, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, strftime('%s','now'))",
-            params![doc_id, chapter_id, start_offset, end_offset, content],
-        )?;
-        Ok((conn.last_insert_rowid(), true))
+                params![doc_id, chapter_id, start_offset, end_offset, content],
+            )?;
+            Ok((conn.last_insert_rowid(), true))
+        })
+        .await
     }
 }

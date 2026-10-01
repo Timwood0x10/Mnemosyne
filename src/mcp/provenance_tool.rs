@@ -101,57 +101,61 @@ fn expand_derivation_chain(store: &SqliteFactStore, fact: &Fact) -> Vec<Value> {
 #[async_trait]
 impl ToolHandler for FactProvenanceTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult> {
-        let fact_id = args
-            .get("fact_id")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| Error::InvalidInput("missing required argument `fact_id`".into()))?;
-        if fact_id <= 0 {
-            return Err(Error::InvalidInput(format!(
-                "fact_id must be positive, got {fact_id}"
-            )));
-        }
-
-        let fact = self
-            .store
-            .get_fact_by_id(fact_id)?
-            .ok_or_else(|| Error::NotFound(format!("no fact with id {fact_id}")))?;
-        // A fact id alone does not say which label it carries: enforce it
-        // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
-        // not "skip the check" (audit C1).
-        tenant_scope::ensure_entity_tenant(
-            &self.store,
-            fact.entity_id,
-            identity_arg(args, "tenant_id"),
-        )?;
-
-        // Fetch the original-text evidence anchor, if any — content AND the
-        // source byte span, so the audit answer says WHERE the quote sits
-        // (content-only reads broke re-locatability at this surface).
-        let evidence = match fact.evidence_id {
-            Some(evidence_id) => self.store.get_evidence_anchor(evidence_id)?,
-            None => None,
-        };
-
-        let derived_from = expand_derivation_chain(self.store.as_ref(), &fact);
-
-        let payload = json!({
-            "fact_id": fact.id,
-            "fact_type": format!("{:?}", fact.fact_type),
-            "time": fact.time,
-            "payload": fact.payload,
-            "confidence": fact.confidence,
-            "status": fact.status.as_str(),
-            "evidence": evidence.as_ref().and_then(|a| a.content.clone()),
-            "evidence_start": evidence.as_ref().and_then(|a| a.start_offset),
-            "evidence_end": evidence.as_ref().and_then(|a| a.end_offset),
-            "derived_from": derived_from,
-        });
-
-        Ok(ToolCallResult::text(
-            serde_json::to_string(&payload)
-                .map_err(|e| Error::Internal(format!("serialize provenance payload: {e}")))?,
-        ))
+        // The evidence/derivation lookup is synchronous `rusqlite` work; hand it
+        // to the blocking pool (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_fact_provenance(&store, &args)).await
     }
+}
+
+/// Synchronous body of `fact_provenance`, executed on the blocking pool.
+fn run_fact_provenance(store: &SqliteFactStore, args: &Value) -> Result<ToolCallResult> {
+    let fact_id = args
+        .get("fact_id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| Error::InvalidInput("missing required argument `fact_id`".into()))?;
+    if fact_id <= 0 {
+        return Err(Error::InvalidInput(format!(
+            "fact_id must be positive, got {fact_id}"
+        )));
+    }
+
+    let fact = store
+        .get_fact_by_id(fact_id)?
+        .ok_or_else(|| Error::NotFound(format!("no fact with id {fact_id}")))?;
+    // A fact id alone does not say which label it carries: enforce it
+    // before reading, always. An omitted `tenant_id` means the LOCAL tenant,
+    // not "skip the check" (audit C1).
+    tenant_scope::ensure_entity_tenant(store, fact.entity_id, identity_arg(args, "tenant_id"))?;
+
+    // Fetch the original-text evidence anchor, if any — content AND the
+    // source byte span, so the audit answer says WHERE the quote sits
+    // (content-only reads broke re-locatability at this surface).
+    let evidence = match fact.evidence_id {
+        Some(evidence_id) => store.get_evidence_anchor(evidence_id)?,
+        None => None,
+    };
+
+    let derived_from = expand_derivation_chain(store, &fact);
+
+    let payload = json!({
+        "fact_id": fact.id,
+        "fact_type": format!("{:?}", fact.fact_type),
+        "time": fact.time,
+        "payload": fact.payload,
+        "confidence": fact.confidence,
+        "status": fact.status.as_str(),
+        "evidence": evidence.as_ref().and_then(|a| a.content.clone()),
+        "evidence_start": evidence.as_ref().and_then(|a| a.start_offset),
+        "evidence_end": evidence.as_ref().and_then(|a| a.end_offset),
+        "derived_from": derived_from,
+    });
+
+    Ok(ToolCallResult::text(
+        serde_json::to_string(&payload)
+            .map_err(|e| Error::Internal(format!("serialize provenance payload: {e}")))?,
+    ))
 }
 
 /// Return the stable MCP schema for `fact_provenance`.

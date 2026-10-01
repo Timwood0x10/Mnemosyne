@@ -39,6 +39,22 @@ fn is_bridge_fact(fact: &Fact) -> bool {
     fact.payload.get("source").and_then(|v| v.as_str()) == Some("story_bridge")
 }
 
+/// Run one synchronous fact-store call on the blocking pool.
+///
+/// The fact store is rusqlite-backed and synchronous; calling it straight from
+/// this `async fn` would stall a tokio worker for the whole query (audit
+/// 09-26/H7, batch G). The handle is cloned into the closure — an `Arc` bump,
+/// so every clone still shares one serialized connection — which also makes the
+/// closure `'static` as `spawn_blocking` requires.
+async fn on_blocking<F, T>(fstore: &SqliteFactStore, work: F) -> Result<T>
+where
+    F: FnOnce(SqliteFactStore) -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let handle = fstore.clone();
+    crate::blocking::run(move || work(handle)).await
+}
+
 /// Outcome of a bridge run.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeStats {
@@ -102,7 +118,12 @@ pub async fn bridge_story_events_to_persona(
     stats.story_events = event_ids.len();
 
     // 3. Re-express each event's text as persona signals + a raw Event fact.
-    let entity_id = fstore.resolve_agent(tenant_id, character_name)?;
+    //    The store call is synchronous and runs on the blocking pool.
+    let entity_id = {
+        let tenant = tenant_id.to_string();
+        let name = character_name.to_string();
+        on_blocking(fstore, move |store| store.resolve_agent(&tenant, &name)).await?
+    };
     stats.entity_id = Some(entity_id);
 
     // Idempotent but RETRYABLE re-run: collect the events already bridged and
@@ -114,7 +135,7 @@ pub async fn bridge_story_events_to_persona(
     // New rows carry the knowledge-graph event id in their payload; rows from
     // before that marker only carry the event text, so both are consulted to
     // keep legacy stores from being re-bridged (and doubled).
-    let existing = fstore.get_facts(entity_id)?;
+    let existing = on_blocking(fstore, move |store| store.get_facts(entity_id)).await?;
     let bridged_ids: HashSet<i64> = existing
         .iter()
         .filter(|f| is_bridge_fact(f))
@@ -180,13 +201,13 @@ pub async fn bridge_story_events_to_persona(
     // One transaction for the whole batch: a partial write can no longer leave
     // the entity half-bridged, and if the write fails nothing is committed, so
     // the next run retries cleanly.
-    fstore.insert_batch(&pending)?;
+    on_blocking(fstore, move |store| store.insert_batch(&pending)).await?;
 
     // Report what is actually in the store rather than what was attempted. The
     // old stats counted every fact on the entity (including rows written by the
     // dialogue path) and were computed before the guard, so a skipped re-run
     // still returned a "successful" number (09-26/H15).
-    let bridged = fstore.get_facts(entity_id)?;
+    let bridged = on_blocking(fstore, move |store| store.get_facts(entity_id)).await?;
     stats.persona_facts = bridged
         .iter()
         .filter(|f| is_bridge_fact(f) && f.fact_type != FactType::Event)

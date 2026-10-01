@@ -90,63 +90,20 @@ pub struct GeneralizeCompileHandler {
 #[async_trait::async_trait]
 impl ToolHandler for GeneralizeCompileHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        // `doc_type` selects the source adapter. Defaults to `text` (raw
-        // prose) so a bare `{"text": ...}` call "just works".
-        let doc_type = opt_str(args, "doc_type").unwrap_or("text");
-        let title = opt_str(args, "title")
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(default_title);
-        let source = opt_str(args, "source").unwrap_or("generalize_compile");
-        // No `tenant_id`: this engine is a single-node server, so the compiled
-        // graph belongs to the installation. The parameter used to be read here
-        // and then dropped by `compile_source` — the "half-wired" state that made
-        // callers believe the graph was tenant-scoped (audit C2).
-
-        // Resolve the domain profile: an explicit name loads on demand;
-        // otherwise fall back to the process-cached conversation pack. A
-        // missing/unparseable pack is a user-facing error, reported gracefully.
-        let profile: DomainProfile = match opt_str(args, "profile") {
-            Some(name) => match DomainProfile::load(name) {
-                Ok(p) => p,
-                Err(e) => return Ok(err_result(format!("load profile `{name}`: {e}"))),
-            },
-            None => conversation_profile().clone(),
-        };
-
-        // Build the unified document source from the caller's payload. Input
-        // validation failures are user-facing errors (graceful result), not
-        // protocol-level failures.
-        let boxed: Box<dyn DocumentSource> = match doc_type {
-            "dialog" => {
-                let Some(raw) = args.get("messages").and_then(Value::as_array) else {
-                    return Ok(err_result("doc_type=dialog requires `messages` array"));
-                };
-                let messages = match parse_messages(raw) {
-                    Ok(m) => m,
-                    Err(e) => return Ok(err_result(e.to_string())),
-                };
-                if messages.is_empty() {
-                    return json_ok(&serde_json::json!({
-                        "compiled": true,
-                        "doc_type": "dialog",
-                        "title": title,
-                        "message": "no messages supplied; nothing compiled",
-                        "stats": {"documents": 0, "objects": 0, "edges": 0, "evidence": 0},
-                    }));
-                }
-                Box::new(DialogSource::new(title.clone(), source, messages))
-            }
-            "text" => {
-                let Some(text) = args.get("text").and_then(Value::as_str) else {
-                    return Ok(err_result("doc_type=text requires `text` string"));
-                };
-                Box::new(RawTextSource::new(title.clone(), source, text, "text"))
-            }
-            other => {
-                return Ok(err_result(format!(
-                    "unsupported doc_type `{other}`; expected `dialog` or `text`"
-                )));
-            }
+        // Parsing the payload, loading the profile and building the document
+        // source are synchronous file/JSON work; run them on the blocking pool
+        // so an oversized document or a slow profile read cannot stall a tokio
+        // worker (audit 09-26/H7).
+        let args = args.clone();
+        let prepared = crate::mcp::blocking::run(move || prepare_source(&args)).await?;
+        let (doc_type, title, profile, boxed) = match prepared {
+            GeneralizeInput::Ready {
+                doc_type,
+                title,
+                profile,
+                source,
+            } => (doc_type, title, profile, source),
+            GeneralizeInput::Resolved(result) => return Ok(result),
         };
 
         // Persist through the unified pipeline. Persistence failures are
@@ -169,6 +126,101 @@ impl ToolHandler for GeneralizeCompileHandler {
             Err(e) => Ok(err_result(format!("compile failed: {e}"))),
         }
     }
+}
+
+/// Prepared input for `generalize_compile`, built off the async worker: either
+/// a ready document source with its resolved profile, or a finished graceful
+/// result (validation/profile error or an empty-input no-op).
+enum GeneralizeInput {
+    Ready {
+        doc_type: String,
+        title: String,
+        // Boxed: the profile is the largest field, so keeping it inline made
+        // the enum far heavier than its `Resolved` sibling (clippy
+        // `large_enum_variant`).
+        profile: Box<DomainProfile>,
+        source: Box<dyn DocumentSource>,
+    },
+    Resolved(ToolCallResult),
+}
+
+/// Synchronous prelude of `generalize_compile` (argument parsing, profile
+/// loading and source construction), executed on the blocking pool
+/// (audit 09-26/H7).
+fn prepare_source(args: &Value) -> Result<GeneralizeInput, Error> {
+    // `doc_type` selects the source adapter. Defaults to `text` (raw
+    // prose) so a bare `{"text": ...}` call "just works".
+    let doc_type = opt_str(args, "doc_type").unwrap_or("text");
+    let title = opt_str(args, "title")
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(default_title);
+    let source = opt_str(args, "source").unwrap_or("generalize_compile");
+    // No `tenant_id`: this engine is a single-node server, so the compiled
+    // graph belongs to the installation. The parameter used to be read here
+    // and then dropped by `compile_source` — the "half-wired" state that made
+    // callers believe the graph was tenant-scoped (audit C2).
+
+    // Resolve the domain profile: an explicit name loads on demand;
+    // otherwise fall back to the process-cached conversation pack. A
+    // missing/unparseable pack is a user-facing error, reported gracefully.
+    let profile: DomainProfile = match opt_str(args, "profile") {
+        Some(name) => match DomainProfile::load(name) {
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(GeneralizeInput::Resolved(err_result(format!(
+                    "load profile `{name}`: {e}"
+                ))));
+            }
+        },
+        None => conversation_profile().clone(),
+    };
+
+    // Build the unified document source from the caller's payload. Input
+    // validation failures are user-facing errors (graceful result), not
+    // protocol-level failures.
+    let boxed: Box<dyn DocumentSource> = match doc_type {
+        "dialog" => {
+            let Some(raw) = args.get("messages").and_then(Value::as_array) else {
+                return Ok(GeneralizeInput::Resolved(err_result(
+                    "doc_type=dialog requires `messages` array",
+                )));
+            };
+            let messages = match parse_messages(raw) {
+                Ok(m) => m,
+                Err(e) => return Ok(GeneralizeInput::Resolved(err_result(e.to_string()))),
+            };
+            if messages.is_empty() {
+                return Ok(GeneralizeInput::Resolved(json_ok(&serde_json::json!({
+                    "compiled": true,
+                    "doc_type": "dialog",
+                    "title": title,
+                    "message": "no messages supplied; nothing compiled",
+                    "stats": {"documents": 0, "objects": 0, "edges": 0, "evidence": 0},
+                }))?));
+            }
+            Box::new(DialogSource::new(title.clone(), source, messages))
+        }
+        "text" => {
+            let Some(text) = args.get("text").and_then(Value::as_str) else {
+                return Ok(GeneralizeInput::Resolved(err_result(
+                    "doc_type=text requires `text` string",
+                )));
+            };
+            Box::new(RawTextSource::new(title.clone(), source, text, "text"))
+        }
+        other => {
+            return Ok(GeneralizeInput::Resolved(err_result(format!(
+                "unsupported doc_type `{other}`; expected `dialog` or `text`"
+            ))));
+        }
+    };
+
+    Ok(GeneralizeInput::Ready {
+        doc_type: doc_type.to_string(),
+        title,
+        profile: Box::new(profile),
+        source: boxed,
+    })
 }
 
 /// Register the `generalize_compile` tool on `builder`.

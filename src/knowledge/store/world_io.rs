@@ -3,6 +3,10 @@
 //! Split out of `mod.rs` so the `KnowledgeStore` trait impl stays under the
 //! 1000-line cap (plan/rules/rules.md §1): the trait methods in `mod.rs`
 //! delegate here with thin wrappers.
+//!
+//! Every method sends its statements to the blocking pool through
+//! [`SQLiteKnowledgeStore::with_conn`] (batch G): running `rusqlite` on a tokio
+//! worker stalls every other task the runtime is driving (audit 09-26/H7).
 
 use rusqlite::{OptionalExtension, params};
 
@@ -17,22 +21,25 @@ use super::{
 impl SQLiteKnowledgeStore {
     /// Find a world entity by exact name.
     pub(super) async fn find_world_entity_row(&self, name: &str) -> Result<Option<WorldEntity>> {
-        let conn = self.conn.lock().await;
-        let row = conn
-            .query_row(
-                "SELECT id, name, entity_type, importance FROM world_entities WHERE name = ?1",
-                params![name],
-                |r| {
-                    Ok(WorldEntity {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        entity_type: r.get(2)?,
-                        importance: r.get(3)?,
-                    })
-                },
-            )
-            .optional()?;
-        Ok(row)
+        let name = name.to_string();
+        self.with_conn(move |conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, name, entity_type, importance FROM world_entities WHERE name = ?1",
+                    params![name],
+                    |r| {
+                        Ok(WorldEntity {
+                            id: r.get(0)?,
+                            name: r.get(1)?,
+                            entity_type: r.get(2)?,
+                            importance: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(row)
+        })
+        .await
     }
 
     /// Atomic upsert by UNIQUE(name): INSERT ... ON CONFLICT ... RETURNING id.
@@ -42,19 +49,23 @@ impl SQLiteKnowledgeStore {
         entity_type: &str,
         importance: f64,
     ) -> Result<i64> {
-        let conn = self.conn.lock().await;
-        conn.query_row(
-            "INSERT INTO world_entities (name, entity_type, importance)
-             VALUES (?1, ?2, ?3)
-             ON CONFLICT(name) DO UPDATE SET
-                 entity_type = excluded.entity_type,
-                 importance = excluded.importance,
-                 updated_at = strftime('%s','now')
-             RETURNING id",
-            params![name, entity_type, importance],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(Into::into)
+        let name = name.to_string();
+        let entity_type = entity_type.to_string();
+        self.with_conn(move |conn| {
+            conn.query_row(
+                "INSERT INTO world_entities (name, entity_type, importance)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(name) DO UPDATE SET
+                     entity_type = excluded.entity_type,
+                     importance = excluded.importance,
+                     updated_at = strftime('%s','now')
+                 RETURNING id",
+                params![name, entity_type, importance],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
     }
 
     /// Upsert a profile key/value; `evidence_id` is COALESCEd so a later
@@ -67,16 +78,20 @@ impl SQLiteKnowledgeStore {
         confidence: f64,
         evidence_id: Option<i64>,
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO world_entity_profiles (entity_id, key, value, confidence, evidence_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5) \
-             ON CONFLICT(entity_id, key) DO UPDATE SET value = excluded.value, \
-                 confidence = excluded.confidence, \
-                 evidence_id = COALESCE(excluded.evidence_id, world_entity_profiles.evidence_id)",
-            params![entity_id, key, value, confidence, evidence_id],
-        )?;
-        Ok(())
+        let key = key.to_string();
+        let value = value.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO world_entity_profiles (entity_id, key, value, confidence, evidence_id) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(entity_id, key) DO UPDATE SET value = excluded.value, \
+                     confidence = excluded.confidence, \
+                     evidence_id = COALESCE(excluded.evidence_id, world_entity_profiles.evidence_id)",
+                params![entity_id, key, value, confidence, evidence_id],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Upsert a world relation; re-inserting the same edge updates confidence.
@@ -87,87 +102,96 @@ impl SQLiteKnowledgeStore {
         relation_type: &str,
         confidence: f64,
     ) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT INTO world_relations (source_id, target_id, relation_type, confidence) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET \
-                 confidence = excluded.confidence",
-            params![source_id, target_id, relation_type, confidence],
-        )?;
-        Ok(())
+        let relation_type = relation_type.to_string();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "INSERT INTO world_relations (source_id, target_id, relation_type, confidence) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET \
+                     confidence = excluded.confidence",
+                params![source_id, target_id, relation_type, confidence],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// List all world entities ordered by id.
     pub(super) async fn list_world_entities_row(&self) -> Result<Vec<WorldEntity>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, name, entity_type, importance FROM world_entities ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldEntity {
-                id: r.get("id")?,
-                name: r.get("name")?,
-                entity_type: r.get("entity_type")?,
-                importance: r
-                    .get::<_, Option<f64>>("importance")?
-                    .unwrap_or(DEFAULT_IMPORTANCE),
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, name, entity_type, importance FROM world_entities ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(WorldEntity {
+                    id: r.get("id")?,
+                    name: r.get("name")?,
+                    entity_type: r.get("entity_type")?,
+                    importance: r
+                        .get::<_, Option<f64>>("importance")?
+                        .unwrap_or(DEFAULT_IMPORTANCE),
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// List all world profiles ordered by id.
     pub(super) async fn list_world_profiles_row(&self) -> Result<Vec<WorldProfile>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT entity_id, key, value, confidence, evidence_id \
-             FROM world_entity_profiles ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldProfile {
-                entity_id: r.get("entity_id")?,
-                key: r.get("key")?,
-                value: r.get("value")?,
-                confidence: r
-                    .get::<_, Option<f64>>("confidence")?
-                    .unwrap_or(DEFAULT_CONFIDENCE),
-                evidence_id: r.get("evidence_id")?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT entity_id, key, value, confidence, evidence_id \
+                 FROM world_entity_profiles ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(WorldProfile {
+                    entity_id: r.get("entity_id")?,
+                    key: r.get("key")?,
+                    value: r.get("value")?,
+                    confidence: r
+                        .get::<_, Option<f64>>("confidence")?
+                        .unwrap_or(DEFAULT_CONFIDENCE),
+                    evidence_id: r.get("evidence_id")?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// List all world relations ordered by id.
     pub(super) async fn list_world_relations_row(&self) -> Result<Vec<WorldRelation>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT source_id, target_id, relation_type, confidence \
-             FROM world_relations ORDER BY rowid ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldRelation {
-                source_id: r.get("source_id")?,
-                target_id: r.get("target_id")?,
-                relation_type: r.get("relation_type")?,
-                confidence: r
-                    .get::<_, Option<f64>>("confidence")?
-                    .unwrap_or(DEFAULT_CONFIDENCE),
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT source_id, target_id, relation_type, confidence \
+                 FROM world_relations ORDER BY rowid ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(WorldRelation {
+                    source_id: r.get("source_id")?,
+                    target_id: r.get("target_id")?,
+                    relation_type: r.get("relation_type")?,
+                    confidence: r
+                        .get::<_, Option<f64>>("confidence")?
+                        .unwrap_or(DEFAULT_CONFIDENCE),
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// Insert a world event, or return the existing id when an event with the
@@ -180,35 +204,47 @@ impl SQLiteKnowledgeStore {
     /// atomic statement — two connections compiling the same document can no
     /// longer double-insert (same P2 fix as `world_entities`).
     pub(super) async fn upsert_world_event_row(&self, event: NewWorldEvent<'_>) -> Result<i64> {
-        let conn = self.conn.lock().await;
-        // DO UPDATE (not DO NOTHING) so RETURNING always yields a row id;
-        // non-identity columns are refreshed from the latest compile.
-        conn.query_row(
-            "INSERT INTO events \
-             (title, event_type, timestamp, location, description, importance, \
-              start_offset, end_offset) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(title, IFNULL(timestamp, -1), IFNULL(start_offset, -1), \
-                         IFNULL(end_offset, -1)) \
-             DO UPDATE SET \
-                 event_type = excluded.event_type, \
-                 location = excluded.location, \
-                 description = excluded.description, \
-                 importance = excluded.importance \
-             RETURNING id",
-            params![
-                event.title,
-                event.event_type,
-                event.timestamp,
-                event.location,
-                event.description,
-                event.importance,
-                event.start_offset,
-                event.end_offset
-            ],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(Into::into)
+        // `NewWorldEvent` borrows its strings, so the closure (which must be
+        // `'static`) takes owned copies of every field.
+        let title = event.title.to_string();
+        let event_type = event.event_type.to_string();
+        let location = event.location.map(str::to_string);
+        let description = event.description.to_string();
+        let timestamp = event.timestamp;
+        let importance = event.importance;
+        let start_offset = event.start_offset;
+        let end_offset = event.end_offset;
+        self.with_conn(move |conn| {
+            // DO UPDATE (not DO NOTHING) so RETURNING always yields a row id;
+            // non-identity columns are refreshed from the latest compile.
+            conn.query_row(
+                "INSERT INTO events \
+                 (title, event_type, timestamp, location, description, importance, \
+                  start_offset, end_offset) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT(title, IFNULL(timestamp, -1), IFNULL(start_offset, -1), \
+                             IFNULL(end_offset, -1)) \
+                 DO UPDATE SET \
+                     event_type = excluded.event_type, \
+                     location = excluded.location, \
+                     description = excluded.description, \
+                     importance = excluded.importance \
+                 RETURNING id",
+                params![
+                    title,
+                    event_type,
+                    timestamp,
+                    location,
+                    description,
+                    importance,
+                    start_offset,
+                    end_offset
+                ],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
     }
 
     /// Link an event to a world entity by name (upserting the entity when it
@@ -219,62 +255,69 @@ impl SQLiteKnowledgeStore {
     /// `ON CONFLICT DO UPDATE` path `last_insert_rowid` is NOT updated — it
     /// returns whatever row this connection inserted last, which under a
     /// cross-store race would link the participant to the WRONG entity.
+    ///
+    /// Both statements run inside one blocking hop (and therefore one lock),
+    /// so a concurrent writer can no longer remove the entity between the
+    /// upsert and the participant insert.
     pub(super) async fn link_event_participant_row(
         &self,
         event_id: i64,
         entity_name: &str,
         role: &str,
     ) -> Result<()> {
-        let entity_id: i64 = {
-            let conn = self.conn.lock().await;
-            conn.query_row(
+        let entity_name = entity_name.to_string();
+        let role = role.to_string();
+        self.with_conn(move |conn| {
+            let entity_id: i64 = conn.query_row(
                 "INSERT INTO world_entities (name, entity_type, importance) \
                  VALUES (?1, 'person', 0.5) \
                  ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','now') \
                  RETURNING id",
                 params![entity_name],
                 |r| r.get(0),
-            )?
-        };
-        let conn = self.conn.lock().await;
-        conn.execute(
-            "INSERT OR IGNORE INTO event_participants (event_id, entity_id, role) \
-             VALUES (?1, ?2, ?3)",
-            params![event_id, entity_id, role],
-        )?;
-        Ok(())
+            )?;
+            conn.execute(
+                "INSERT OR IGNORE INTO event_participants (event_id, entity_id, role) \
+                 VALUES (?1, ?2, ?3)",
+                params![event_id, entity_id, role],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// List all world events ordered by id.
     pub(super) async fn list_world_events_row(&self) -> Result<Vec<WorldEvent>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT id, title, event_type, timestamp, location, description, \
-                    importance, start_offset, end_offset \
-             FROM events ORDER BY id ASC",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok(WorldEvent {
-                id: r.get("id")?,
-                title: r.get("title")?,
-                event_type: r.get("event_type")?,
-                timestamp: r.get("timestamp")?,
-                location: r.get("location")?,
-                description: r
-                    .get::<_, Option<String>>("description")?
-                    .unwrap_or_default(),
-                importance: r
-                    .get::<_, Option<f64>>("importance")?
-                    .unwrap_or(DEFAULT_IMPORTANCE),
-                start_offset: r.get("start_offset")?,
-                end_offset: r.get("end_offset")?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, title, event_type, timestamp, location, description, \
+                        importance, start_offset, end_offset \
+                 FROM events ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(WorldEvent {
+                    id: r.get("id")?,
+                    title: r.get("title")?,
+                    event_type: r.get("event_type")?,
+                    timestamp: r.get("timestamp")?,
+                    location: r.get("location")?,
+                    description: r
+                        .get::<_, Option<String>>("description")?
+                        .unwrap_or_default(),
+                    importance: r
+                        .get::<_, Option<f64>>("importance")?
+                        .unwrap_or(DEFAULT_IMPORTANCE),
+                    start_offset: r.get("start_offset")?,
+                    end_offset: r.get("end_offset")?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// Resolve one event's participants to (entity name, role).
@@ -285,25 +328,27 @@ impl SQLiteKnowledgeStore {
         &self,
         event_id: i64,
     ) -> Result<Vec<EventParticipantRef>> {
-        let conn = self.conn.lock().await;
-        let mut stmt = conn.prepare(
-            "SELECT we.name, ep.role \
-             FROM event_participants ep \
-             JOIN world_entities we ON we.id = ep.entity_id \
-             WHERE ep.event_id = ?1 \
-             ORDER BY ep.id ASC",
-        )?;
-        let rows = stmt.query_map(params![event_id], |r| {
-            Ok(EventParticipantRef {
-                entity_name: r.get(0)?,
-                role: r.get(1)?,
-            })
-        })?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r?);
-        }
-        Ok(out)
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT we.name, ep.role \
+                 FROM event_participants ep \
+                 JOIN world_entities we ON we.id = ep.entity_id \
+                 WHERE ep.event_id = ?1 \
+                 ORDER BY ep.id ASC",
+            )?;
+            let rows = stmt.query_map(params![event_id], |r| {
+                Ok(EventParticipantRef {
+                    entity_name: r.get(0)?,
+                    role: r.get(1)?,
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
     }
 
     /// Upsert a character-state slot anchored to its source event.
@@ -326,48 +371,53 @@ impl SQLiteKnowledgeStore {
             end_offset,
             confidence,
         } = state;
-        // Participants must exist in world_states' FK target (world_entities).
-        // RETURNING id — never `last_insert_rowid`, which is stale on the
-        // ON CONFLICT DO UPDATE path (see link_event_participant_row).
-        let entity_id: i64 = {
-            let conn = self.conn.lock().await;
-            conn.query_row(
+        // `NewWorldState` borrows its strings, so the closure (which must be
+        // `'static`) takes owned copies of them.
+        let entity_name = entity_name.to_string();
+        let slot = slot.to_string();
+        let value = value.to_string();
+        self.with_conn(move |conn| {
+            // Participants must exist in world_states' FK target (world_entities).
+            // RETURNING id — never `last_insert_rowid`, which is stale on the
+            // ON CONFLICT DO UPDATE path (see link_event_participant_row).
+            // Both statements share one blocking hop, hence one lock: nothing can
+            // delete the entity between the upsert and the state insert.
+            let entity_id: i64 = conn.query_row(
                 "INSERT INTO world_entities (name, entity_type, importance) \
                  VALUES (?1, 'person', 0.5) \
                  ON CONFLICT(name) DO UPDATE SET updated_at = strftime('%s','now') \
                  RETURNING id",
                 params![entity_name],
                 |r| r.get(0),
-            )?
-        };
-
-        let conn = self.conn.lock().await;
-        // DO UPDATE so RETURNING always yields a row id; identical identity
-        // refreshes value/confidence and keeps the wider of the two spans.
-        conn.query_row(
-            "INSERT INTO world_states \
-             (entity_id, slot, value, chapter, event_id, start_offset, end_offset, confidence) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-             ON CONFLICT(entity_id, slot, IFNULL(event_id, -1), IFNULL(chapter, -1)) \
-             DO UPDATE SET \
-                 value = excluded.value, \
-                 confidence = excluded.confidence, \
-                 start_offset = COALESCE(excluded.start_offset, world_states.start_offset), \
-                 end_offset = COALESCE(excluded.end_offset, world_states.end_offset) \
-             RETURNING id",
-            params![
-                entity_id,
-                slot,
-                value,
-                chapter,
-                event_id,
-                start_offset,
-                end_offset,
-                confidence
-            ],
-            |r| r.get::<_, i64>(0),
-        )
-        .map_err(Into::into)
+            )?;
+            // DO UPDATE so RETURNING always yields a row id; identical identity
+            // refreshes value/confidence and keeps the wider of the two spans.
+            conn.query_row(
+                "INSERT INTO world_states \
+                 (entity_id, slot, value, chapter, event_id, start_offset, end_offset, confidence) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+                 ON CONFLICT(entity_id, slot, IFNULL(event_id, -1), IFNULL(chapter, -1)) \
+                 DO UPDATE SET \
+                     value = excluded.value, \
+                     confidence = excluded.confidence, \
+                     start_offset = COALESCE(excluded.start_offset, world_states.start_offset), \
+                     end_offset = COALESCE(excluded.end_offset, world_states.end_offset) \
+                 RETURNING id",
+                params![
+                    entity_id,
+                    slot,
+                    value,
+                    chapter,
+                    event_id,
+                    start_offset,
+                    end_offset,
+                    confidence
+                ],
+                |r| r.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
     }
 
     /// List world states, optionally filtered by entity name, ordered by
@@ -376,53 +426,56 @@ impl SQLiteKnowledgeStore {
         &self,
         entity_name: Option<&str>,
     ) -> Result<Vec<WorldState>> {
-        let conn = self.conn.lock().await;
-        let sql = if entity_name.is_some() {
-            "SELECT s.id, e.name, s.slot, s.value, s.chapter, s.event_id, \
-                    s.start_offset, s.end_offset, s.confidence \
-             FROM world_states s \
-             JOIN world_entities e ON e.id = s.entity_id \
-             WHERE e.name = ?1 \
-             ORDER BY s.chapter ASC, s.id ASC"
-        } else {
-            "SELECT s.id, e.name, s.slot, s.value, s.chapter, s.event_id, \
-                    s.start_offset, s.end_offset, s.confidence \
-             FROM world_states s \
-             JOIN world_entities e ON e.id = s.entity_id \
-             ORDER BY s.chapter ASC, s.id ASC"
-        };
-        let map_row = |r: &rusqlite::Row| {
-            Ok(WorldState {
-                id: r.get("id")?,
-                entity_name: r.get("name")?,
-                slot: r.get("slot")?,
-                value: r.get("value")?,
-                chapter: r.get("chapter")?,
-                event_id: r.get("event_id")?,
-                start_offset: r.get("start_offset")?,
-                end_offset: r.get("end_offset")?,
-                confidence: r
-                    .get::<_, Option<f64>>("confidence")?
-                    .unwrap_or(DEFAULT_STATE_CONFIDENCE),
-            })
-        };
-        let mut out = Vec::new();
-        match entity_name {
-            Some(name) => {
-                let mut stmt = conn.prepare(sql)?;
-                let rows = stmt.query_map(params![name], map_row)?;
-                for r in rows {
-                    out.push(r?);
+        let entity_name = entity_name.map(str::to_string);
+        self.with_conn(move |conn| {
+            let sql = if entity_name.is_some() {
+                "SELECT s.id, e.name, s.slot, s.value, s.chapter, s.event_id, \
+                        s.start_offset, s.end_offset, s.confidence \
+                 FROM world_states s \
+                 JOIN world_entities e ON e.id = s.entity_id \
+                 WHERE e.name = ?1 \
+                 ORDER BY s.chapter ASC, s.id ASC"
+            } else {
+                "SELECT s.id, e.name, s.slot, s.value, s.chapter, s.event_id, \
+                        s.start_offset, s.end_offset, s.confidence \
+                 FROM world_states s \
+                 JOIN world_entities e ON e.id = s.entity_id \
+                 ORDER BY s.chapter ASC, s.id ASC"
+            };
+            let map_row = |r: &rusqlite::Row| {
+                Ok(WorldState {
+                    id: r.get("id")?,
+                    entity_name: r.get("name")?,
+                    slot: r.get("slot")?,
+                    value: r.get("value")?,
+                    chapter: r.get("chapter")?,
+                    event_id: r.get("event_id")?,
+                    start_offset: r.get("start_offset")?,
+                    end_offset: r.get("end_offset")?,
+                    confidence: r
+                        .get::<_, Option<f64>>("confidence")?
+                        .unwrap_or(DEFAULT_STATE_CONFIDENCE),
+                })
+            };
+            let mut out = Vec::new();
+            match entity_name {
+                Some(name) => {
+                    let mut stmt = conn.prepare(sql)?;
+                    let rows = stmt.query_map(params![name], map_row)?;
+                    for r in rows {
+                        out.push(r?);
+                    }
+                }
+                None => {
+                    let mut stmt = conn.prepare(sql)?;
+                    let rows = stmt.query_map([], map_row)?;
+                    for r in rows {
+                        out.push(r?);
+                    }
                 }
             }
-            None => {
-                let mut stmt = conn.prepare(sql)?;
-                let rows = stmt.query_map([], map_row)?;
-                for r in rows {
-                    out.push(r?);
-                }
-            }
-        }
-        Ok(out)
+            Ok(out)
+        })
+        .await
     }
 }

@@ -55,68 +55,77 @@ impl PersonaInjectTool {
 #[async_trait]
 impl ToolHandler for PersonaInjectTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let agent_id = args
-            .get("agent_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::InvalidInput("missing `agent_id`".into()))?;
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let format = args.get("format").and_then(Value::as_str).unwrap_or("json");
-
-        // READ-ONLY lookup: find_entity, not resolve_agent (which creates a
-        // row for a typo'd agent_id on a documented read-only tool).
-        let agent_norm = if agent_id.trim().is_empty() {
-            "default".to_string()
-        } else {
-            agent_id.trim().to_string()
-        };
-        let agent_name = if agent_norm == "default" {
-            "Agent".to_string()
-        } else {
-            format!("Agent:{agent_norm}")
-        };
-        let agent_key = format!("agent:{agent_norm}");
-        let entity_id =
-            match self
-                .fact_store
-                .find_entity(tenant_id, Some(&agent_key), &agent_name)?
-            {
-                Some((id, _, _)) => id,
-                None => {
-                    // Unknown agent: empty fact list, no entity is created.
-                    let mut card = build_persona_card_from_facts(tenant_id, agent_id, &[]);
-                    if let Some(entry) = lookup_persona_card(
-                        &load_persona_cards(&self.cards_path)?,
-                        tenant_id,
-                        agent_id,
-                    ) {
-                        card = merge_persona_card_file(card, &entry);
-                    }
-                    let payload = match format {
-                        "text" => render_text(&card),
-                        _ => render_json(tenant_id, agent_id, &card),
-                    };
-                    return Ok(ToolCallResult::text(payload));
-                }
-            };
-        let facts = self.fact_store.get_facts(entity_id)?;
-        let mut card = build_persona_card_from_facts(tenant_id, agent_id, &facts);
-
-        // Merge the optional JSON persona card file entry (file wins, missing
-        // fields fall back to the aggregated card).
-        let cards = load_persona_cards(&self.cards_path)?;
-        if let Some(entry) = lookup_persona_card(&cards, tenant_id, agent_id) {
-            card = merge_persona_card_file(card, &entry);
-        }
-
-        let payload = match format {
-            "text" => render_text(&card),
-            _ => render_json(tenant_id, agent_id, &card),
-        };
-        Ok(ToolCallResult::text(payload))
+        // The card build is synchronous `rusqlite` plus file IO; hand it to the
+        // blocking pool so a slow lookup cannot stall the tokio worker
+        // (audit 09-26/H7).
+        let fact_store = Arc::clone(&self.fact_store);
+        let cards_path = self.cards_path.clone();
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_persona_inject(&fact_store, &cards_path, &args)).await
     }
+}
+
+/// Synchronous body of `persona_inject`, executed on the blocking pool.
+fn run_persona_inject(
+    fact_store: &SqliteFactStore,
+    cards_path: &str,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let agent_id = args
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::InvalidInput("missing `agent_id`".into()))?;
+    let tenant_id = args
+        .get("tenant_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let format = args.get("format").and_then(Value::as_str).unwrap_or("json");
+
+    // READ-ONLY lookup: find_entity, not resolve_agent (which creates a
+    // row for a typo'd agent_id on a documented read-only tool).
+    let agent_norm = if agent_id.trim().is_empty() {
+        "default".to_string()
+    } else {
+        agent_id.trim().to_string()
+    };
+    let agent_name = if agent_norm == "default" {
+        "Agent".to_string()
+    } else {
+        format!("Agent:{agent_norm}")
+    };
+    let agent_key = format!("agent:{agent_norm}");
+    let entity_id = match fact_store.find_entity(tenant_id, Some(&agent_key), &agent_name)? {
+        Some((id, _, _)) => id,
+        None => {
+            // Unknown agent: empty fact list, no entity is created.
+            let mut card = build_persona_card_from_facts(tenant_id, agent_id, &[]);
+            if let Some(entry) =
+                lookup_persona_card(&load_persona_cards(cards_path)?, tenant_id, agent_id)
+            {
+                card = merge_persona_card_file(card, &entry);
+            }
+            let payload = match format {
+                "text" => render_text(&card),
+                _ => render_json(tenant_id, agent_id, &card),
+            };
+            return Ok(ToolCallResult::text(payload));
+        }
+    };
+    let facts = fact_store.get_facts(entity_id)?;
+    let mut card = build_persona_card_from_facts(tenant_id, agent_id, &facts);
+
+    // Merge the optional JSON persona card file entry (file wins, missing
+    // fields fall back to the aggregated card).
+    let cards = load_persona_cards(cards_path)?;
+    if let Some(entry) = lookup_persona_card(&cards, tenant_id, agent_id) {
+        card = merge_persona_card_file(card, &entry);
+    }
+
+    let payload = match format {
+        "text" => render_text(&card),
+        _ => render_json(tenant_id, agent_id, &card),
+    };
+    Ok(ToolCallResult::text(payload))
 }
 
 /// Render the card as a JSON object `{tenant_id, agent_id, persona_card}`.

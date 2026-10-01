@@ -36,6 +36,7 @@
 pub mod agent_facts;
 pub mod agent_personality;
 pub mod anchor;
+pub mod blocking;
 pub mod centroid;
 pub mod character;
 pub mod classifier;

@@ -321,18 +321,14 @@ impl AppState {
 /// crafting a collision that would pass authentication.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     use std::collections::hash_map::RandomState;
-    use std::hash::{BuildHasher, Hash, Hasher};
+    use std::hash::BuildHasher;
 
     // One random state → both digests share the same key, so equal inputs
     // produce equal digests while a different process key defeats precomputed
     // collisions.
     let state = RandomState::new();
-    let mut ha = state.build_hasher();
-    a.hash(&mut ha);
-    let mut hb = state.build_hasher();
-    b.hash(&mut hb);
-    let x = ha.finish().to_le_bytes();
-    let y = hb.finish().to_le_bytes();
+    let x = state.hash_one(a).to_le_bytes();
+    let y = state.hash_one(b).to_le_bytes();
 
     // Fixed 8-iteration loop: the count never depends on input length.
     let mut diff = 0u8;

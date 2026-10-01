@@ -44,6 +44,9 @@ impl ToolHandler for StoryBridgeTool {
             .and_then(Value::as_str)
             .unwrap_or("default");
 
+        // Bridging awaits the async knowledge store; the JSON serialization
+        // that follows is synchronous, so it runs on the blocking pool
+        // (audit 09-26/H7).
         let stats: BridgeStats = bridge_story_events_to_persona(
             self.kstore.as_ref(),
             self.fstore.as_ref(),
@@ -51,12 +54,15 @@ impl ToolHandler for StoryBridgeTool {
             name,
         )
         .await?;
-        let payload = serde_json::to_value(&stats)
-            .map_err(|e| Error::Internal(format!("serialize story-bridge result: {e}")))?;
-        Ok(ToolCallResult::text(
-            serde_json::to_string(&payload)
-                .map_err(|e| Error::Internal(format!("serialize payload: {e}")))?,
-        ))
+        crate::mcp::blocking::run(move || {
+            let payload = serde_json::to_value(&stats)
+                .map_err(|e| Error::Internal(format!("serialize story-bridge result: {e}")))?;
+            Ok(ToolCallResult::text(
+                serde_json::to_string(&payload)
+                    .map_err(|e| Error::Internal(format!("serialize payload: {e}")))?,
+            ))
+        })
+        .await
     }
 }
 

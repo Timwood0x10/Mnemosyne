@@ -10,6 +10,7 @@
 //! The server is transport-agnostic at the trait level; the concrete
 //! [`StdioTransport`] implementation is provided for the common case.
 
+pub mod blocking;
 pub mod context_aware;
 pub mod decay_tool;
 pub mod decision_tool;

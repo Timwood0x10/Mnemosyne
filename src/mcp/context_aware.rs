@@ -39,7 +39,7 @@ pub const DEFAULT_CONTEXT_THRESHOLD: f64 = CONTEXT_INJECT_THRESHOLD;
 pub struct ContextCheckTool {
     distiller: Option<Arc<PipelineDistiller>>,
     fact_store: Arc<SqliteFactStore>,
-    compiler: CognitionCompiler,
+    compiler: Arc<CognitionCompiler>,
 }
 
 impl ContextCheckTool {
@@ -51,7 +51,7 @@ impl ContextCheckTool {
         Self {
             distiller,
             fact_store,
-            compiler: CognitionCompiler::new(),
+            compiler: Arc::new(CognitionCompiler::new()),
         }
     }
 
@@ -89,66 +89,53 @@ impl ToolHandler for ContextCheckTool {
         let triggered = context_usage >= threshold;
 
         if !triggered {
-            // No-op diagnostic: report usage and current memory state.
-            // Grayscale OFF → exact legacy payload (no inject_memories field,
-            // original reason text). Grayscale ON → empty injection slot
-            // (plan P3: below the gate we inject nothing, preserving the
-            // host's context window).
-            //
-            // Read-only resolve: a below-threshold diagnostic must NOT
-            // materialize an entity for a user who never chatted (audit:
-            // read-only tools writing via resolve_user). find_entity never
-            // writes; unknown users simply report zero facts.
-            let name = if user_id == DEFAULT_IDENTITY {
-                "User".to_string()
-            } else {
-                format!("User:{user_id}")
-            };
-            let user_entity_id = self
-                .fact_store
-                .find_entity(tenant_id, Some(user_id), &name)?
-                .map(|(id, _, _)| id);
-            let facts = match user_entity_id {
-                Some(id) => self.fact_store.get_facts(id)?,
-                None => Vec::new(),
-            };
-            let mut payload = serde_json::Map::new();
-            payload.insert("context_usage_percent".into(), json!(context_usage));
-            payload.insert("threshold_percent".into(), json!(threshold));
-            payload.insert("distill_mode".into(), json!(false));
-            payload.insert(
-                "reason".into(),
-                json!(format!(
-                    "context usage {context_usage:.0}% below threshold {threshold:.0}% — no distillation{}",
-                    if EMBEDDING_MEMORY_GRAYSCALE { ", no injection" } else { "" }
-                )),
-            );
-            payload.insert(
-                "current".into(),
-                json!({
-                    "user_entity_id": user_entity_id,
-                    "facts": facts.len(),
-                }),
-            );
-            if EMBEDDING_MEMORY_GRAYSCALE {
-                payload.insert("inject_memories".into(), json!([]));
-            }
-            return Ok(ToolCallResult::text(
-                serde_json::Value::Object(payload).to_string(),
-            ));
+            // The below-threshold diagnostic is a synchronous `rusqlite` read;
+            // hand it to the blocking pool so it cannot stall the tokio worker
+            // (audit 09-26/H7).
+            let fact_store = Arc::clone(&self.fact_store);
+            let tenant_id = tenant_id.to_string();
+            let user_id = user_id.to_string();
+            return crate::mcp::blocking::run(move || {
+                run_context_check_diagnostic(
+                    &fact_store,
+                    &tenant_id,
+                    &user_id,
+                    context_usage,
+                    threshold,
+                )
+            })
+            .await;
         }
 
         // ── Triggered: compile → persist → distill → profile ────────────
-        let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-        let logical_time = chrono::Utc::now().timestamp();
-        let compiled =
-            self.compiler
-                .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);
-        let stored_facts = self.fact_store.insert_batch(&compiled.facts)?;
+        let fact_store = Arc::clone(&self.fact_store);
+        let compiler = Arc::clone(&self.compiler);
+        let tenant_id = tenant_id.to_string();
+        let user_id = user_id.to_string();
+        let compile_messages = messages.clone();
+        // Compile + persist is synchronous (compiler + `rusqlite`); run it on
+        // the blocking pool so it cannot stall the tokio worker (audit 09-26/H7).
+        let summary = {
+            let fact_store = Arc::clone(&fact_store);
+            let compiler = Arc::clone(&compiler);
+            let tenant_id = tenant_id.clone();
+            let user_id = user_id.clone();
+            crate::mcp::blocking::run(move || {
+                run_context_check_compile(
+                    &fact_store,
+                    &compiler,
+                    &tenant_id,
+                    &user_id,
+                    &compile_messages,
+                )
+            })
+            .await?
+        };
 
         // Distill the conversation into long-term memories (knowledge/preferences…).
         // Grayscale ON: the distilled memories ARE the injection payload —
         // original text, never an LLM rewrite ("检索代数化、注入原文化").
+        // The network/embedding call stays on the async worker.
         let mut distilled = 0usize;
         let mut inject_memories: Vec<String> = Vec::new();
         if let Some(distiller) = &self.distiller {
@@ -157,7 +144,7 @@ impl ToolHandler for ContextCheckTool {
                 .and_then(Value::as_str)
                 .unwrap_or("context-check");
             let memories = distiller
-                .distill(conversation_id, &messages, tenant_id, user_id)
+                .distill(conversation_id, &messages, &tenant_id, &user_id)
                 .await?;
             distilled = memories.len();
             if EMBEDDING_MEMORY_GRAYSCALE {
@@ -170,7 +157,13 @@ impl ToolHandler for ContextCheckTool {
         }
 
         // Rebuild the user profile from ALL accumulated facts of this user.
-        let profile = build_user_profile(&self.fact_store, user_entity_id)?;
+        // A synchronous `rusqlite` read, so hand it to the blocking pool.
+        let user_entity_id = summary.user_entity_id;
+        let profile = {
+            let fact_store = Arc::clone(&fact_store);
+            crate::mcp::blocking::run(move || build_user_profile(&fact_store, user_entity_id))
+                .await?
+        };
 
         let mut payload = serde_json::Map::new();
         payload.insert("context_usage_percent".into(), json!(context_usage));
@@ -183,9 +176,9 @@ impl ToolHandler for ContextCheckTool {
         payload.insert(
             "compiled".into(),
             json!({
-                "observations": compiled.observations.len(),
-                "facts_compiled": compiled.facts.len(),
-                "facts_stored": stored_facts,
+                "observations": summary.observations,
+                "facts_compiled": summary.facts_compiled,
+                "facts_stored": summary.facts_stored,
                 "distilled_memories": distilled,
             }),
         );
@@ -197,6 +190,98 @@ impl ToolHandler for ContextCheckTool {
             serde_json::Value::Object(payload).to_string(),
         ))
     }
+}
+
+/// Diagnostic summary of the synchronous compile+persist step, carried back to
+/// the async shell for the response payload.
+struct ContextCompileSummary {
+    user_entity_id: i64,
+    observations: usize,
+    facts_compiled: usize,
+    facts_stored: usize,
+}
+
+/// Synchronous below-threshold body of `memory_context_check`, executed on the
+/// blocking pool.
+fn run_context_check_diagnostic(
+    fact_store: &SqliteFactStore,
+    tenant_id: &str,
+    user_id: &str,
+    context_usage: f64,
+    threshold: f64,
+) -> Result<ToolCallResult, Error> {
+    // No-op diagnostic: report usage and current memory state.
+    // Grayscale OFF → exact legacy payload (no inject_memories field,
+    // original reason text). Grayscale ON → empty injection slot
+    // (plan P3: below the gate we inject nothing, preserving the
+    // host's context window).
+    //
+    // Read-only resolve: a below-threshold diagnostic must NOT
+    // materialize an entity for a user who never chatted (audit:
+    // read-only tools writing via resolve_user). find_entity never
+    // writes; unknown users simply report zero facts.
+    let name = if user_id == DEFAULT_IDENTITY {
+        "User".to_string()
+    } else {
+        format!("User:{user_id}")
+    };
+    let user_entity_id = fact_store
+        .find_entity(tenant_id, Some(user_id), &name)?
+        .map(|(id, _, _)| id);
+    let facts = match user_entity_id {
+        Some(id) => fact_store.get_facts(id)?,
+        None => Vec::new(),
+    };
+    let mut payload = serde_json::Map::new();
+    payload.insert("context_usage_percent".into(), json!(context_usage));
+    payload.insert("threshold_percent".into(), json!(threshold));
+    payload.insert("distill_mode".into(), json!(false));
+    payload.insert(
+        "reason".into(),
+        json!(format!(
+            "context usage {context_usage:.0}% below threshold {threshold:.0}% — no distillation{}",
+            if EMBEDDING_MEMORY_GRAYSCALE {
+                ", no injection"
+            } else {
+                ""
+            }
+        )),
+    );
+    payload.insert(
+        "current".into(),
+        json!({
+            "user_entity_id": user_entity_id,
+            "facts": facts.len(),
+        }),
+    );
+    if EMBEDDING_MEMORY_GRAYSCALE {
+        payload.insert("inject_memories".into(), json!([]));
+    }
+    Ok(ToolCallResult::text(
+        serde_json::Value::Object(payload).to_string(),
+    ))
+}
+
+/// Synchronous compile+persist body of the triggered `memory_context_check`,
+/// executed on the blocking pool. The distillation `await` stays in the async
+/// shell.
+fn run_context_check_compile(
+    fact_store: &SqliteFactStore,
+    compiler: &CognitionCompiler,
+    tenant_id: &str,
+    user_id: &str,
+    messages: &[Message],
+) -> Result<ContextCompileSummary, Error> {
+    let user_entity_id = fact_store.resolve_user(tenant_id, user_id)?;
+    let logical_time = chrono::Utc::now().timestamp();
+    let compiled = compiler.compile_conversation(tenant_id, messages, user_entity_id, logical_time);
+    let stored_facts = fact_store.insert_batch(&compiled.facts)?;
+    Ok(ContextCompileSummary {
+        user_entity_id,
+        observations: compiled.observations.len(),
+        facts_compiled: compiled.facts.len(),
+        facts_stored: stored_facts,
+    })
 }
 
 /// Return the stable MCP schema for `memory_context_check`.

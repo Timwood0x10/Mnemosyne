@@ -20,7 +20,7 @@ use crate::types::{Experience, Memory, MemoryType, Message};
 pub struct MemoryCompileTool {
     distiller: Option<Arc<PipelineDistiller>>,
     fact_store: Arc<SqliteFactStore>,
-    compiler: CognitionCompiler,
+    compiler: Arc<CognitionCompiler>,
 }
 
 impl MemoryCompileTool {
@@ -32,7 +32,7 @@ impl MemoryCompileTool {
         Self {
             distiller,
             fact_store,
-            compiler: CognitionCompiler::new(),
+            compiler: Arc::new(CognitionCompiler::new()),
         }
     }
 }
@@ -84,61 +84,39 @@ pub fn memory_compile_definition() -> ToolDefinition {
 #[async_trait::async_trait]
 impl ToolHandler for MemoryCompileTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let messages_raw = args
-            .get("messages")
-            .and_then(Value::as_array)
-            .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
-        let messages = parse_messages(messages_raw)?;
-        let tenant_id = identity_arg(args, "tenant_id");
-        let user_id = identity_arg(args, "user_id");
+        // The compile phase is synchronous `rusqlite` plus the compiler; run it
+        // on the blocking pool so a slow compile cannot stall a tokio worker
+        // (audit 09-26/H7).
+        let fact_store = Arc::clone(&self.fact_store);
+        let compiler = Arc::clone(&self.compiler);
+        let compile_args = args.clone();
+        let prelude = crate::mcp::blocking::run(move || {
+            run_compile_tool(&fact_store, &compiler, &compile_args)
+        })
+        .await?;
+        let CompilePrelude {
+            messages,
+            tenant_id,
+            user_id,
+            user_entity_id,
+            compiled,
+            stored_facts,
+            decisions_recorded,
+            outcome_reports,
+            prompt,
+        } = prelude;
 
-        // Validate decision_outcome declarations BEFORE any write so a
-        // malformed entry aborts with nothing applied. The actual outcome
-        // writes happen AFTER the compile transaction commits (see below):
-        // writing them first left outcomes recorded even when agent
-        // resolution or insert_compilation failed, contradicting the
-        // one-transaction guarantee.
-        let validated_outcomes = Self::validate_decision_outcomes(args)?;
-
-        let user_entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-        let logical_time = chrono::Utc::now().timestamp();
-        let compiled =
-            self.compiler
-                .compile_conversation(tenant_id, &messages, user_entity_id, logical_time);
-
-        // Decision write path: explicit commitments become first-class
-        // `Decision` rows so `decision_trace` can walk from a decision back to
-        // the facts that support it. The frozen plan keeps the decision MCP
-        // surface read-only, so this compile step IS the write path.
-        //
-        // A commitment is itself experience worth keeping: the utterance is
-        // stored as an Event fact and the decision points at it, so every
-        // decision stays anchored to a stored fact (promise markers are not in
-        // the observation marker tables, so nothing else anchors it).
-        //
-        // Everything is prepared first and committed in ONE transaction: a
-        // decision rejected by validation, or a failed agent lookup, must not
-        // leave this conversation's facts behind for a retry to duplicate.
-        let commitments =
-            self.compiled_commitments(args, tenant_id, &messages, user_entity_id, logical_time)?;
-        let (stored_facts, decisions_recorded) = self
-            .fact_store
-            .insert_compilation(&compiled.facts, &commitments)?;
-
-        // Outcomes are applied only after the compile transaction commits.
-        // Each declaration is tenant-checked against the decision's subject
-        // (same rule as decision_trace) so a guessed decision id from another
-        // tenant is reported `missing` instead of being closed.
-        let outcome_reports = self.apply_decision_outcomes(validated_outcomes, tenant_id)?;
-
-        let builder = PromptBuilder;
-        let recent_count = messages.len().min(6);
-        let prompt = builder.build(
-            &messages[messages.len() - recent_count..],
-            &compiled.compatibility,
-        );
+        // Distillation and the compatible-knowledge persistence below are async
+        // (embedding + experience store), so those awaits stay on the shell
+        // rather than inside the blocking closure.
         let memories = self
-            .distill_if_requested(args, tenant_id, user_id, &messages, &compiled.compatibility)
+            .distill_if_requested(
+                args,
+                &tenant_id,
+                &user_id,
+                &messages,
+                &compiled.compatibility,
+            )
             .await?;
 
         // Persist compiled knowledge into the memories table (not just the
@@ -148,8 +126,8 @@ impl ToolHandler for MemoryCompileTool {
         if let Some(distiller) = &self.distiller {
             persist_compatible_knowledge(
                 distiller,
-                tenant_id,
-                user_id,
+                &tenant_id,
+                &user_id,
                 &compiled.compatibility.knowledge,
             )
             .await?;
@@ -182,168 +160,255 @@ impl ToolHandler for MemoryCompileTool {
     }
 }
 
-impl MemoryCompileTool {
-    /// Validate the declarations only — no store write happens here. The
-    /// companion [`Self::apply_decision_outcomes`] runs after the compile
-    /// transaction commits, so a rejected call never leaves outcomes behind.
-    /// The report of the applied outcomes echoes the **resulting** state of
-    /// each decision: an id that does not exist (or belongs to another
-    /// tenant) comes back as `missing`, and a declaration that lost to an
-    /// already-recorded outcome comes back carrying the original one.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::InvalidInput`] when a declaration is malformed.
-    fn validate_decision_outcomes(
-        args: &Value,
-    ) -> Result<Vec<(i64, crate::decision::DecisionOutcome)>, Error> {
-        let Some(declared) = args.get("decision_outcomes") else {
-            return Ok(Vec::new());
-        };
-        if declared.is_null() {
-            return Ok(Vec::new());
-        }
-        let declared = declared
-            .as_array()
-            .ok_or_else(|| Error::InvalidInput("`decision_outcomes` must be an array".into()))?;
+/// Synchronous result of `memory_compile`'s compile phase, produced off the
+/// async worker before the (async) distillation step runs.
+struct CompilePrelude {
+    messages: Vec<Message>,
+    tenant_id: String,
+    user_id: String,
+    user_entity_id: i64,
+    compiled: crate::cognition_compiler::CognitionCompileResult,
+    stored_facts: usize,
+    decisions_recorded: usize,
+    outcome_reports: Vec<Value>,
+    prompt: String,
+}
 
-        let mut validated = Vec::with_capacity(declared.len());
-        for entry in declared {
-            let decision_id = entry
-                .get("decision_id")
-                .and_then(Value::as_i64)
-                .ok_or_else(|| {
-                    Error::InvalidInput(
-                        "each `decision_outcomes` entry needs an integer `decision_id`".into(),
-                    )
-                })?;
-            let raw = entry
-                .get("outcome")
-                .and_then(Value::as_str)
-                .ok_or_else(|| {
-                    Error::InvalidInput(
-                        "each `decision_outcomes` entry needs a string `outcome`".into(),
-                    )
-                })?;
-            let outcome = crate::decision::DecisionOutcome::parse(raw).ok_or_else(|| {
-                Error::InvalidInput(format!(
-                    "unknown outcome `{raw}`, expected `fulfilled` or `violated`"
-                ))
-            })?;
-            validated.push((decision_id, outcome));
-        }
-        Ok(validated)
+/// Synchronous body of `memory_compile`, executed on the blocking pool so the
+/// blocking `rusqlite` work does not run on a tokio worker (audit 09-26/H7).
+fn run_compile_tool(
+    fact_store: &SqliteFactStore,
+    compiler: &CognitionCompiler,
+    args: &Value,
+) -> Result<CompilePrelude, Error> {
+    let messages_raw = args
+        .get("messages")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::InvalidInput("missing `messages` array".into()))?;
+    let messages = parse_messages(messages_raw)?;
+    let tenant_id = identity_arg(args, "tenant_id").to_string();
+    let user_id = identity_arg(args, "user_id").to_string();
+
+    // Validate decision_outcome declarations BEFORE any write so a
+    // malformed entry aborts with nothing applied. The actual outcome
+    // writes happen AFTER the compile transaction commits (see below):
+    // writing them first left outcomes recorded even when agent
+    // resolution or insert_compilation failed, contradicting the
+    // one-transaction guarantee.
+    let validated_outcomes = validate_decision_outcomes(args)?;
+
+    let user_entity_id = fact_store.resolve_user(&tenant_id, &user_id)?;
+    let logical_time = chrono::Utc::now().timestamp();
+    let compiled =
+        compiler.compile_conversation(&tenant_id, &messages, user_entity_id, logical_time);
+
+    // Decision write path: explicit commitments become first-class
+    // `Decision` rows so `decision_trace` can walk from a decision back to
+    // the facts that support it. The frozen plan keeps the decision MCP
+    // surface read-only, so this compile step IS the write path.
+    //
+    // A commitment is itself experience worth keeping: the utterance is
+    // stored as an Event fact and the decision points at it, so every
+    // decision stays anchored to a stored fact (promise markers are not in
+    // the observation marker tables, so nothing else anchors it).
+    //
+    // Everything is prepared first and committed in ONE transaction: a
+    // decision rejected by validation, or a failed agent lookup, must not
+    // leave this conversation's facts behind for a retry to duplicate.
+    let commitments = compiled_commitments(
+        fact_store,
+        args,
+        &tenant_id,
+        &messages,
+        user_entity_id,
+        logical_time,
+    )?;
+    let (stored_facts, decisions_recorded) =
+        fact_store.insert_compilation(&compiled.facts, &commitments)?;
+
+    // Outcomes are applied only after the compile transaction commits.
+    // Each declaration is tenant-checked against the decision's subject
+    // (same rule as decision_trace) so a guessed decision id from another
+    // tenant is reported `missing` instead of being closed.
+    let outcome_reports = apply_decision_outcomes(fact_store, validated_outcomes, &tenant_id)?;
+
+    let builder = PromptBuilder;
+    let recent_count = messages.len().min(6);
+    let prompt = builder.build(
+        &messages[messages.len() - recent_count..],
+        &compiled.compatibility,
+    );
+
+    Ok(CompilePrelude {
+        messages,
+        tenant_id,
+        user_id,
+        user_entity_id,
+        compiled,
+        stored_facts,
+        decisions_recorded,
+        outcome_reports,
+        prompt,
+    })
+}
+
+/// Validate the declarations only — no store write happens here. The
+/// companion [`apply_decision_outcomes`] runs after the compile
+/// transaction commits, so a rejected call never leaves outcomes behind.
+/// The report of the applied outcomes echoes the **resulting** state of
+/// each decision: an id that does not exist (or belongs to another
+/// tenant) comes back as `missing`, and a declaration that lost to an
+/// already-recorded outcome comes back carrying the original one.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] when a declaration is malformed.
+fn validate_decision_outcomes(
+    args: &Value,
+) -> Result<Vec<(i64, crate::decision::DecisionOutcome)>, Error> {
+    let Some(declared) = args.get("decision_outcomes") else {
+        return Ok(Vec::new());
+    };
+    if declared.is_null() {
+        return Ok(Vec::new());
     }
+    let declared = declared
+        .as_array()
+        .ok_or_else(|| Error::InvalidInput("`decision_outcomes` must be an array".into()))?;
 
-    /// Apply validated outcome declarations.
-    ///
-    /// Each id is tenant-checked against the decision's subject before the
-    /// write (same rule as `decision_trace`): a guessed id from another
-    /// tenant reports `missing` instead of closing the row. The first
-    /// recorded outcome still wins (`outcome IS NULL` guard in the store).
-    ///
-    /// # Errors
-    ///
-    /// Returns a storage error when the read or update fails.
-    fn apply_decision_outcomes(
-        &self,
-        validated: Vec<(i64, crate::decision::DecisionOutcome)>,
-        tenant_id: &str,
-    ) -> Result<Vec<Value>, Error> {
-        let mut reports = Vec::with_capacity(validated.len());
-        for (decision_id, outcome) in validated {
-            let decision = match self.fact_store.get_decision(decision_id)? {
-                Some(d) => d,
-                None => {
-                    reports.push(serde_json::json!({
-                        "decision_id": decision_id,
-                        "missing": true,
-                    }));
-                    continue;
-                }
-            };
-            // Cross-tenant guess → report missing (do not leak existence and
-            // never close another tenant's decision).
-            if let Err(Error::NotFound(_)) = crate::mcp::tenant_scope::ensure_entity_tenant(
-                &self.fact_store,
-                decision.subject,
-                tenant_id,
-            ) {
+    let mut validated = Vec::with_capacity(declared.len());
+    for entry in declared {
+        let decision_id = entry
+            .get("decision_id")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| {
+                Error::InvalidInput(
+                    "each `decision_outcomes` entry needs an integer `decision_id`".into(),
+                )
+            })?;
+        let raw = entry
+            .get("outcome")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Error::InvalidInput(
+                    "each `decision_outcomes` entry needs a string `outcome`".into(),
+                )
+            })?;
+        let outcome = crate::decision::DecisionOutcome::parse(raw).ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "unknown outcome `{raw}`, expected `fulfilled` or `violated`"
+            ))
+        })?;
+        validated.push((decision_id, outcome));
+    }
+    Ok(validated)
+}
+
+/// Apply validated outcome declarations.
+///
+/// Each id is tenant-checked against the decision's subject before the
+/// write (same rule as `decision_trace`): a guessed id from another
+/// tenant reports `missing` instead of closing the row. The first
+/// recorded outcome still wins (`outcome IS NULL` guard in the store).
+///
+/// # Errors
+///
+/// Returns a storage error when the read or update fails.
+fn apply_decision_outcomes(
+    fact_store: &SqliteFactStore,
+    validated: Vec<(i64, crate::decision::DecisionOutcome)>,
+    tenant_id: &str,
+) -> Result<Vec<Value>, Error> {
+    let mut reports = Vec::with_capacity(validated.len());
+    for (decision_id, outcome) in validated {
+        let decision = match fact_store.get_decision(decision_id)? {
+            Some(d) => d,
+            None => {
                 reports.push(serde_json::json!({
                     "decision_id": decision_id,
                     "missing": true,
                 }));
                 continue;
             }
-            reports.push(
-                match self.fact_store.set_decision_outcome(decision_id, outcome)? {
-                    Some(decision) => serde_json::json!({
-                        "decision_id": decision.id,
-                        "outcome": decision.outcome.map(crate::decision::DecisionOutcome::as_str),
-                        "status": decision.status.as_str(),
-                    }),
-                    None => serde_json::json!({ "decision_id": decision_id, "missing": true }),
-                },
-            );
+        };
+        // Cross-tenant guess → report missing (do not leak existence and
+        // never close another tenant's decision).
+        if let Err(Error::NotFound(_)) =
+            crate::mcp::tenant_scope::ensure_entity_tenant(fact_store, decision.subject, tenant_id)
+        {
+            reports.push(serde_json::json!({
+                "decision_id": decision_id,
+                "missing": true,
+            }));
+            continue;
         }
-        Ok(reports)
+        reports.push(
+            match fact_store.set_decision_outcome(decision_id, outcome)? {
+                Some(decision) => serde_json::json!({
+                    "decision_id": decision.id,
+                    "outcome": decision.outcome.map(crate::decision::DecisionOutcome::as_str),
+                    "status": decision.status.as_str(),
+                }),
+                None => serde_json::json!({ "decision_id": decision_id, "missing": true }),
+            },
+        );
     }
+    Ok(reports)
+}
 
-    /// Extract this conversation's commitments together with the fact that
-    /// anchors each one, without writing anything.
-    ///
-    /// Resolving the agent entity happens here (it may create the entity row),
-    /// but every fact and decision is only *prepared*: the store writes them in
-    /// one transaction afterwards, so nothing half-compiled can be left behind.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the agent identity cannot be resolved.
-    fn compiled_commitments(
-        &self,
-        args: &Value,
-        tenant_id: &str,
-        messages: &[Message],
-        user_entity_id: i64,
-        logical_time: i64,
-    ) -> Result<Vec<(crate::cognition::Fact, crate::decision::Decision)>, Error> {
-        let mut commitments = Vec::new();
-        for (role, subject) in self.commitment_speakers(args, tenant_id, user_entity_id)? {
-            for decision in
-                crate::commitment::commitments_from_messages(messages, role, subject, logical_time)
-            {
-                commitments.push((
-                    crate::commitment::anchor_fact(&decision, logical_time),
-                    decision,
-                ));
-            }
+/// Extract this conversation's commitments together with the fact that
+/// anchors each one, without writing anything.
+///
+/// Resolving the agent entity happens here (it may create the entity row),
+/// but every fact and decision is only *prepared*: the store writes them in
+/// one transaction afterwards, so nothing half-compiled can be left behind.
+///
+/// # Errors
+///
+/// Returns an error when the agent identity cannot be resolved.
+fn compiled_commitments(
+    fact_store: &SqliteFactStore,
+    args: &Value,
+    tenant_id: &str,
+    messages: &[Message],
+    user_entity_id: i64,
+    logical_time: i64,
+) -> Result<Vec<(crate::cognition::Fact, crate::decision::Decision)>, Error> {
+    let mut commitments = Vec::new();
+    for (role, subject) in commitment_speakers(fact_store, args, tenant_id, user_entity_id)? {
+        for decision in
+            crate::commitment::commitments_from_messages(messages, role, subject, logical_time)
+        {
+            commitments.push((
+                crate::commitment::anchor_fact(&decision, logical_time),
+                decision,
+            ));
         }
-        Ok(commitments)
     }
+    Ok(commitments)
+}
 
-    /// Resolve which `(role, entity)` speaker channels to scan for commitments.
-    ///
-    /// The user channel always exists. The agent channel is only used when the
-    /// caller supplied an `agent_id`, so a compile without one never
-    /// materialises an agent entity as a side effect.
-    fn commitment_speakers(
-        &self,
-        args: &Value,
-        tenant_id: &str,
-        user_entity_id: i64,
-    ) -> Result<Vec<(&'static str, i64)>, Error> {
-        let mut speakers = vec![("user", user_entity_id)];
-        if let Some(agent_id) = args.get("agent_id").and_then(Value::as_str) {
-            if !agent_id.is_empty() {
-                speakers.push((
-                    "assistant",
-                    self.fact_store.resolve_agent(tenant_id, agent_id)?,
-                ));
-            }
+/// Resolve which `(role, entity)` speaker channels to scan for commitments.
+///
+/// The user channel always exists. The agent channel is only used when the
+/// caller supplied an `agent_id`, so a compile without one never
+/// materialises an agent entity as a side effect.
+fn commitment_speakers(
+    fact_store: &SqliteFactStore,
+    args: &Value,
+    tenant_id: &str,
+    user_entity_id: i64,
+) -> Result<Vec<(&'static str, i64)>, Error> {
+    let mut speakers = vec![("user", user_entity_id)];
+    if let Some(agent_id) = args.get("agent_id").and_then(Value::as_str) {
+        if !agent_id.is_empty() {
+            speakers.push(("assistant", fact_store.resolve_agent(tenant_id, agent_id)?));
         }
-        Ok(speakers)
     }
+    Ok(speakers)
+}
 
+impl MemoryCompileTool {
     async fn distill_if_requested(
         &self,
         args: &Value,

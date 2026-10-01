@@ -10,12 +10,11 @@
 //! `relation_graph` (BFS via petgraph), and `search_evidence`.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
-use tokio::sync::Mutex;
 
 use crate::error::{Error, Result, StorageError};
 use crate::storage::unique_index::{UniqueIndex, ensure_unique_index};
@@ -134,6 +133,35 @@ pub struct SQLiteKnowledgeStore {
 }
 
 impl SQLiteKnowledgeStore {
+    /// Run `work` against the connection on the blocking pool.
+    ///
+    /// `rusqlite` is synchronous, so every SQL statement the store issues has
+    /// to leave the tokio worker instead of running on it: otherwise a slow
+    /// query stalls every unrelated connection the runtime is driving (audit
+    /// 09-26/H7 — the MCP handlers had the same defect one layer up, fixed in
+    /// batch F; the store methods were the remaining source, batch G). The
+    /// `Arc` is cloned first so the closure owns its handle, and the connection
+    /// guard lives entirely *inside* the closure, so no lock is ever held
+    /// across an `await`.
+    ///
+    /// A poisoned mutex is deliberately recovered rather than propagated: the
+    /// connection is a serialized resource whose statements are individually
+    /// atomic, and the `tokio::sync::Mutex` this replaced has no poisoning at
+    /// all — surfacing poison would let one panicking caller brick the store
+    /// for every later one.
+    async fn with_conn<F, T>(&self, work: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = Arc::clone(&self.conn);
+        crate::blocking::run(move || {
+            let guard = conn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            work(&guard)
+        })
+        .await
+    }
+
     /// Open a file-backed store and initialize the schema idempotently.
     ///
     /// # Errors
@@ -161,53 +189,55 @@ impl SQLiteKnowledgeStore {
     }
 
     async fn init(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        // busy_timeout makes concurrent connections wait (up to 5s) for a lock
-        // instead of failing immediately. foreign_keys enforces declared FK
-        // constraints (otherwise they're cosmetic and orphan rows can be
-        // inserted). WAL is intentionally NOT enabled: its `-wal`/`-shm` sidecar
-        // files don't always survive cleanly across separate processes (e.g.
-        // nextest test processes), causing "file is not a database" on the next
-        // open. The default rollback journal is process-safe for our access
-        // pattern (serialized writers, concurrent readers).
-        conn.execute_batch(
-            "PRAGMA busy_timeout = 5000;
-             PRAGMA foreign_keys = ON;",
-        )?;
-        conn.execute_batch(KNOWLEDGE_SCHEMA)
-            .map_err(|e| StorageError::Schema(format!("init knowledge schema: {e}")))?;
-        // WORLD_SCHEMA (V7 entity-centric tables: entities/aliases/profiles/
-        // events/…) was declared in `storage::schema` but never executed —
-        // the doc comment claimed `init` ran it, yet only KNOWLEDGE_SCHEMA
-        // did (CODE_REVIEW C10). Executing it here is idempotent
-        // (CREATE TABLE IF NOT EXISTS) and brings the V7 general model live
-        // as the destination for DocumentSource/domain-pack output.
-        conn.execute_batch(WORLD_SCHEMA)
-            .map_err(|e| StorageError::Schema(format!("init world schema: {e}")))?;
-        // `CREATE TABLE IF NOT EXISTS` never adds columns to an existing
-        // table — databases created before the events offset columns need an
-        // idempotent ALTER (same pattern as fact_store::ensure_column).
-        ensure_column(&conn, "events", "start_offset", "INTEGER")?;
-        ensure_column(&conn, "events", "end_offset", "INTEGER")?;
-        // Document provenance column (T12): databases created before
-        // (title, source) identity need the column added — existing rows
-        // backfill to '' via the DEFAULT, which the write path treats as
-        // "untagged legacy document".
-        ensure_column(&conn, "documents", "source", "TEXT NOT NULL DEFAULT ''")?;
-        // Unique expression indexes backing the atomic ON CONFLICT upserts in
-        // `world_io.rs`. They MUST be created here (not in WORLD_SCHEMA) and
-        // AFTER ensure_column: on a legacy DB the offset columns only exist
-        // after the ALTER above, and SQLite rejects an index referencing
-        // missing columns. A failed index would in turn make every
-        // `ON CONFLICT(...)` upsert fail at statement level — which is why a
-        // database that predates the index is REPAIRED here (duplicates
-        // collapsed, dependents re-pointed) rather than refused: the previous
-        // revision's best-effort dedupe left exactly those databases
-        // unopenable.
-        for spec in UNIQUE_INDEXES {
-            ensure_unique_index(&conn, spec)?;
-        }
-        Ok(())
+        self.with_conn(|conn| {
+            // busy_timeout makes concurrent connections wait (up to 5s) for a lock
+            // instead of failing immediately. foreign_keys enforces declared FK
+            // constraints (otherwise they're cosmetic and orphan rows can be
+            // inserted). WAL is intentionally NOT enabled: its `-wal`/`-shm` sidecar
+            // files don't always survive cleanly across separate processes (e.g.
+            // nextest test processes), causing "file is not a database" on the next
+            // open. The default rollback journal is process-safe for our access
+            // pattern (serialized writers, concurrent readers).
+            conn.execute_batch(
+                "PRAGMA busy_timeout = 5000;
+                 PRAGMA foreign_keys = ON;",
+            )?;
+            conn.execute_batch(KNOWLEDGE_SCHEMA)
+                .map_err(|e| StorageError::Schema(format!("init knowledge schema: {e}")))?;
+            // WORLD_SCHEMA (V7 entity-centric tables: entities/aliases/profiles/
+            // events/…) was declared in `storage::schema` but never executed —
+            // the doc comment claimed `init` ran it, yet only KNOWLEDGE_SCHEMA
+            // did (CODE_REVIEW C10). Executing it here is idempotent
+            // (CREATE TABLE IF NOT EXISTS) and brings the V7 general model live
+            // as the destination for DocumentSource/domain-pack output.
+            conn.execute_batch(WORLD_SCHEMA)
+                .map_err(|e| StorageError::Schema(format!("init world schema: {e}")))?;
+            // `CREATE TABLE IF NOT EXISTS` never adds columns to an existing
+            // table — databases created before the events offset columns need an
+            // idempotent ALTER (same pattern as fact_store::ensure_column).
+            ensure_column(conn, "events", "start_offset", "INTEGER")?;
+            ensure_column(conn, "events", "end_offset", "INTEGER")?;
+            // Document provenance column (T12): databases created before
+            // (title, source) identity need the column added — existing rows
+            // backfill to '' via the DEFAULT, which the write path treats as
+            // "untagged legacy document".
+            ensure_column(conn, "documents", "source", "TEXT NOT NULL DEFAULT ''")?;
+            // Unique expression indexes backing the atomic ON CONFLICT upserts in
+            // `world_io.rs`. They MUST be created here (not in WORLD_SCHEMA) and
+            // AFTER ensure_column: on a legacy DB the offset columns only exist
+            // after the ALTER above, and SQLite rejects an index referencing
+            // missing columns. A failed index would in turn make every
+            // `ON CONFLICT(...)` upsert fail at statement level — which is why a
+            // database that predates the index is REPAIRED here (duplicates
+            // collapsed, dependents re-pointed) rather than refused: the previous
+            // revision's best-effort dedupe left exactly those databases
+            // unopenable.
+            for spec in UNIQUE_INDEXES {
+                ensure_unique_index(conn, spec)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Toggle FK enforcement on this connection. The migrator disables FKs for
@@ -215,14 +245,16 @@ impl SQLiteKnowledgeStore {
     /// enforcement is unnecessary, and cross-novel edges can transiently
     /// reference not-yet-migrated objects). Production queries keep FKs ON.
     pub async fn set_foreign_keys_enabled(&self, on: bool) -> Result<()> {
-        let conn = self.conn.lock().await;
-        let sql = if on {
-            "PRAGMA foreign_keys = ON"
-        } else {
-            "PRAGMA foreign_keys = OFF"
-        };
-        conn.execute(sql, [])?;
-        Ok(())
+        self.with_conn(move |conn| {
+            let sql = if on {
+                "PRAGMA foreign_keys = ON"
+            } else {
+                "PRAGMA foreign_keys = OFF"
+            };
+            conn.execute(sql, [])?;
+            Ok(())
+        })
+        .await
     }
 
     /// Drop all general-model rows. Called by the migrator at the start of a
@@ -334,8 +366,7 @@ impl SQLiteKnowledgeStore {
     /// more `ROLLBACK` returns the connection to autocommit first; a
     /// transaction opened by the caller is left strictly alone.
     async fn restore_foreign_keys(&self, transaction_is_ours: bool) -> Result<()> {
-        {
-            let conn = self.conn.lock().await;
+        self.with_conn(move |conn| {
             if transaction_is_ours && !conn.is_autocommit() {
                 tracing::warn!(
                     "a transaction outlived its commit/rollback; rolling it back \
@@ -343,23 +374,27 @@ impl SQLiteKnowledgeStore {
                 );
                 conn.execute_batch("ROLLBACK")?;
             }
-        }
+            Ok(())
+        })
+        .await?;
         self.set_foreign_keys_enabled(true).await
     }
 
     async fn clear_all_inner(&self) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch(
-            "DELETE FROM knowledge_evidence;
-             DELETE FROM mentions;
-             DELETE FROM knowledge_edges;
-             DELETE FROM evidence;
-             DELETE FROM knowledge_objects;
-             DELETE FROM compiler_runs;
-             DELETE FROM chapters;
-             DELETE FROM documents;",
-        )?;
-        Ok(())
+        self.with_conn(|conn| {
+            conn.execute_batch(
+                "DELETE FROM knowledge_evidence;
+                 DELETE FROM mentions;
+                 DELETE FROM knowledge_edges;
+                 DELETE FROM evidence;
+                 DELETE FROM knowledge_objects;
+                 DELETE FROM compiler_runs;
+                 DELETE FROM chapters;
+                 DELETE FROM documents;",
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     /// Drop all rows belonging to a single document (chapters, objects, edges,
@@ -379,27 +414,29 @@ impl SQLiteKnowledgeStore {
     }
 
     async fn clear_for_document_inner(&self, doc_id: i64) -> Result<()> {
-        let conn = self.conn.lock().await;
-        conn.execute_batch(&format!(
-            "DELETE FROM knowledge_evidence
-               WHERE source_type = 'object' AND source_id IN
-                 (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
-               OR source_type = 'edge' AND source_id IN
-                 (SELECT id FROM knowledge_edges WHERE source_id IN
+        self.with_conn(move |conn| {
+            conn.execute_batch(&format!(
+                "DELETE FROM knowledge_evidence
+                   WHERE source_type = 'object' AND source_id IN
+                     (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
+                   OR source_type = 'edge' AND source_id IN
+                     (SELECT id FROM knowledge_edges WHERE source_id IN
+                       (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
+                     OR target_id IN
+                       (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id}));
+                 DELETE FROM mentions WHERE object_id IN
+                   (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id});
+                 DELETE FROM knowledge_edges WHERE source_id IN
                    (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
-                 OR target_id IN
-                   (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id}));
-             DELETE FROM mentions WHERE object_id IN
-               (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id});
-             DELETE FROM knowledge_edges WHERE source_id IN
-               (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id})
-               OR target_id IN
-               (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id});
-             DELETE FROM evidence WHERE doc_id = {doc_id};
-             DELETE FROM knowledge_objects WHERE doc_id = {doc_id};
-             DELETE FROM compiler_runs WHERE doc_id = {doc_id};
-             DELETE FROM chapters WHERE doc_id = {doc_id};",
-        ))?;
-        Ok(())
+                   OR target_id IN
+                   (SELECT id FROM knowledge_objects WHERE doc_id = {doc_id});
+                 DELETE FROM evidence WHERE doc_id = {doc_id};
+                 DELETE FROM knowledge_objects WHERE doc_id = {doc_id};
+                 DELETE FROM compiler_runs WHERE doc_id = {doc_id};
+                 DELETE FROM chapters WHERE doc_id = {doc_id};",
+            ))?;
+            Ok(())
+        })
+        .await
     }
 }

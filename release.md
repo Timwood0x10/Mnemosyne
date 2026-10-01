@@ -164,6 +164,62 @@ falls back to built-in defaults and keeps working.
 - **Stale documentation** — the `confidence` field still described itself as
   derived from the decay `weight`, two `plan/…` links were dangling, and the
   tool's dimension list was a hand-maintained copy of the engine's table.
+- **Single-character entity names scored a full match** — two empty bigram sets
+  in `compiler/resolver.rs` returned Jaccard `1.0`, so any two one-character CJK
+  names matched; two empty sets now return `0.0` (with a byte-identical shortcut).
+- **The production novel pipeline shadowed long forms with their prefixes**
+  (`诸葛` over `诸葛亮`, `杀` over `杀害`) — three Aho-Corasick automatons in
+  `compiler/extract.rs` and one in `observation_compiler.rs` used the default
+  `MatchKind::Standard`; all four now use `MatchKind::LeftmostLongest`.
+- **LIKE patterns did not escape the backslash**, so a query containing `\` ate
+  the following wildcard; the escape character is doubled first, then `%`/`_`.
+- **Expired rows were returned by every read path** (`get`, `search_by_vector`,
+  `search_by_keyword`, `get_by_memory_type`) because only the purge looked at
+  `expires_at`; all four now apply the `<=` expiry gate.
+- **Hybrid retrieval could never surface a vector-only hit** — candidates came
+  from keyword search alone — so the set is now `keyword ∪ semantic`, with a
+  vector-only hit taking the worst keyword rank.
+- **The FTS index was never backfilled and the LIKE fallback ignored `solution`**;
+  the index is backfilled idempotently and the fallback covers `solution`.
+- **Relationship negation checked three cues instead of the documented six and
+  scanned the whole clause**, and a single-character cue could be the tail of an
+  unrelated word (`特别喜欢` read `别`); the full cue set is checked, a cue counts
+  only immediately before the keyword, and a non-negation-tail table excludes
+  those endings.
+- **Self-disclosure evidence anchors were always 1 byte long** for age / location
+  / occupation, so `offset + length` did not reproduce the fragment; anchors now
+  carry the real length.
+- **`persona_check` reported a stance conflict on one shared bigram** instead of
+  the documented two; it now reuses `STANCE_FLIP_MIN_SHARED_BIGRAMS` (2).
+- **Secret filtering missed the no-space forms** (`password:`, `passwd`, `pwd`,
+  `secret`, `api_key`, `token`, bearer); bare markers, assignment separators and
+  word-boundary prefixes are matched now.
+- **The noise gate discarded messages the problem detector had just flagged** —
+  `is_noise` ran before `is_problem`; the problem check now runs first.
+- **A malformed relation-rules / name-validation JSON silently fell back to the
+  built-in rule set** with no log; the loader now warns and returns the error, and
+  `config-check` parses for real.
+- **The documented three-layer lexicon + `disable` was never wired at runtime**;
+  core → packs → user is resolved in order and a `Disabled` word is removed from
+  the registry and the matcher.
+- **Both global dictionaries degraded to an EMPTY table on load failure** and
+  silently lost the vocabulary; init now returns a `Result` and a startup
+  `verify_vocabulary()` check fails loud.
+- **The bundled persona-prototype JSON's `match` key was ignored by serde**
+  (`match` is a keyword); it now carries `#[serde(rename = "match")]`.
+- **An empty/whitespace HTTP token was accepted and the comparison leaked the
+  token length**; a blank token is refused at startup and the comparison is
+  constant-time.
+- **Capacity eviction tie-broke toward the newest row** and could evict a memory
+  created this round; ties now order by `(confidence asc, created_at asc)` with
+  this round's rows excluded.
+- **`story_bridge` skipped a re-run forever after a partial write while reporting
+  success**; the write is one transaction now, idempotent by event id, and the
+  stats are read back from the store.
+- **The brute-force vector index accepted NaN/Inf and zero-dimension vectors that
+  HNSW rejects**; both build and search now reject them at the same boundary.
+- **`forget_expired` used `<` while the reads and `is_expired` use `<=`**, so a
+  row expiring exactly at the boundary was never reclaimed; the purge uses `<=`.
 
 ### Changed
 
@@ -187,6 +243,11 @@ falls back to built-in defaults and keeps working.
 - **The release job refuses a version mismatch.** The tag is derived from this
   file's first line, so a `Cargo.toml` that disagreed would have published a tag
   the binary does not claim; the workflow now fails before creating the release.
+- **The intimacy contract was aligned to the two-way design** — assistant messages
+  already moved intimacy (0.01) while the docs said user-only ±0.02; the contract
+  and README now state user ±0.02 / agent ±0.01.
+- **Vector-mode documentation narrowed** — Vector mode ranks only rows that carry
+  an embedding (a vectorless row is absent; Hybrid keeps it); behaviour unchanged.
 
 ## Docs
 

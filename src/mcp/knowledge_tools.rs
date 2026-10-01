@@ -19,7 +19,9 @@ use serde_json::Value;
 use crate::error::Error;
 use crate::fact_store::SqliteFactStore;
 use crate::knowledge::store::KnowledgeStore;
-use crate::knowledge::{EntityLinker, ExternalAlias, KnowledgeEdge, SQLiteKnowledgeStore};
+use crate::knowledge::{
+    EntityLinker, ExternalAlias, KnowledgeEdge, KnowledgeObject, SQLiteKnowledgeStore,
+};
 use crate::mcp::server::ServerBuilder;
 use crate::mcp::types::{ContentBlock, ToolCallResult, ToolDefinition, ToolHandler, identity_arg};
 
@@ -105,7 +107,20 @@ impl ToolHandler for InspectEntityHandler {
         // tool keeps working for purely-local entities.
         let (canonical, external_aliases) = self.resolve_with_linker(&requested, source_hint);
 
-        match self.store.inspect_entity(&canonical, doc).await? {
+        // The graph lookups await the async knowledge store; the alias
+        // decoration and JSON assembly that follow are synchronous, so they run
+        // on the blocking pool (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+        let found = match store.inspect_entity(&canonical, doc).await? {
+            Some(result) => Some(result),
+            // If the canonical lookup missed, retry with the original requested
+            // name as a last resort (the linker may have mapped the surface to
+            // a canonical that isn't in the graph yet).
+            None if canonical != requested => store.inspect_entity(&requested, doc).await?,
+            None => None,
+        };
+
+        crate::mcp::blocking::run(move || match found {
             Some(mut result) => {
                 // Attach the cross-source aliases that resolved to this entity
                 // so the response carries a full cross-source picture
@@ -113,19 +128,9 @@ impl ToolHandler for InspectEntityHandler {
                 result.external_aliases = external_aliases;
                 json_ok(&result)
             }
-            None => {
-                // If the canonical lookup missed, retry with the original
-                // requested name as a last resort (the linker may have mapped
-                // the surface to a canonical that isn't in the graph yet).
-                if canonical != requested {
-                    if let Some(mut result) = self.store.inspect_entity(&requested, doc).await? {
-                        result.external_aliases = external_aliases;
-                        return json_ok(&result);
-                    }
-                }
-                Ok(err_result(format!("entity `{requested}` not found")))
-            }
-        }
+            None => Ok(err_result(format!("entity `{requested}` not found"))),
+        })
+        .await
     }
 }
 
@@ -178,7 +183,9 @@ impl ToolHandler for TimelineHandler {
         let entity = req_str(args, "entity")?;
         let doc = opt_str(args, "doc");
         let entries = self.store.entity_timeline(&entity, doc).await?;
-        json_ok(&entries)
+        // JSON serialization is synchronous; run it off the tokio worker
+        // (audit 09-26/H7).
+        crate::mcp::blocking::run(move || json_ok(&entries)).await
     }
 }
 
@@ -195,10 +202,14 @@ impl ToolHandler for RelationGraphHandler {
         let doc = opt_str(args, "doc");
         let depth = opt_usize(args, "depth", 2).clamp(1, 5);
 
-        match self.store.relation_graph(&entity, depth, doc).await? {
+        let found = self.store.relation_graph(&entity, depth, doc).await?;
+        // The result assembly and JSON serialization are synchronous; run them
+        // off the tokio worker (audit 09-26/H7).
+        crate::mcp::blocking::run(move || match found {
             Some(result) => json_ok(&result),
             None => Ok(err_result(format!("entity `{entity}` not found"))),
-        }
+        })
+        .await
     }
 }
 
@@ -217,7 +228,9 @@ impl ToolHandler for EvidenceHandler {
         // memory by loading the whole evidence table into one response.
         let limit = opt_usize(args, "limit", 20).min(200);
         let hits = self.store.search_evidence(&query, doc, limit).await?;
-        json_ok(&hits)
+        // JSON serialization is synchronous; run it off the tokio worker
+        // (audit 09-26/H7).
+        crate::mcp::blocking::run(move || json_ok(&hits)).await
     }
 }
 
@@ -239,6 +252,11 @@ impl ToolHandler for CorrectRelationHandler {
         let new_target = req_str(args, "new_target")?;
         let doc = opt_str(args, "doc");
 
+        // The graph lookups/updates await the async knowledge store; the final
+        // JSON assembly is synchronous, so it runs on the blocking pool
+        // (audit 09-26/H7).
+        let store = Arc::clone(&self.store);
+
         // Resolve all three entities up front so the edge filter can match on
         // the full triple (source, predicate, old_target) rather than just the
         // predicate. The previous implementation resolved `old_target` but
@@ -255,7 +273,7 @@ impl ToolHandler for CorrectRelationHandler {
         // asked to scope the fix to a document, and silently applying it
         // graph-wide would re-target same-named entities in other documents.
         let doc_id = match doc {
-            Some(title) => match self.store.find_document_by_title(title).await? {
+            Some(title) => match store.find_document_by_title(title).await? {
                 Some(d) => Some(d.id),
                 None => {
                     return Ok(err_result(format!("document `{title}` not found")));
@@ -263,15 +281,15 @@ impl ToolHandler for CorrectRelationHandler {
             },
             None => None,
         };
-        let src = match self.store.find_object_by_name(&source, doc_id).await? {
+        let src = match store.find_object_by_name(&source, doc_id).await? {
             Some(s) => s,
             None => return Ok(err_result(format!("source `{source}` not found"))),
         };
-        let target_entity = match self.store.find_object_by_name(&old_target, doc_id).await? {
+        let target_entity = match store.find_object_by_name(&old_target, doc_id).await? {
             Some(t) => t,
             None => return Ok(err_result(format!("old_target `{old_target}` not found"))),
         };
-        let new_entity = match self.store.find_object_by_name(&new_target, doc_id).await? {
+        let new_entity = match store.find_object_by_name(&new_target, doc_id).await? {
             Some(n) => n,
             None => return Ok(err_result(format!("new_target `{new_target}` not found"))),
         };
@@ -280,7 +298,7 @@ impl ToolHandler for CorrectRelationHandler {
         // predicate. `get_edges_touching` also returns incoming edges, so we
         // explicitly require `source_id == src.id` to avoid re-targeting edges
         // where `source` is the object of someone else's relation.
-        let edges = self.store.get_edges_touching(src.id).await?;
+        let edges = store.get_edges_touching(src.id).await?;
         let matched: Vec<&KnowledgeEdge> = edges
             .iter()
             .filter(|e| {
@@ -301,7 +319,7 @@ impl ToolHandler for CorrectRelationHandler {
         for e in &matched {
             // Use the actual affected-row count from the store (NEW-M1): an
             // unknown edge id returns 0 rows and must not inflate `changed`.
-            changed += self.store.update_edge_target(e.id, new_entity.id).await?;
+            changed += store.update_edge_target(e.id, new_entity.id).await?;
         }
 
         let details = serde_json::json!({
@@ -315,7 +333,7 @@ impl ToolHandler for CorrectRelationHandler {
             "doc": doc,
         });
 
-        json_ok(&details)
+        crate::mcp::blocking::run(move || json_ok(&details)).await
     }
 }
 
@@ -462,77 +480,102 @@ struct CognitiveContextHandler {
 #[async_trait::async_trait]
 impl ToolHandler for CognitiveContextHandler {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        use crate::cognition::{FactStore as CognitionFactStore, StateEngine, build_snapshot};
-
         let name = req_str(args, "name")?;
-        let tenant_id = identity_arg(args, "tenant_id");
-        let user_id = identity_arg(args, "user_id");
-        let store = &self.store;
+        let tenant_id = identity_arg(args, "tenant_id").to_string();
+        let user_id = identity_arg(args, "user_id").to_string();
 
-        // 1. Resolve persisted knowledge entities. User identities are scoped
-        // by tenant and external user id; legacy callers still resolve the
-        // default User root through the compatible empty-id mapping.
-        //
-        // Non-user names must resolve through the FACT store's entity space
-        // (tenant-scoped), never by reusing `knowledge_objects.id`: those two
-        // id spaces are independent AUTOINCREMENT sequences, so feeding a
-        // graph object id into `get_facts` returned another entity's
-        // cognitive snapshot (or empty).
-        let (entity_id, entity_name, entity_type) = if name.eq_ignore_ascii_case("user") {
-            let entity_id = self.fact_store.resolve_user(tenant_id, user_id)?;
-            let entity_name = if user_id.is_empty() {
-                "User".to_string()
-            } else {
-                format!("User:{user_id}")
-            };
-            (entity_id, entity_name, "User".to_string())
+        // Only graph-object resolution touches the async knowledge store; the
+        // fact-store reads and snapshot build that follow are synchronous
+        // `rusqlite`, so they run on the blocking pool (audit 09-26/H7).
+        let graph_object = if name.eq_ignore_ascii_case("user") {
+            None
         } else {
-            // Prefer a graph object for the display name/type, but only use
-            // its id when a same-named fact-store entity exists in this
-            // tenant; otherwise resolve as an agent-like entity by name.
-            let object = store
-                .find_object_by_name(&name, None)
-                .await?
-                .ok_or_else(|| Error::NotFound(format!("entity `{name}` not found")))?;
-            let fact_entity = self
-                .fact_store
-                .find_entity(tenant_id, None, &object.name)?
-                .map(|(id, _, _)| id)
-                .or_else(|| {
-                    // Fall back to the agent external-key form so companion
-                    // characters bridged via story_bridge resolve by name.
-                    self.fact_store
-                        .find_entity(
-                            tenant_id,
-                            Some(&format!("agent:{}", object.name)),
-                            &format!("Agent:{}", object.name),
-                        )
-                        .ok()
-                        .flatten()
-                        .map(|(id, _, _)| id)
-                });
-            match fact_entity {
-                Some(id) => (id, object.name, format!("{:?}", object.object_type)),
-                None => {
-                    return Err(Error::NotFound(format!(
-                        "entity `{name}` has no cognitive facts in tenant `{tenant_id}`"
-                    )));
-                }
-            }
+            Some(
+                self.store
+                    .find_object_by_name(&name, None)
+                    .await?
+                    .ok_or_else(|| Error::NotFound(format!("entity `{name}` not found")))?,
+            )
         };
 
-        // 2. Read Facts from the same SQLite database as the knowledge store.
-        // This keeps entity resolution and cognition state on one durable path.
-        let facts = self.fact_store.get_facts(entity_id)?;
-
-        // 4. Build snapshot
-        let state_engine = StateEngine::new();
-        let snapshot = build_snapshot(entity_id, entity_name, entity_type, facts, &state_engine);
-
-        // 5. Return as JSON
-        let json = snapshot.format_json();
-        json_ok(&json)
+        let fact_store = Arc::clone(&self.fact_store);
+        crate::mcp::blocking::run(move || {
+            run_cognitive_context(&fact_store, &name, &tenant_id, &user_id, graph_object)
+        })
+        .await
     }
+}
+
+/// Synchronous body of `cognitive_context`, executed on the blocking pool.
+fn run_cognitive_context(
+    fact_store: &SqliteFactStore,
+    name: &str,
+    tenant_id: &str,
+    user_id: &str,
+    graph_object: Option<KnowledgeObject>,
+) -> Result<ToolCallResult, Error> {
+    use crate::cognition::{FactStore as CognitionFactStore, StateEngine, build_snapshot};
+
+    // 1. Resolve persisted knowledge entities. User identities are scoped
+    // by tenant and external user id; legacy callers still resolve the
+    // default User root through the compatible empty-id mapping.
+    //
+    // Non-user names must resolve through the FACT store's entity space
+    // (tenant-scoped), never by reusing `knowledge_objects.id`: those two
+    // id spaces are independent AUTOINCREMENT sequences, so feeding a
+    // graph object id into `get_facts` returned another entity's
+    // cognitive snapshot (or empty).
+    let (entity_id, entity_name, entity_type) = if name.eq_ignore_ascii_case("user") {
+        let entity_id = fact_store.resolve_user(tenant_id, user_id)?;
+        let entity_name = if user_id.is_empty() {
+            "User".to_string()
+        } else {
+            format!("User:{user_id}")
+        };
+        (entity_id, entity_name, "User".to_string())
+    } else {
+        // Prefer a graph object for the display name/type, but only use
+        // its id when a same-named fact-store entity exists in this
+        // tenant; otherwise resolve as an agent-like entity by name.
+        let object =
+            graph_object.expect("non-user names resolved to a graph object in the async shell");
+        let fact_entity = fact_store
+            .find_entity(tenant_id, None, &object.name)?
+            .map(|(id, _, _)| id)
+            .or_else(|| {
+                // Fall back to the agent external-key form so companion
+                // characters bridged via story_bridge resolve by name.
+                fact_store
+                    .find_entity(
+                        tenant_id,
+                        Some(&format!("agent:{}", object.name)),
+                        &format!("Agent:{}", object.name),
+                    )
+                    .ok()
+                    .flatten()
+                    .map(|(id, _, _)| id)
+            });
+        match fact_entity {
+            Some(id) => (id, object.name, format!("{:?}", object.object_type)),
+            None => {
+                return Err(Error::NotFound(format!(
+                    "entity `{name}` has no cognitive facts in tenant `{tenant_id}`"
+                )));
+            }
+        }
+    };
+
+    // 2. Read Facts from the same SQLite database as the knowledge store.
+    // This keeps entity resolution and cognition state on one durable path.
+    let facts = fact_store.get_facts(entity_id)?;
+
+    // 4. Build snapshot
+    let state_engine = StateEngine::new();
+    let snapshot = build_snapshot(entity_id, entity_name, entity_type, facts, &state_engine);
+
+    // 5. Return as JSON
+    let json = snapshot.format_json();
+    json_ok(&json)
 }
 
 // ───────────────────────────────────────────────────────────────────────────

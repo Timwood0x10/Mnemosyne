@@ -51,16 +51,20 @@ async fn concurrent_upsert_does_not_duplicate() {
     );
 
     // Count rows for this name — must be exactly one.
-    let count: i64 = store_a
-        .conn
-        .lock()
-        .await
-        .query_row(
+    let count: i64 = {
+        // The connection now lives behind a std Mutex; recover from poisoning
+        // the same way the store itself does.
+        let conn = store_a
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        conn.query_row(
             "SELECT COUNT(*) FROM world_entities WHERE name = ?1",
             params!["诸葛亮"],
             |r| r.get(0),
         )
-        .expect("count");
+        .expect("count")
+    };
     assert_eq!(count, 1, "P2: concurrent upsert must not duplicate rows");
 
     let _ = std::fs::remove_file(&path);
@@ -75,7 +79,10 @@ async fn concurrent_upsert_does_not_duplicate() {
 #[tokio::test]
 async fn world_schema_tables_are_created() {
     let store = fresh().await;
-    let conn = store.conn.lock().await;
+    let conn = store
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     for table in [
         "world_entities",
         "world_entity_aliases",
@@ -294,7 +301,10 @@ mod world;
 
 /// Whether FK enforcement is currently ON for this store's connection.
 async fn foreign_keys_on(store: &SQLiteKnowledgeStore) -> bool {
-    let conn = store.conn.lock().await;
+    let conn = store
+        .conn
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     conn.query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
         .expect("read foreign_keys pragma")
         != 0
@@ -411,11 +421,13 @@ async fn create_document_is_idempotent_by_identity() {
         .expect("create other source");
     assert_ne!(other, first, "a different source is a different document");
 
-    let rows: i64 = store
-        .conn
-        .lock()
-        .await
-        .query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
-        .expect("count documents");
+    let rows: i64 = {
+        let conn = store
+            .conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        conn.query_row("SELECT COUNT(*) FROM documents", [], |row| row.get(0))
+            .expect("count documents")
+    };
     assert_eq!(rows, 2, "two identities, two rows");
 }

@@ -22,7 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::cognition::FactStore;
+use crate::cognition::{Fact, FactStore};
 use crate::config::resolve_resource_path;
 use crate::embed::EmbeddingService;
 use crate::error::Error;
@@ -97,8 +97,6 @@ impl ToolHandler for PersonaCheckTool {
             .and_then(Value::as_str)
             .unwrap_or("default");
 
-        // READ-ONLY lookup: find_entity, not resolve_agent (which creates a
-        // row for a typo'd agent_id on a documented read-only tool).
         let agent_norm = if agent_id.trim().is_empty() {
             "default".to_string()
         } else {
@@ -110,25 +108,28 @@ impl ToolHandler for PersonaCheckTool {
             format!("Agent:{agent_norm}")
         };
         let agent_key = format!("agent:{agent_norm}");
-        let entity_id =
-            match self
-                .fact_store
-                .find_entity(tenant_id, Some(&agent_key), &agent_name)?
-            {
-                Some((id, _, _)) => id,
-                None => {
-                    // Unknown agent: no persona facts to check against — report
-                    // clean rather than materialising an empty entity.
-                    let payload = json!({
-                        "clean": true,
-                        "conflicts": [],
-                        "drift": [],
-                        "stats": { "consistent_count": 0, "total_signals": 0 },
-                    });
-                    return Ok(ToolCallResult::text(payload.to_string()));
-                }
-            };
-        let facts = self.fact_store.get_facts(entity_id)?;
+
+        // The entity lookup and fact read hit `rusqlite` synchronously; hand
+        // them to the blocking pool so a slow query cannot stall the tokio
+        // worker (audit 09-26/H7). The embedding-backed `check` below stays on
+        // the async worker because it awaits the embedder.
+        let fact_store = Arc::clone(&self.fact_store);
+        let tenant_id_owned = tenant_id.to_string();
+        let facts = crate::mcp::blocking::run(move || {
+            load_persona_facts(&fact_store, &tenant_id_owned, &agent_key, &agent_name)
+        })
+        .await?;
+        let Some(facts) = facts else {
+            // Unknown agent: no persona facts to check against — report clean
+            // rather than materialising an empty entity.
+            let payload = json!({
+                "clean": true,
+                "conflicts": [],
+                "drift": [],
+                "stats": { "consistent_count": 0, "total_signals": 0 },
+            });
+            return Ok(ToolCallResult::text(payload.to_string()));
+        };
         let result = self.engine.check(draft, &facts).await?;
 
         let payload = json!({
@@ -142,6 +143,25 @@ impl ToolHandler for PersonaCheckTool {
         });
         Ok(ToolCallResult::text(payload.to_string()))
     }
+}
+
+/// Synchronous part of `persona_check`, executed on the blocking pool: resolve
+/// the agent entity and read its persona facts. Returns `None` when the agent
+/// has no entity row, so the caller can report a clean result without
+/// materialising an entity.
+fn load_persona_facts(
+    fact_store: &SqliteFactStore,
+    tenant_id: &str,
+    agent_key: &str,
+    agent_name: &str,
+) -> Result<Option<Vec<Fact>>, Error> {
+    // READ-ONLY lookup: find_entity, not resolve_agent (which creates a row for
+    // a typo'd agent_id on a documented read-only tool).
+    let Some((entity_id, _, _)) = fact_store.find_entity(tenant_id, Some(agent_key), agent_name)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(fact_store.get_facts(entity_id)?))
 }
 
 /// Serialize the conflict list into a client-friendly JSON array.

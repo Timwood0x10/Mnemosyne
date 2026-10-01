@@ -3,106 +3,7 @@
 All notable changes to this project are documented in this file. The format
 is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.2] - 2026-08-10
-
-### Fixed
-
-- **Prebuilt binaries no longer hardcode the build machine's source path.**
-  `env!("CARGO_MANIFEST_DIR")` was baked into every release, so a binary
-  built on CI panicked with `Failed to load core lexicon from
-  config/dictionary.json` (`FileLoad { path: "/Users/runner/work/..." }`) on
-  every other machine. Resource paths are now resolved at runtime
-  (`resolve_resource_path`): `MNEMOSYNE_HOME` env override → current working
-  directory → executable's directory, in that order.
-- **A missing lexicon no longer crashes the process.** The global lexicon
-  registry previously panicked on first use when `config/dictionary.json` was
-  absent; it now degrades to an empty registry with a warning (same fail-soft
-  pattern as the dictionary loader).
-- **`generalize_compile` extracted document titles as fake `person`
-  entities.** Auto-generated titles (`generalize-1786331280`) and filenames
-  were materialized as person objects while the actual people inside the text
-  (张三/李四/Alice/Bob) were never discovered — the knowledge graph was
-  unusable. Title entities are now only created when the title looks like a
-  real name, and corpus discovery was added/extended:
-  - English Capitalized person names (`Alice met Bob`) are extracted.
-  - Vernacular Chinese dialogue verbs (`说/说道/答道`) beyond the classic
-    novel list (`曰/道`) now surface speakers.
-  - Overlapping verbs in one run (`说道` matching 说/道/说道) no longer
-    double-count frequencies.
-- **`memory_compile` produced zero facts for ordinary conversations.** Only
-  12 hardcoded marker words were matched, so "我很焦虑，压力很大" compiled no
-  facts and the facts table stayed empty. The marker table was moved out of
-  the binary into configurable JSON (see below) and expanded to cover
-  emotions, preferences, plans, wants, beliefs, difficulties, life events,
-  modern vernacular, and internet slang.
-- **Duplicate-fact inflation.** One message matching several same-action
-  markers (失眠+加班+压力+好累 → four `feel`) emitted four near-identical
-  facts, polluting the cognitive snapshot. Observations are now deduplicated
-  per action per message while distinct actions are preserved.
-- **Companion relationships never advanced.** `relationship_update` only
-  counted user-message emotions, so an assistant-heavy warm dialogue
-  ("我很开心能认识你" / user replies "嗯嗯") left intimacy pinned at 0.0
-  forever. The agent's own emotional statements now move the relationship
-  with a lighter weight (user emotions remain the primary driver).
-
-### Changed
-
-- **One config root instead of ten environment variables.** The scattered
-  `DICTIONARY_PATH` / `FACTION_MAP_PATH` / `DECAY_CONFIG_PATH` /
-  `RELATION_RULES_PATH` / `PERSONA_CARDS_PATH` / `PERSONA_PROTOTYPES_PATH` /
-  `DOMAIN_PROFILES_PATH` / `EMOTION_LEXICON_PATH` / `ANCHOR_SEEDS_PATH` /
-  `NAME_VALIDATION_PATH` overrides were removed in favor of a single
-  `MNEMOSYNE_HOME` root directory, auto-detected when unset.
-- **Observation markers are now data, not code.** The marker table moved from
-  a hardcoded array into two shipped, user-editable JSON files —
-  `markers_zh.json` and `markers_en.json` — with a built-in fallback table
-  when the config is absent.
-- **Default HTTP listen port changed 8080 → 5609** (avoiding a common
-  conflict); `--http-addr` still overrides it.
-- **Release artifacts now include the marker word lists.** Each platform
-  binary ships alongside `markers_zh.json` / `markers_en.json`, so a download
-  placed in one directory works out of the box and is customizable.
-
-## [0.1.1] - 2026-08-08
-
-### Changed
-
-- **Rebrand to Mnemosyne.** Package/binary renamed from `LoreScope`/`lore-scope`
-  to `Mnemosyne`/`mnemosyne` (Cargo.toml, all `lore_scope::` imports, README,
-  docs, Makefile). The GitHub repository is `Timwood0x10/Mnemosyne`.
-- **MCP hardening for external serving.** HTTP transport now requires
-  `--http-token` (refuses to start without it) and compares tokens in
-  constant time; per-session SSE isolation via `x-mcp-session-id` so concurrent
-  clients never receive each other's responses; `memory_export/import` `path`
-  restricted to the `exports/` allowlist (rejects absolute paths and `..`
-  traversal).
-- **Faster release pipeline.** New `[profile.ci]` (thin LTO + 16 codegen
-  units) used by CI builds — fat LTO + 1 unit was the dominant compile cost on
-  every platform. `release.yml` now runs AFTER CI succeeds (`workflow_run`),
-  builds 5 platform binaries (macOS arm64/x86_64, Linux arm64/x86_64, Windows
-  x86_64), verifies all 5 assets exist before publishing, and derives the
-  version tag from `release.md`.
-- **CI self-contained.** Removed all corpus-dependent tests (corpus/ is
-  gitignored and never present in CI); the suite now uses only synthetic
-  corpora generated in-test. `ci.yml` runs `make check && make test` on `dev`.
-
-### Fixed
-
-- **Hardcoded corpus paths removed.** All tests that read `corpus/*.txt|json`
-  (or shared `/tmp/*.db` fixtures) were deleted rather than skipped, so CI
-  never fails with `NotFound` on a missing fixture.
-- **`ToolDefinition.input_schema` serializes as `inputSchema`.** The MCP wire
-  contract requires camelCase; strict clients previously could not read the
-  tool schema.
-
-### Security
-
-- Constant-time bearer-token comparison in the HTTP transport (no timing side
-  channel); file-allowlist for memory transfer tools; FTS5 query injection
-  hardening (see earlier entry).
-
-## [0.1.3] - 2026-09-23
-
+## [0.1.3] - 2026-09-30
 ### Added
 
 - **Cognitive state history.** `StateEngine::aggregate_intervals`
@@ -134,6 +35,19 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `outcome`, so every decision stayed `open` forever. Nothing is inferred from the
   conversation, the first outcome recorded wins, and unknown ids come back as
   `missing` instead of failing the call.
+- **The plan's Step 2 acceptance runs on real data.**
+  `tests/cognitive_state_e2e.rs::three_state_evolution_chain_carries_its_evidence`
+  drives the "宅家 → 想社交 → 第一次参加活动" corpus through the real compiler and
+  the real `state_timeline` / `fact_provenance` tools, asserting three validity
+  windows, a distinct evidence anchor per state, and the two transitions the data
+  can actually prove (`gradual_change`, then `behavioral_confirmation`).
+- **Optional `tenant_id` on the four id-addressed read tools.** `state_timeline`,
+  `fact_provenance`, `decision_trace` and `decision_search` address their subject
+  by a raw id, which says nothing about ownership. When a caller supplies the
+  tenant, the subject must belong to it and a mismatch is reported as not-found —
+  never as a permission error, which would confirm that the id exists.
+
+
 - **Self-disclosure channel.** `src/self_disclosure.rs` compiles what the user says
   about *themselves* — name / age / occupation / city (`Identity` + `attribute`),
   family and pets (`Relationship` + `target`), interests (`Interest`) and habits
@@ -149,17 +63,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   regression floors and per-fact invariants (source sentence + evidence anchor,
   determinism, no fact from filler). Baseline: explicit signals 100%, phantoms
   0/9, capability gaps 22% — documented in `docs/zh/compile-quality.md`.
-- **The plan's Step 2 acceptance runs on real data.**
-  `tests/cognitive_state_e2e.rs::three_state_evolution_chain_carries_its_evidence`
-  drives the "宅家 → 想社交 → 第一次参加活动" corpus through the real compiler and
-  the real `state_timeline` / `fact_provenance` tools, asserting three validity
-  windows, a distinct evidence anchor per state, and the two transitions the data
-  can actually prove (`gradual_change`, then `behavioral_confirmation`).
-- **Optional `tenant_id` on the four id-addressed read tools.** `state_timeline`,
-  `fact_provenance`, `decision_trace` and `decision_search` address their subject
-  by a raw id, which says nothing about ownership. When a caller supplies the
-  tenant, the subject must belong to it and a mismatch is reported as not-found —
-  never as a permission error, which would confirm that the id exists.
 - **User marker tables (`config/*.user.json`).** Any file ending in
   `.user.json` in `config/` is merged onto the shipped tables in file-name
   order, and a `_remove` object inside a file deletes already-merged words —
@@ -185,7 +88,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   events with dependents, colliding dependents, stale index definition, clean
   database untouched, legacy NULL columns), which a fresh in-memory store can
   never exercise.
-
 ### Fixed
 
 - **`state_timeline` returned zero dimensions for every real conversation.**
@@ -214,30 +116,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `weight`/`archived`/`status`-independent state. Databases created before the
   split are migrated in place: when the column is first added it is backfilled
   from `weight`, so accumulated confidence survives.
-- **A single negation word anywhere in a sentence discarded an affirmative plan.**
-  Negation was decided once per message, so "想学吉他很久了，一直在纠结买不买" and
-  "特别想去海边…什么都不干" were marked negated and their goals thrown away
-  (`买不买` / `什么都不干` negated the whole sentence). Negation is now resolved per
-  marker inside its own clause — the rule `src/commitment.rs` already applied to
-  promises. `must_catch` recall on the new corpus went 84% → 100%.
-- **A negated statement was reported as the current state.** Preserving negated
-  facts (below) made `StateEngine::aggregate` list "我不喜欢应酬" under the entity's
-  *preferences* — the opposite of what was said. The current-state projection now
-  skips negated facts (`Fact::negated`), while the history layer keeps folding on
-  them so the change still surfaces as a `StanceFlip`.
-- **Negated goals were dropped, losing the change entirely.** "我不打算考公务员了"
-  produced no fact at all, so a companion could never learn that the user gave up
-  that plan. Negated goals are now kept as `negated: true`; ELITE_LEXICON_PLAN
-  §13.3 (never an *affirmative* goal) is guaranteed by the flag plus the
-  affirmative-only current-state projection, not by discarding the fact.
-- **The user-fact pipeline existed twice, and the new channel was wired into only
-  one of them.** `CognitionCompiler::compile_conversation` (the `memory_compile`
-  path) inlined `compile_user_observations` + `user_facts_from_observations`
-  instead of calling `compile_user_facts`, so a self-introduction produced zero
-  identity facts over MCP while the corpus test — which drives the shared entry
-  point — reported 100%. Both callers now go through one
-  `user_facts_from_channels`, which the corpus harness and the MCP end-to-end test
-  each cover.
 - **Cognitive-state transitions were unreachable on production data.**
   `gradual_change` required a `keyword` payload field while the comparison text
   came from `content`, and no compiler emits both — so the plan's own example
@@ -295,99 +173,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   bigram. It now asserts both directions: an unlisted alias is not force-matched,
   and an identical name matches at full similarity.
 
-### Changed
-
-- **`upsert_world_event` / `upsert_world_state` take a parameter object.** Each
-  took eight positional arguments — five of them optional spans or numbers — and
-  the trait plus its implementation needed `#[allow(clippy::too_many_arguments)]`
-  to compile, so the lint was suppressed in four places. They now take
-  `NewWorldEvent` / `NewWorldState`, mirroring `WorldEvent` / `WorldState`
-  without the assigned `id`. Both implement `Default` **mirroring their table's
-  DDL** (`event_type 'event'`, `importance 0.5`, `confidence 0.8`), so a call
-  site may omit a field without writing a different number than the schema
-  would have; a test pins that contract. Breaking signature change for library
-  callers.
-- **`compiler/pipeline.rs` and `knowledge/store/mod.rs` came off the 1000-line
-  edge.** Both sat at 999 lines — one addition away from breaking the rule. The
-  pipeline's `#[cfg(test)] mod tests` (~470 lines) moved to
-  `tests/pipeline_compile.rs`, which also runs them the way a consumer does
-  (public API only, rule 4.2); the cases are unchanged, so their names lose the
-  `compiler::pipeline::tests::` prefix and become `pipeline_compile::<case>`.
-  The `impl KnowledgeStore for SQLiteKnowledgeStore` block (~620 lines) moved to
-  `knowledge/store/trait_impl.rs`; the two private helpers it owned are now
-  `pub(super)`, because their only caller (`queries.rs`) is a sibling module and
-  module privacy would otherwise hide them. `pipeline.rs` is down to 523 lines,
-  `store/mod.rs` to 380; the largest source file in the tree is now 978.
-- **`conversation_compiler`'s tests moved to a sibling file** (`mod tests;`), so
-  neither `mod.rs` nor `tests.rs` crosses the 1000-line rule while the tests keep
-  private access to the module.
-- **Large modules split to satisfy the one-file-per-1000-lines rule.**
-  `fact_store`, `cognition`, `store`, `retrieval`, `conversation_compiler`,
-  `character`, `distiller`, `lexicon`, `knowledge/store` and
-  `compiler/name_validation` were decomposed into focused submodules, together
-  with the binary's `memory_*` / `character_*` tool handlers. `fact_store` and
-  `knowledge/store` also gained their own test modules. `FactType::as_str`
-  replaced three duplicated `fact_type_name` mappings.
-- **Suppression and stderr cleanups.** All `#[allow(...)]` attributes were removed
-  (a `field_reassign_with_default` on the config tests, a stale
-  `too_many_arguments`, and a `dead_code` JSON field that serde ignores anyway),
-  and library warnings now go through `tracing` instead of `eprintln!` — including
-  the entity engine's Aho-Corasick degrade path. `print_report` methods that only
-  wrote to stderr (`ResolverStats`, `FactionReport`) were dropped, and the binary
-  now defaults to a `warn` log filter when `RUST_LOG` is unset so those warnings
-  are visible without configuring logging first. The transition tests moved to
-  `tests/state_transitions.rs`, which brings `src/state.rs` back under the
-  1000-line rule.
-- **The release job refuses a version mismatch.** The tag is derived from
-  `release.md`'s first line, so a `Cargo.toml` that disagreed would have published
-  a tag the binary does not claim; the workflow now fails before creating the
-  release.
-
-### Docs
-
-- `docs/{en,zh}/mcp-tools.md`: the overview table now covers `state_timeline`,
-  `fact_provenance`, `decision_trace` and `decision_search`, each with an input
-  schema and an example; the stale "10 MCP tools" claim is replaced by a pointer
-  to the authoritative list in `README*.md`.
-- `README.md` / `README.zh.md`: the Testing and Test Corpora sections now
-  describe the self-contained suite (no fixture dependency) instead of
-  referencing test targets and corpora that no longer exist.
-
-### Changed
-
-- **V7 wiring sprint: removed dead compiler code.** Seven TODO-marked
-  modules under `src/compiler/` (`alias.rs` / `pronoun.rs` / `merge.rs` /
-  `relation.rs` / `inference.rs` / `entity/conversation.rs` / `entity/regex.rs`)
-  were never declared in `mod.rs` and had zero references; they are deleted,
-  together with the corresponding `ConversationProvider` / `RegexProvider`
-  exports in `entity/mod.rs`.
-- **NovelProvider wired into the production compile path.**
-  `compile_source` (the `generalize_compile` tool) now registers known
-  characters from the novel dictionary that actually appear in the text (by
-  name or alias), fixing review NEW-C20 (profile JSON `entities` all empty +
-  NovelProvider never instantiated); characters are stored with a
-  `source=novel_dictionary` marker and alias attributes, and V7 world entities
-  are synced as well.
-- Added end-to-end verification:
-  `tests/mcp_corpus_full_loop.rs::generalize_then_inspect_entity_e2e` walks
-  the real MCP `tools/call` path (generalize_compile → inspect_entity),
-  confirming the V7 compile → graph → query chain holds.
-- **Transactional migration (review H6).** `Migrator::migrate` now wraps the
-  whole V1→general migration in a single SQLite transaction
-  (`SQLiteKnowledgeStore::begin/commit/rollback_transaction`); a mid-way
-  failure rolls everything back instead of leaving a half-migrated database
-  (documents present, chapters missing; dangling edges, etc.). Added three
-  store-level transaction tests (commit persists / rollback discards /
-  multi-row rollback).
-- **Full-corpus acceptance regression.** Added
-  `tests/generalize_corpus_regression.rs`: runs `compile_source` →
-  `inspect_entity` over 7 novel corpora (Romance of the Three Kingdoms,
-  Water Margin, Dream of the Red Chamber, Journey to the West, Investiture
-  of the Gods, Love in a Fallen City, Pride and Prejudice) plus 3 dialog
-  corpora, all green (Sanguo 3644 objects / 55763 edges; Honglou and
-  Fengshen detect story events).
-
-### Fixed
 
 - **Conflict resolution now actually dedupes.** The existing memory's
   embedding was never loaded from the store (it was incorrectly set to the
@@ -419,6 +204,32 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **`Config::from_env` validates its result.** It now returns `Result<Self>`
   and runs `validate()`; invalid environment configuration surfaces as an
   error rather than a silently broken server.
+
+
+- **A single negation word anywhere in a sentence discarded an affirmative plan.**
+  Negation was decided once per message, so "想学吉他很久了，一直在纠结买不买" and
+  "特别想去海边…什么都不干" were marked negated and their goals thrown away
+  (`买不买` / `什么都不干` negated the whole sentence). Negation is now resolved per
+  marker inside its own clause — the rule `src/commitment.rs` already applied to
+  promises. `must_catch` recall on the new corpus went 84% → 100%.
+- **A negated statement was reported as the current state.** Preserving negated
+  facts (below) made `StateEngine::aggregate` list "我不喜欢应酬" under the entity's
+  *preferences* — the opposite of what was said. The current-state projection now
+  skips negated facts (`Fact::negated`), while the history layer keeps folding on
+  them so the change still surfaces as a `StanceFlip`.
+- **Negated goals were dropped, losing the change entirely.** "我不打算考公务员了"
+  produced no fact at all, so a companion could never learn that the user gave up
+  that plan. Negated goals are now kept as `negated: true`; ELITE_LEXICON_PLAN
+  §13.3 (never an *affirmative* goal) is guaranteed by the flag plus the
+  affirmative-only current-state projection, not by discarding the fact.
+- **The user-fact pipeline existed twice, and the new channel was wired into only
+  one of them.** `CognitionCompiler::compile_conversation` (the `memory_compile`
+  path) inlined `compile_user_observations` + `user_facts_from_observations`
+  instead of calling `compile_user_facts`, so a self-introduction produced zero
+  identity facts over MCP while the corpus test — which drives the shared entry
+  point — reported 100%. Both callers now go through one
+  `user_facts_from_channels`, which the corpus harness and the MCP end-to-end test
+  each cover.
 - **A mistyped marker bucket silently produced the wrong fact type.** The
   loader accepted any bucket name and `verb_to_fact_type` mapped unknown verbs
   to `Event`, so `"feell": ["emo"]` compiled an *event* where the user asked for
@@ -629,11 +440,205 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   rows were shared by construction. The parameter is gone (this is a single-node
   engine — see the new "Deployment model" section in both READMEs), the tool's
   input schema no longer declares it, and all nine call sites follow.
-
+- **Single-character entity names scored as a full match.** `compiler/resolver.rs`
+  compares names by character-bigram Jaccard, and two single-character CJK names
+  ("刘" vs "曹") produce two *empty* bigram sets — the empty-set case returned
+  `1.0`, so every one-character name matched every other and an entity could be
+  force-linked to the wrong person. Two empty sets now return `0.0`, with a
+  byte-identical shortcut so an exact name is still a full similarity.
+- **The production novel pipeline still shadowed long forms with their prefixes.**
+  Three automatons in `compiler/extract.rs` and one in `observation_compiler.rs`
+  were built with Aho-Corasick's default `MatchKind::Standard`, which reports the
+  match that ends earliest and advances a non-overlapping cursor past it, so a
+  shorter verb or alias hid a longer one sharing its start (`诸葛` swallowed
+  `诸葛亮`, `杀` swallowed `杀害`) — the wrong entity, the wrong verb and a span
+  covering the wrong text. All four use `MatchKind::LeftmostLongest` now. (An
+  earlier fix covered only the lexicon matcher's copy of this defect.)
+- **LIKE patterns did not escape the escape character.** The pattern builder
+  escaped `%` and `_` but not the backslash, so a query containing a literal `\`
+  consumed the wildcard that followed it and a trailing-wildcard search silently
+  matched nothing. The backslash is doubled first, then `%`/`_` are escaped, so
+  `ESCAPE '\'` behaves.
+- **Expired rows were returned by every read path.** `get`, `search_by_vector`,
+  both branches of `search_by_keyword` and `get_by_memory_type` never looked at
+  `expires_at` — only the maintenance purge did — so a memory past its TTL stayed
+  searchable indefinitely. All four paths now apply the same expiry gate, with
+  the `<=` boundary `is_expired` uses.
+- **Hybrid retrieval could never surface a vector-only hit.** The candidate set
+  was built from keyword search alone, so a memory that only the embedding matched
+  was invisible to hybrid even when it was the best answer. The candidates are now
+  the union of keyword and semantic results, and a vector-only hit is given the
+  worst keyword rank so it never outranks a real keyword match.
+- **The FTS index was never backfilled and the LIKE fallback ignored
+  `solution`.** Rows written before the index existed (or while FTS was
+  unavailable) were never indexed, and the fallback searched every column but
+  `solution`, so a match that should have been found there returned nothing. The
+  index is backfilled idempotently and the fallback covers `solution` too.
+- **Relationship negation checked three cues instead of the documented six and
+  scanned the whole clause.** The cue table documents six negation cues but the
+  code shipped only three, and once a cue was found anywhere in the clause the
+  entire clause counted as negated — so an unrelated word could suppress a genuine
+  statement. The full cue set is checked now and a cue only counts when it sits
+  immediately before the keyword. A follow-up hardening covers the tail case: a
+  single-character cue can also be the tail of an unrelated word (`特别喜欢` read
+  `别` as a cue negating `喜欢`), so an explicit non-negation-tail table excludes
+  those endings.
+- **Self-disclosure evidence anchors always had length 1 byte.** For age,
+  location and occupation the anchor carried only the first byte of the disclosed
+  value, so `offset + length` did not reproduce the fragment the fact was anchored
+  to — the evidence pointed at a single character. Anchors now carry the real byte
+  length (`Anchor::value` / `Anchor::fragment`).
+- **`persona_check` reported a stance conflict on a single shared bigram.** The
+  keyword path flagged a conflict when two stances shared just one bigram while
+  the documented threshold is two, so unrelated statements were reported as
+  contradicting the persona. It now reuses `STANCE_FLIP_MIN_SHARED_BIGRAMS` (2),
+  the same constant the timeline uses.
+- **Secret filtering missed the no-space forms.** The filter required a trailing
+  space after a marker, so `password:`, `passwd`, `pwd`, `secret`, `api_key`,
+  `token` and the bearer forms slipped through and a key could reach the store or
+  a log. It now matches the bare markers plus assignment separators plus
+  word-boundary prefixes.
+- **The noise gate discarded messages the problem detector had just flagged.**
+  `is_noise` ran before the problem check, so a message it judged noisy was
+  dropped even when `is_problem` had recognised a real issue in it — the signal
+  was computed and then thrown away. The problem check now runs first and exempts
+  the message from the noise gate.
+- **A malformed relation-rules or name-validation JSON silently swapped in the
+  built-in rule set.** A parse failure was caught and the shipped default used
+  with no log line, so an operator editing the config saw their changes silently
+  ignored. The loader now logs a warning and returns the error, and `config-check`
+  actually parses the files.
+- **The documented three-layer lexicon with `disable` was never wired at
+  runtime.** The core → packs → user layering and the per-word `disable` flag
+  existed in the loader but no runtime path consulted them, so a user table could
+  not override or switch off a shipped word. The layers are now resolved in order
+  and a `Disabled` word is removed from both the registry and the matcher.
+- **Both global dictionaries degraded to an empty table on load failure.** A
+  failed load produced an empty singleton with no error, so the engine silently
+  lost its entire vocabulary and compiled nothing, with no signal to the operator.
+  Initialisation now returns a `Result` and a startup `verify_vocabulary()` check
+  fails loud.
+- **The bundled persona-prototype JSON's `match` key was ignored by serde.**
+  `match` is a Rust keyword, so the field was skipped during deserialisation and
+  every prototype loaded with no matching rule — no error, and the tests never
+  used the real shipped file. The field carries `#[serde(rename = "match")]` now,
+  pinned by a test that loads the shipped JSON.
+- **An empty or whitespace HTTP token was accepted, and the comparison leaked the
+  token's length.** With `--http-token ""` the server started with auth nominally
+  on but every request passed, and the comparator returned early on a length
+  mismatch so response timing revealed the token length. A blank token is refused
+  at startup now and the comparison is constant-time.
+- **Capacity eviction tie-broke toward the newest memory.** When scores tied the
+  ordering put the newest row first, so an eviction could delete a memory created
+  in the current round instead of a genuinely stale one. Ties now order by
+  `(confidence asc, created_at asc)`, and the rows written this round are excluded
+  from eviction.
+- **`story_bridge` skipped a re-run forever after a partial write while reporting
+  success.** A partial write left a "done" marker, so the next run was treated as
+  already applied and the stats were read from in-memory counters rather than the
+  store — the missing rows never appeared and the caller was told it worked. The
+  write is one transaction now, idempotent by event id, and the stats are read
+  back from the store.
+- **The brute-force vector index accepted vectors the HNSW index rejects.** It
+  took NaN/Inf values (making the ordering non-total) and zero-dimension (empty)
+  vectors, so switching index changed which rows were searchable and could put
+  garbage at the top of a result. Both build and search now reject non-finite and
+  empty vectors at the same boundary HNSW enforces, with an ascending-id
+  tie-break.
+- **`forget_expired` used `<` while every read path and `is_expired` use `<=`.**
+  A row whose `expires_at` equalled the current second counted as expired to the
+  reads but was never reclaimed by the purge, so it stayed in the database forever
+  while being invisible to search. The purge now uses `<=`.
 ### Changed
 
-- Removed the dead `--sse-addr` / `MEMORY_SSE_ADDR` option.
-  `clear_all`, `clear_for_document` and `Migrator::migrate` each ran "disable FK →
+- **Large modules split to satisfy the one-file-per-1000-lines rule.**
+  `fact_store`, `cognition`, `store`, `retrieval`, `conversation_compiler`,
+  `character`, `distiller`, `lexicon`, `knowledge/store` and
+  `compiler/name_validation` were decomposed into focused submodules, together
+  with the binary's `memory_*` / `character_*` tool handlers. `fact_store` and
+  `knowledge/store` also gained their own test modules. `FactType::as_str`
+  replaced three duplicated `fact_type_name` mappings.
+- **Suppression and stderr cleanups.** All `#[allow(...)]` attributes were removed
+  (a `field_reassign_with_default` on the config tests, a stale
+  `too_many_arguments`, and a `dead_code` JSON field that serde ignores anyway),
+  and library warnings now go through `tracing` instead of `eprintln!` — including
+  the entity engine's Aho-Corasick degrade path. `print_report` methods that only
+  wrote to stderr (`ResolverStats`, `FactionReport`) were dropped, and the binary
+  now defaults to a `warn` log filter when `RUST_LOG` is unset so those warnings
+  are visible without configuring logging first. The transition tests moved to
+  `tests/state_transitions.rs`, which brings `src/state.rs` back under the
+  1000-line rule.
+- **The release job refuses a version mismatch.** The tag is derived from
+  `release.md`'s first line, so a `Cargo.toml` that disagreed would have published
+  a tag the binary does not claim; the workflow now fails before creating the
+  release.
+
+
+- **V7 wiring sprint: removed dead compiler code.** Seven TODO-marked
+  modules under `src/compiler/` (`alias.rs` / `pronoun.rs` / `merge.rs` /
+  `relation.rs` / `inference.rs` / `entity/conversation.rs` / `entity/regex.rs`)
+  were never declared in `mod.rs` and had zero references; they are deleted,
+  together with the corresponding `ConversationProvider` / `RegexProvider`
+  exports in `entity/mod.rs`.
+- **NovelProvider wired into the production compile path.**
+  `compile_source` (the `generalize_compile` tool) now registers known
+  characters from the novel dictionary that actually appear in the text (by
+  name or alias), fixing review NEW-C20 (profile JSON `entities` all empty +
+  NovelProvider never instantiated); characters are stored with a
+  `source=novel_dictionary` marker and alias attributes, and V7 world entities
+  are synced as well.
+- Added end-to-end verification:
+  `tests/mcp_corpus_full_loop.rs::generalize_then_inspect_entity_e2e` walks
+  the real MCP `tools/call` path (generalize_compile → inspect_entity),
+  confirming the V7 compile → graph → query chain holds.
+- **Transactional migration (review H6).** `Migrator::migrate` now wraps the
+  whole V1→general migration in a single SQLite transaction
+  (`SQLiteKnowledgeStore::begin/commit/rollback_transaction`); a mid-way
+  failure rolls everything back instead of leaving a half-migrated database
+  (documents present, chapters missing; dangling edges, etc.). Added three
+  store-level transaction tests (commit persists / rollback discards /
+  multi-row rollback).
+- **Full-corpus acceptance regression.** Added
+  `tests/generalize_corpus_regression.rs`: runs `compile_source` →
+  `inspect_entity` over 7 novel corpora (Romance of the Three Kingdoms,
+  Water Margin, Dream of the Red Chamber, Journey to the West, Investiture
+  of the Gods, Love in a Fallen City, Pride and Prejudice) plus 3 dialog
+  corpora, all green (Sanguo 3644 objects / 55763 edges; Honglou and
+  Fengshen detect story events).
+
+
+- Removed the dead `--sse-addr` / `MEMORY_SSE_ADDR` option. The server only
+  speaks stdio; an HTTP/SSE transport can be added as a follow-up if needed.
+- `Compile` outputs are now tenant-scoped.
+
+
+- **`upsert_world_event` / `upsert_world_state` take a parameter object.** Each
+  took eight positional arguments — five of them optional spans or numbers — and
+  the trait plus its implementation needed `#[allow(clippy::too_many_arguments)]`
+  to compile, so the lint was suppressed in four places. They now take
+  `NewWorldEvent` / `NewWorldState`, mirroring `WorldEvent` / `WorldState`
+  without the assigned `id`. Both implement `Default` **mirroring their table's
+  DDL** (`event_type 'event'`, `importance 0.5`, `confidence 0.8`), so a call
+  site may omit a field without writing a different number than the schema
+  would have; a test pins that contract. Breaking signature change for library
+  callers.
+- **`compiler/pipeline.rs` and `knowledge/store/mod.rs` came off the 1000-line
+  edge.** Both sat at 999 lines — one addition away from breaking the rule. The
+  pipeline's `#[cfg(test)] mod tests` (~470 lines) moved to
+  `tests/pipeline_compile.rs`, which also runs them the way a consumer does
+  (public API only, rule 4.2); the cases are unchanged, so their names lose the
+  `compiler::pipeline::tests::` prefix and become `pipeline_compile::<case>`.
+  The `impl KnowledgeStore for SQLiteKnowledgeStore` block (~620 lines) moved to
+  `knowledge/store/trait_impl.rs`; the two private helpers it owned are now
+  `pub(super)`, because their only caller (`queries.rs`) is a sibling module and
+  module privacy would otherwise hide them. `pipeline.rs` is down to 523 lines,
+  `store/mod.rs` to 380; the largest source file in the tree is now 978.
+- **`conversation_compiler`'s tests moved to a sibling file** (`mod tests;`), so
+  neither `mod.rs` nor `tests.rs` crosses the 1000-line rule while the tests keep
+  private access to the module.
+
+- **A failed `BEGIN`/`COMMIT` left foreign-key enforcement off for the life of
+  the connection.** `clear_all`, `clear_for_document` and `Migrator::migrate` each ran "disable FK →
   BEGIN → work → COMMIT → enable FK", so a `?` on `BEGIN` (a concurrent `BEGIN`
   can win the `is_autocommit` check) or on `COMMIT` returned *before* enforcement
   was restored — and the connection then kept writing without referential
@@ -660,11 +665,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `updated_at` the same way. The defaults are UTC seconds now, and the readers
   treat a NULL as "time unknown" (0) so databases written while the default was
   broken stay readable.
-
-### Changed
-
-- Removed the dead `--sse-addr` / `MEMORY_SSE_ADDR` option. The server only
-  speaks stdio; an HTTP/SSE transport can be added as a follow-up if needed.
 - **The unique-index installer is shared** (`storage::unique_index`). The
   knowledge store and the fact store both need to install an identity index on
   databases that predate it, which means the same two hazards every time: a
@@ -692,7 +692,6 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   MCP server — the tenant *is* the local installation, so the quota is "how many
   memories this installation keeps" — instead of reading like a multi-tenant
   trade-off. Behaviour is unchanged.
-- `Compile` outputs are now tenant-scoped.
 - **`EXPORT_VERSION` 3 → 4.** A v3 reader would ignore the new `mentions`
   section and report a successful restore while dropping the entity index, so
   the bump makes it refuse the bundle instead — a loud failure over a silent
@@ -711,17 +710,133 @@ is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`world_entities.status`, `world_relations.valid_from`/`valid_to`,
   `event_participants.side`): nothing writes or reads them, and a reader
   deserves to know that before trusting them.
-
+- **The intimacy contract was aligned to the two-way design.** Assistant messages
+  already moved intimacy (weight 0.01) while the contract and the docs described a
+  user-only ±0.02 rule, so the documented behaviour disagreed with what shipped.
+  The contract and README now state the two channels explicitly: user ±0.02,
+  agent ±0.01.
+- **Vector-mode documentation narrowed.** The README implied Vector mode returned
+  every stored memory, but it only ranks rows that actually carry an embedding — a
+  row with no vector is silently absent (Hybrid, by contrast, keeps it). The docs
+  now say so; the behaviour is unchanged.
 ### Docs
+
+- `docs/{en,zh}/mcp-tools.md`: the overview table now covers `state_timeline`,
+  `fact_provenance`, `decision_trace` and `decision_search`, each with an input
+  schema and an example; the stale "10 MCP tools" claim is replaced by a pointer
+  to the authoritative list in `README*.md`.
+- `README.md` / `README.zh.md`: the Testing and Test Corpora sections now
+  describe the self-contained suite (no fixture dependency) instead of
+  referencing test targets and corpora that no longer exist.
+
 
 - Fixed module/tool-count documentation that claimed 5 MCP tools (there are
   6: `memory_distill`, `memory_compile`, `memory_search`, `memory_store`,
   `memory_feedback`, `memory_stats`).
 - Clarified capacity control caps `Knowledge` memories per tenant.
+
+
 - Documented the `config/` resource tree and `MNEMOSYNE_HOME` (the resource-root
   override was implemented but never written down), including which files are
   optional and how to customise the marker vocabulary without editing a shipped
   file.
+## [0.1.2] - 2026-08-10
+
+### Fixed
+
+- **Prebuilt binaries no longer hardcode the build machine's source path.**
+  `env!("CARGO_MANIFEST_DIR")` was baked into every release, so a binary
+  built on CI panicked with `Failed to load core lexicon from
+  config/dictionary.json` (`FileLoad { path: "/Users/runner/work/..." }`) on
+  every other machine. Resource paths are now resolved at runtime
+  (`resolve_resource_path`): `MNEMOSYNE_HOME` env override → current working
+  directory → executable's directory, in that order.
+- **A missing lexicon no longer crashes the process.** The global lexicon
+  registry previously panicked on first use when `config/dictionary.json` was
+  absent; it now degrades to an empty registry with a warning (same fail-soft
+  pattern as the dictionary loader).
+- **`generalize_compile` extracted document titles as fake `person`
+  entities.** Auto-generated titles (`generalize-1786331280`) and filenames
+  were materialized as person objects while the actual people inside the text
+  (张三/李四/Alice/Bob) were never discovered — the knowledge graph was
+  unusable. Title entities are now only created when the title looks like a
+  real name, and corpus discovery was added/extended:
+  - English Capitalized person names (`Alice met Bob`) are extracted.
+  - Vernacular Chinese dialogue verbs (`说/说道/答道`) beyond the classic
+    novel list (`曰/道`) now surface speakers.
+  - Overlapping verbs in one run (`说道` matching 说/道/说道) no longer
+    double-count frequencies.
+- **`memory_compile` produced zero facts for ordinary conversations.** Only
+  12 hardcoded marker words were matched, so "我很焦虑，压力很大" compiled no
+  facts and the facts table stayed empty. The marker table was moved out of
+  the binary into configurable JSON (see below) and expanded to cover
+  emotions, preferences, plans, wants, beliefs, difficulties, life events,
+  modern vernacular, and internet slang.
+- **Duplicate-fact inflation.** One message matching several same-action
+  markers (失眠+加班+压力+好累 → four `feel`) emitted four near-identical
+  facts, polluting the cognitive snapshot. Observations are now deduplicated
+  per action per message while distinct actions are preserved.
+- **Companion relationships never advanced.** `relationship_update` only
+  counted user-message emotions, so an assistant-heavy warm dialogue
+  ("我很开心能认识你" / user replies "嗯嗯") left intimacy pinned at 0.0
+  forever. The agent's own emotional statements now move the relationship
+  with a lighter weight (user emotions remain the primary driver).
+
+### Changed
+
+- **One config root instead of ten environment variables.** The scattered
+  `DICTIONARY_PATH` / `FACTION_MAP_PATH` / `DECAY_CONFIG_PATH` /
+  `RELATION_RULES_PATH` / `PERSONA_CARDS_PATH` / `PERSONA_PROTOTYPES_PATH` /
+  `DOMAIN_PROFILES_PATH` / `EMOTION_LEXICON_PATH` / `ANCHOR_SEEDS_PATH` /
+  `NAME_VALIDATION_PATH` overrides were removed in favor of a single
+  `MNEMOSYNE_HOME` root directory, auto-detected when unset.
+- **Observation markers are now data, not code.** The marker table moved from
+  a hardcoded array into two shipped, user-editable JSON files —
+  `markers_zh.json` and `markers_en.json` — with a built-in fallback table
+  when the config is absent.
+- **Default HTTP listen port changed 8080 → 5609** (avoiding a common
+  conflict); `--http-addr` still overrides it.
+- **Release artifacts now include the marker word lists.** Each platform
+  binary ships alongside `markers_zh.json` / `markers_en.json`, so a download
+  placed in one directory works out of the box and is customizable.
+
+## [0.1.1] - 2026-08-08
+
+### Changed
+
+- **Rebrand to Mnemosyne.** Package/binary renamed from `LoreScope`/`lore-scope`
+  to `Mnemosyne`/`mnemosyne` (Cargo.toml, all `lore_scope::` imports, README,
+  docs, Makefile). The GitHub repository is `Timwood0x10/Mnemosyne`.
+- **MCP hardening for external serving.** HTTP transport now requires
+  `--http-token` (refuses to start without it) and compares tokens in
+  constant time; per-session SSE isolation via `x-mcp-session-id` so concurrent
+  clients never receive each other's responses; `memory_export/import` `path`
+  restricted to the `exports/` allowlist (rejects absolute paths and `..`
+  traversal).
+- **Faster release pipeline.** New `[profile.ci]` (thin LTO + 16 codegen
+  units) used by CI builds — fat LTO + 1 unit was the dominant compile cost on
+  every platform. `release.yml` now runs AFTER CI succeeds (`workflow_run`),
+  builds 5 platform binaries (macOS arm64/x86_64, Linux arm64/x86_64, Windows
+  x86_64), verifies all 5 assets exist before publishing, and derives the
+  version tag from `release.md`.
+- **CI self-contained.** Removed all corpus-dependent tests (corpus/ is
+  gitignored and never present in CI); the suite now uses only synthetic
+  corpora generated in-test. `ci.yml` runs `make check && make test` on `dev`.
+
+### Fixed
+
+- **Hardcoded corpus paths removed.** All tests that read `corpus/*.txt|json`
+  (or shared `/tmp/*.db` fixtures) were deleted rather than skipped, so CI
+  never fails with `NotFound` on a missing fixture.
+- **`ToolDefinition.input_schema` serializes as `inputSchema`.** The MCP wire
+  contract requires camelCase; strict clients previously could not read the
+  tool schema.
+
+### Security
+
+- Constant-time bearer-token comparison in the HTTP transport (no timing side
+  channel); file-allowlist for memory transfer tools; FTS5 query injection
+  hardening (see earlier entry).
 
 ## [0.1.0] - 2026-07-xx
 

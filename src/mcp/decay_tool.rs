@@ -40,64 +40,67 @@ impl MemoryDecayTool {
 #[async_trait]
 impl ToolHandler for MemoryDecayTool {
     async fn call(&self, args: &Value) -> Result<ToolCallResult, Error> {
-        let tenant_id = args
-            .get("tenant_id")
-            .and_then(Value::as_str)
-            .unwrap_or("default");
-        let entity_id = args.get("entity_id").and_then(Value::as_i64);
-        let strategy = args
-            .get("strategy")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
-
-        let mut config = self.config.clone();
-        if let Some(strategy) = strategy {
-            config.strategy = strategy
-                .parse::<DecayStrategy>()
-                .map_err(Error::InvalidInput)?;
-        }
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| Error::Internal(e.to_string()))?
-            .as_secs() as i64;
-
-        // Scope the sweep to the requested tenant: without this, an omitted
-        // entity_id made the tool decay facts across EVERY tenant in the
-        // database, ignoring the advertised tenant namespace.
-        //
-        // When entity_id IS supplied, `run_decay_pass` treats it as
-        // `vec![id]` and drops the tenant filter — so ownership has to be
-        // established HERE, and it used to be established only when the caller
-        // also passed `tenant_id`: `{"entity_id": <victim>}` therefore decayed
-        // and archived another tenant's facts, an unwelcome *write* (audit C3).
-        // The check now always runs; a subject carrying another label reports
-        // NotFound.
-        if let Some(id) = entity_id {
-            crate::mcp::tenant_scope::ensure_entity_tenant(
-                self.fact_store.as_ref(),
-                id,
-                tenant_id,
-            )?;
-        }
-        let stats = run_decay_pass(
-            self.fact_store.as_ref(),
-            &config,
-            entity_id,
-            Some(tenant_id),
-            force,
-            now,
-        )?;
-
-        let payload = json!({
-            "scanned": stats.scanned,
-            "archived": stats.archived,
-            "kept": stats.kept,
-            "high_value_protected": stats.high_value_protected,
-        });
-        Ok(ToolCallResult::text(payload.to_string()))
+        // The sweep is synchronous `rusqlite`; hand it to the blocking pool so
+        // a slow pass cannot stall the tokio worker (audit 09-26/H7).
+        let fact_store = Arc::clone(&self.fact_store);
+        let config = self.config.clone();
+        let args = args.clone();
+        crate::mcp::blocking::run(move || run_decay_tool(&fact_store, &config, &args)).await
     }
+}
+
+/// Synchronous body of `memory_decay`, executed on the blocking pool.
+fn run_decay_tool(
+    fact_store: &SqliteFactStore,
+    base_config: &DecayConfig,
+    args: &Value,
+) -> Result<ToolCallResult, Error> {
+    let tenant_id = args
+        .get("tenant_id")
+        .and_then(Value::as_str)
+        .unwrap_or("default");
+    let entity_id = args.get("entity_id").and_then(Value::as_i64);
+    let strategy = args
+        .get("strategy")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let force = args.get("force").and_then(Value::as_bool).unwrap_or(false);
+
+    let mut config = base_config.clone();
+    if let Some(strategy) = strategy {
+        config.strategy = strategy
+            .parse::<DecayStrategy>()
+            .map_err(Error::InvalidInput)?;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::Internal(e.to_string()))?
+        .as_secs() as i64;
+
+    // Scope the sweep to the requested tenant: without this, an omitted
+    // entity_id made the tool decay facts across EVERY tenant in the
+    // database, ignoring the advertised tenant namespace.
+    //
+    // When entity_id IS supplied, `run_decay_pass` treats it as
+    // `vec![id]` and drops the tenant filter — so ownership has to be
+    // established HERE, and it used to be established only when the caller
+    // also passed `tenant_id`: `{"entity_id": <victim>}` therefore decayed
+    // and archived another tenant's facts, an unwelcome *write* (audit C3).
+    // The check now always runs; a subject carrying another label reports
+    // NotFound.
+    if let Some(id) = entity_id {
+        crate::mcp::tenant_scope::ensure_entity_tenant(fact_store, id, tenant_id)?;
+    }
+    let stats = run_decay_pass(fact_store, &config, entity_id, Some(tenant_id), force, now)?;
+
+    let payload = json!({
+        "scanned": stats.scanned,
+        "archived": stats.archived,
+        "kept": stats.kept,
+        "high_value_protected": stats.high_value_protected,
+    });
+    Ok(ToolCallResult::text(payload.to_string()))
 }
 
 /// Return the stable MCP schema for `memory_decay`.
