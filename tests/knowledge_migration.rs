@@ -2,7 +2,7 @@
 //!
 //! Verifies the Phase 0 acceptance test from `docs/zh/dev_guide.md` §7:
 //!
-//! > `inspect_entity("赵云")` 跑通，返回 Object + Edges + Evidence.
+//! > `inspect_entity("赵云")` runs end to end, returning Object + Edges + Evidence.
 //!
 //! ## Test layout
 //!

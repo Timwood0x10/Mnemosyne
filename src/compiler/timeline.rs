@@ -190,10 +190,10 @@ fn check_and_push(
 /// Build character arcs from personality markers.
 ///
 /// Groups markers by entity, sorts by chapter, and detects the arc type:
-/// - "decline": 正面→负面轨迹 (仁义→狡诈)
-/// - "growth": 负面→正面轨迹 (浅薄→深沉)
-/// - "transformation": 方向不明的改变
-/// - "stable": 一成不变
+/// - "decline": a positive → negative trajectory (benevolence → treachery)
+/// - "growth": a negative → positive trajectory (shallow → deep)
+/// - "transformation": a change of unclear direction
+/// - "stable": unchanged
 pub fn build_character_arcs(markers: Vec<PersonalityMarker>) -> Vec<CharacterArc> {
     // Positive vs negative trait classification
     let positive: &[&str] = &[

@@ -439,6 +439,33 @@ mod tests {
         assert!(!results.is_empty(), "LIKE should find '青马'");
     }
 
+    /// Objective: Prove that a search query ending in a literal backslash still
+    /// matches, i.e. the `LIKE` pattern escapes `\` before `%`/`_` (the
+    /// regression where the trailing wildcard became a literal percent sign).
+    /// Invariants: Exactly one row matches and it is the row that was stored.
+    #[tokio::test]
+    async fn search_escapes_backslash_before_wildcards() {
+        let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
+        let mut c = sample_char("路径测试", "水浒传");
+        c.description = r"存档在 C:\".to_string();
+        store.create_character(&c).await.expect("create");
+
+        // The trailing `\` must not consume the appended `%` wildcard.
+        let results = store
+            .search_characters(r"C:\", "novels", None, 10)
+            .await
+            .expect("search");
+        assert_eq!(
+            results.len(),
+            1,
+            "a query ending in `\\` must still match the stored row"
+        );
+        assert_eq!(
+            results[0].name, "路径测试",
+            "the matched row must be the one that was stored"
+        );
+    }
+
     #[tokio::test]
     async fn create_and_query_events() {
         let store = SQLiteCharacterStore::open_in_memory().await.expect("open");

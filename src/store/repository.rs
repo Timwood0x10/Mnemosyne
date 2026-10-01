@@ -185,7 +185,10 @@ impl ExperienceRepository for SQLiteVecStore {
         // otherwise get zero results even though matching rows exist. Pull up
         // to `limit * 16` (capped) nearest neighbors, then filter by tenant
         // and truncate to `limit`.
-        let overfetch = (limit as i64).saturating_mul(16).max(limit as i64);
+        // `LIMIT -1` and `k = -1` mean "no limit" in SQLite, so clamp before
+        // the cast; an oversized request must not become an unbounded scan.
+        let limit = sql_limit(limit);
+        let overfetch = limit.saturating_mul(16).max(limit);
         // Expiry gate (see `get`): filter out rows whose `expires_at` is at or
         // before `now` so vector search never resurfaces expired memories.
         let now = Utc::now();
@@ -198,13 +201,7 @@ impl ExperienceRepository for SQLiteVecStore {
                    LIMIT ?4";
         let mut stmt = conn.prepare(sql)?;
         let rows = stmt.query_map(
-            params![
-                vec_json,
-                overfetch,
-                tenant_id,
-                limit as i64,
-                now.to_rfc3339()
-            ],
+            params![vec_json, overfetch, tenant_id, limit, now.to_rfc3339()],
             row_to_experience,
         )?;
 
@@ -229,6 +226,8 @@ impl ExperienceRepository for SQLiteVecStore {
         if self.dim == 0 {
             // FTS5 path with LIKE fallback for CJK.
             let conn = self.conn.lock().await;
+            // `LIMIT -1` means "no limit"; clamp before the `i64` cast.
+            let limit = sql_limit(limit);
             // Escape the backslash FIRST: escaping `%`/`_` before it would
             // leave a lone `\` in the pattern to combine with the following
             // escape, so a query ending in `\` silently turned the trailing
@@ -267,7 +266,7 @@ impl ExperienceRepository for SQLiteVecStore {
                             tenant_id,
                             like,
                             memory_type_to_str(mt),
-                            limit as i64,
+                            limit,
                             now_str
                         ],
                         row_to_experience,
@@ -276,7 +275,7 @@ impl ExperienceRepository for SQLiteVecStore {
                 }
                 None => {
                     let r = stmt.query_map(
-                        params![fts5_query(query), tenant_id, like, limit as i64, now_str],
+                        params![fts5_query(query), tenant_id, like, limit, now_str],
                         row_to_experience,
                     )?;
                     r.collect()
@@ -413,6 +412,19 @@ impl ExperienceRepository for SQLiteVecStore {
     }
 }
 
+/// Largest row limit the store ever submits to SQLite in a `LIMIT`/`k` clause.
+const MAX_SQL_LIMIT: usize = 10_000;
+
+/// Clamp a caller-supplied row limit before the `i64` cast.
+///
+/// A `usize` above `i64::MAX` wraps to a negative `i64`, and SQLite reads
+/// `LIMIT -1` as "no limit" — the oversized request silently becomes a
+/// whole-table scan. Only values that reach SQL are clamped; in-memory
+/// truncation keeps the caller's original limit.
+fn sql_limit(limit: usize) -> i64 {
+    limit.min(MAX_SQL_LIMIT) as i64
+}
+
 /// Build a parameterised `LIKE` pattern (`%query%`) with every `LIKE`
 /// metacharacter escaped for the `ESCAPE '\'` clause used by the FTS-fallback
 /// queries.
@@ -512,6 +524,58 @@ mod tests {
             like_pattern(r"a\%_"),
             r"%a\\\%\_%",
             "backslash, percent and underscore must all escape independently"
+        );
+    }
+
+    /// Objective: Verify an oversized row limit cannot reach SQLite as a
+    /// negative number, where `LIMIT -1` would silently mean "no limit".
+    /// Invariants: the ceiling and everything above it clamp to `MAX_SQL_LIMIT`;
+    /// in-range values pass through; the result is never negative.
+    #[test]
+    fn sql_limit_clamps_oversized_requests() {
+        assert_eq!(
+            sql_limit(usize::MAX),
+            MAX_SQL_LIMIT as i64,
+            "usize::MAX must clamp to the ceiling instead of wrapping negative"
+        );
+        assert_eq!(
+            sql_limit(MAX_SQL_LIMIT + 1),
+            MAX_SQL_LIMIT as i64,
+            "one above the ceiling must clamp too"
+        );
+        assert_eq!(
+            sql_limit(MAX_SQL_LIMIT),
+            MAX_SQL_LIMIT as i64,
+            "the ceiling itself is allowed"
+        );
+        assert_eq!(
+            sql_limit(250),
+            250,
+            "in-range limits pass through unchanged"
+        );
+        assert_eq!(sql_limit(0), 0, "zero must stay zero (empty result set)");
+    }
+
+    /// Objective: Verify the clamp is wired into the SQL path: a read called
+    /// with `usize::MAX` completes and stays bounded instead of degrading into
+    /// an unbounded scan.
+    /// Invariants: the call returns `Ok` and every matching row.
+    #[tokio::test]
+    async fn oversized_limit_stays_bounded() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        for i in 0..3 {
+            let mut e = exp("t1", MemoryType::Knowledge, &format!("needle {i}"));
+            e.id = format!("n{i}");
+            store.create(&e).await.expect("create row");
+        }
+        let results = store
+            .search_by_keyword("needle", "t1", usize::MAX, None)
+            .await
+            .expect("an oversized limit must not error");
+        assert_eq!(
+            results.len(),
+            3,
+            "the search must still return every matching row"
         );
     }
 
@@ -814,6 +878,38 @@ mod tests {
         assert!(
             results.iter().any(|e| e.id == "sol"),
             "a token present only in solution must be found via the LIKE fallback"
+        );
+    }
+
+    /// Objective: Verify a delete succeeds in keyword-only mode (dim 0), where
+    /// the FTS tables and their AFTER DELETE trigger exist. The trigger used the
+    /// external-content `'delete'` command with NULL column values, which FTS5
+    /// rejects, so every delete (capacity eviction, TTL forget) failed.
+    /// Invariants: `delete_batch` returns `Ok` and the row is gone from both the
+    /// table and the FTS index.
+    #[tokio::test]
+    async fn delete_works_in_keyword_only_mode() {
+        let store = SQLiteVecStore::open_in_memory(0).await.expect("open");
+        let e = exp("t1", MemoryType::Knowledge, "uniquedeletetoken");
+        let id = e.id.clone();
+        store.create(&e).await.expect("create row");
+
+        store
+            .delete_batch(std::slice::from_ref(&id))
+            .await
+            .expect("delete in keyword-only mode must succeed");
+
+        assert!(
+            store.get(&id).await.expect("get").is_none(),
+            "the deleted row must be gone from `memories`"
+        );
+        let results = store
+            .search_by_keyword("uniquedeletetoken", "t1", 10, None)
+            .await
+            .expect("search after delete");
+        assert!(
+            results.iter().all(|row| row.id != id),
+            "the FTS index must not resurrect the deleted row"
         );
     }
 }

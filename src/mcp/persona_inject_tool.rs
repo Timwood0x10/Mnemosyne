@@ -1,4 +1,4 @@
-//! `persona_inject` MCP tool — the "人设不崩" injection feed.
+//! `persona_inject` MCP tool — the "the persona must never break" injection feed.
 //!
 //! Given an agent (and an optional tenant), the tool resolves the agent entity
 //! and aggregates its stored `agent_personality` facts into a structured

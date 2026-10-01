@@ -40,7 +40,15 @@ impl CharacterStore for SQLiteCharacterStore {
         limit: usize,
     ) -> Result<Vec<CharacterAttribute>> {
         let conn = self.conn.lock().await;
-        let like = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
+        // Escape the backslash BEFORE `%` and `_`. The reverse order leaves a
+        // lone `\` that combines with the appended trailing wildcard: the
+        // pattern `%foo\%` makes that wildcard a literal percent sign and
+        // silently drops the match for a query ending in `\` (09-27/M9).
+        let escaped = query
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let like = format!("%{escaped}%");
         // Clamp before the `as i64` cast: an oversized usize wraps to a
         // negative i64, and SQLite treats LIMIT -1 as "no limit", returning
         // the whole table (audit finding).

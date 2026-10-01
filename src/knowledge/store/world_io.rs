@@ -390,8 +390,14 @@ impl SQLiteKnowledgeStore {
                 params![entity_name],
                 |r| r.get(0),
             )?;
-            // DO UPDATE so RETURNING always yields a row id; identical identity
-            // refreshes value/confidence and keeps the wider of the two spans.
+            // DO UPDATE so RETURNING always yields a row id. A re-observation
+            // with the same (entity, slot, event, chapter) identity refreshes
+            // `value`/`confidence` and replaces each span only when the new
+            // observation supplies one: `COALESCE(new, stored)` keeps the
+            // stored offset when the new one is NULL, so an observation that
+            // omits offsets never erases recorded evidence. Spans are NOT
+            // merged into the union of both observations — the identity already
+            // pins the event, so the latest non-NULL pair is the one kept.
             conn.query_row(
                 "INSERT INTO world_states \
                  (entity_id, slot, value, chapter, event_id, start_offset, end_offset, confidence) \

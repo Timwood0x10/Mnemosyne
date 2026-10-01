@@ -359,19 +359,25 @@ impl PipelineDistiller {
     /// so the freshly-created rows are normally both the lowest-confidence and
     /// the newest: without the exclusion a round could delete its own output
     /// and still return it to the caller as a persisted memory (09-26/H9).
-    async fn phase_enforce_capacity(
+    ///
+    /// `pub(super)` so the capacity tests can drive the phase directly while
+    /// expired rows are still present — `distill` always purges them first, so
+    /// the bug this guards is unreachable through `distill` alone.
+    pub(super) async fn phase_enforce_capacity(
         &self,
         tenant_id: &str,
         protected: &std::collections::HashSet<String>,
     ) -> Result<()> {
-        let k_count = self
+        // Cheap pre-filter: the physical count is an indexed `COUNT` and bounds
+        // the work, but it also counts TTL-expired rows the read path hides, so
+        // it may only short-circuit — never determine how many rows to drop.
+        let physical = self
             .store
             .count_by_memory_type(tenant_id, MemoryType::Knowledge)
             .await?;
-        if k_count as usize <= self.cfg.max_solutions_per_tenant {
+        if physical as usize <= self.cfg.max_solutions_per_tenant {
             return Ok(());
         }
-        let excess = k_count as usize - self.cfg.max_solutions_per_tenant;
         // Fetch all Knowledge memories for the tenant, sort by
         // `(confidence asc, created_at asc)`, and delete the bottom `excess`
         // among the non-protected rows. Sorting oldest-first is what makes the
@@ -382,6 +388,14 @@ impl PipelineDistiller {
             .store
             .get_by_memory_type(tenant_id, MemoryType::Knowledge)
             .await?;
+        // Derive `excess` from the SAME list the victims come from. Counting
+        // the physical rows instead made the cap look breached by expired rows
+        // that can never be evicted, so the bottom `excess` slots spilled over
+        // onto live rows that were actually under the cap.
+        if all.len() <= self.cfg.max_solutions_per_tenant {
+            return Ok(());
+        }
+        let excess = all.len() - self.cfg.max_solutions_per_tenant;
         let mut sorted: Vec<Experience> = all;
         sorted.sort_by(|a, b| {
             a.confidence

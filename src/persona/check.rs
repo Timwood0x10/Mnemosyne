@@ -1,4 +1,5 @@
-//! Persona consistency guard — the "人设不崩" conflict/drift detector.
+//! Persona consistency guard — the "the persona must never break" conflict and
+//! drift detector.
 //!
 //! This module powers the `persona_check` MCP tool. Given the agent's draft
 //! reply and the accumulated persona facts for that agent, it decides whether

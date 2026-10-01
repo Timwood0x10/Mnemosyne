@@ -1,4 +1,4 @@
-//! Relationship state store — the agent↔user bonding layer (阶段C-2, C3/C4).
+//! Relationship state store — the agent↔user bonding layer (phase C-2, C3/C4).
 //!
 //! A **companion AI** needs to remember how close it has grown to a user over
 //! time, not just *what* the user said. This module keeps a per

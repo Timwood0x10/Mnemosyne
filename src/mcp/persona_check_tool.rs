@@ -1,4 +1,4 @@
-//! `persona_check` MCP tool — the "人设不崩" consistency guard.
+//! `persona_check` MCP tool — the "the persona must never break" consistency guard.
 //!
 //! Given an agent's draft reply and the accumulated persona facts for that
 //! agent entity, the tool reports whether the draft:

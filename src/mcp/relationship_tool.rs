@@ -1,4 +1,4 @@
-//! MCP tools for relationship state and persona evolution timeline (阶段C-2).
+//! MCP tools for relationship state and persona evolution timeline (phase C-2).
 //!
 //! Three tools are exposed on the MCP server:
 //!

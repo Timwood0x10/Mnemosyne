@@ -101,17 +101,25 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content, problem, solution,
     tokenize='unicode61'
 );
-CREATE TRIGGER IF NOT EXISTS memories_fts_insert AFTER INSERT ON memories BEGIN
+-- The triggers are DROPPED and recreated on every open rather than guarded by
+-- `IF NOT EXISTS`, so a database written by an older build picks up the
+-- corrected bodies. `memories_fts` is a content-full FTS5 table (no `content=`
+-- option), so its rows are removed with a plain DELETE; the previous body used
+-- the external-content `'delete'` command with NULL column values, which FTS5
+-- rejects, failing EVERY delete on `memories` — TTL forgetting, capacity
+-- eviction and conflict replacement alike — in the default keyword-only mode.
+DROP TRIGGER IF EXISTS memories_fts_insert;
+DROP TRIGGER IF EXISTS memories_fts_delete;
+DROP TRIGGER IF EXISTS memories_fts_update;
+CREATE TRIGGER memories_fts_insert AFTER INSERT ON memories BEGIN
     INSERT INTO memories_fts(rowid, content, problem, solution)
     VALUES (new.rowid, new.content, new.problem, new.solution);
 END;
-CREATE TRIGGER IF NOT EXISTS memories_fts_delete AFTER DELETE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content, problem, solution)
-    VALUES ('delete', old.rowid, NULL, NULL, NULL);
+CREATE TRIGGER memories_fts_delete AFTER DELETE ON memories BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
 END;
-CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE ON memories BEGIN
-    INSERT INTO memories_fts(memories_fts, rowid, content, problem, solution)
-    VALUES ('delete', old.rowid, NULL, NULL, NULL);
+CREATE TRIGGER memories_fts_update AFTER UPDATE ON memories BEGIN
+    DELETE FROM memories_fts WHERE rowid = old.rowid;
     INSERT INTO memories_fts(rowid, content, problem, solution)
     VALUES (new.rowid, new.content, new.problem, new.solution);
 END;

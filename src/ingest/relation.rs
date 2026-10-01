@@ -340,19 +340,26 @@ impl DialogNameIndex {
     /// Find the addressee name in `find_dialog_directed` context.
     fn find_directed(&self, text: &str, pos: usize) -> Option<String> {
         let before = &text[..pos];
+        // The same bounded look-back as [`Self::find_speaker_near`]: an
+        // unbounded `rfind` accepts a stale `谓`/`对` left over from an earlier
+        // clause, and `longest_match` then picks the longest name of that
+        // distant span, attributing the wrong addressee to the current
+        // sentence. Only a marker within LOOKBACK_BYTES may anchor.
+        const LOOKBACK_BYTES: usize = 64;
+        let window_start = floor_char_boundary(before, before.len().saturating_sub(LOOKBACK_BYTES));
 
-        if let Some(wei_pos) = before.rfind("谓") {
-            let between = &text[wei_pos + 3..pos];
-            if let Some(name) = self.longest_match(between) {
-                return Some(name);
-            }
+        if let Some(wei_pos) = before.rfind("谓")
+            && wei_pos >= window_start
+            && let Some(name) = self.longest_match(&text[wei_pos + 3..pos])
+        {
+            return Some(name);
         }
 
-        if let Some(dui_pos) = before.rfind("对") {
-            let between = &text[dui_pos + 3..pos];
-            if let Some(name) = self.longest_match(between) {
-                return Some(name);
-            }
+        if let Some(dui_pos) = before.rfind("对")
+            && dui_pos >= window_start
+            && let Some(name) = self.longest_match(&text[dui_pos + 3..pos])
+        {
+            return Some(name);
         }
 
         None
@@ -368,12 +375,14 @@ impl DialogNameIndex {
 }
 
 fn extract_speech_span<'a>(text: &'a str, start: usize, all_markers: &[usize]) -> &'a str {
-    let start = start.min(text.len());
+    // Floor BOTH ends: the caller passes byte offsets that may land inside a
+    // multi-byte character, and slicing at a non-boundary panics.
+    let start = floor_char_boundary(text, start);
     let end = all_markers
         .iter()
         .find(|&&p| p >= start)
         .copied()
-        .unwrap_or((start + 300).min(text.len()));
+        .unwrap_or_else(|| start.saturating_add(300).min(text.len()));
     let end = floor_char_boundary(text, end);
     &text[start..end]
 }
@@ -699,6 +708,63 @@ mod tests {
         assert!(
             !cfg.dialog_address_rules.is_empty(),
             "shipped relation rules must define at least one dialog address rule"
+        );
+    }
+
+    /// Objective: Prove the addressee anchor obeys the same bounded look-back
+    /// as the speaker anchor, so a stale `对` from an earlier clause is not
+    /// reused for a much later dialog marker.
+    /// Invariants: A `对` beyond `LOOKBACK_BYTES` yields `None`; the identical
+    /// construction with the `对` inside the window still resolves the name.
+    #[test]
+    fn directed_ignores_stale_marker_outside_lookback() {
+        let name_pairs = vec![
+            ("刘备".to_string(), "刘备".to_string()),
+            ("曹操".to_string(), "曹操".to_string()),
+        ];
+        let ni = DialogNameIndex::new(&name_pairs);
+
+        // The only `对` sits 141 bytes before the second marker, far outside
+        // the window; it must not anchor the addressee of the later sentence.
+        let stale = format!("刘备对曹操曰：{}曹操曰：", "甲".repeat(40));
+        let stale_pos = stale.rfind("曰：").expect("second marker position");
+        assert_eq!(
+            ni.find_directed(&stale, stale_pos),
+            None,
+            "a `对` outside the look-back window must not anchor the addressee"
+        );
+
+        // Control: the same names with a nearby `对` still resolve.
+        let near = "曹操对刘备曰：久仰。";
+        let near_pos = near.rfind("曰：").expect("marker position");
+        assert_eq!(
+            ni.find_directed(near, near_pos).as_deref(),
+            Some("刘备"),
+            "a `对` inside the look-back window must still anchor the addressee"
+        );
+    }
+
+    /// Objective: Prove the speech span tolerates a byte offset that lands
+    /// inside a multi-byte character instead of panicking on the slice.
+    /// Invariants: The returned span is a valid slice of the input and starts
+    /// at the character boundary at or before the requested offset.
+    #[test]
+    fn speech_span_tolerates_non_boundary_start() {
+        let text = "曹操曰：久仰大名。";
+        // One byte past the start of "曰" is inside that character.
+        let mid = text.find('曰').expect("marker present") + 1;
+        assert!(
+            !text.is_char_boundary(mid),
+            "fixture must start inside a multi-byte character"
+        );
+        let span = extract_speech_span(text, mid, &[]);
+        assert!(
+            span.starts_with('曰'),
+            "start must floor to the character boundary, got: {span:?}"
+        );
+        assert!(
+            text.contains(span),
+            "the span must remain a slice of the input text"
         );
     }
 }

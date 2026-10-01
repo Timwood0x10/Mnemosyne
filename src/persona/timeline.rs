@@ -1,4 +1,5 @@
-//! Persona evolution timeline — the "记录一个人的完整变化过程" layer (阶段C-2, C6).
+//! Persona evolution timeline — the "how a person changed over time" layer
+//! (phase C-2, C6).
 //!
 //! A companion AI should be able to re-derive *who a person has become* over
 //! time, the way a reader reconstructs a character's life from a novel: from

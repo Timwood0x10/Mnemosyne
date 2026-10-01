@@ -716,6 +716,55 @@ async fn capacity_control_evicts() {
     );
 }
 
+/// Objective: Prove TTL-expired rows can never cost a live row its place. The
+/// physical `COUNT` includes expired rows while the eviction victims come from
+/// the live read path, so deriving `excess` from the physical count made the cap
+/// look breached by rows that can never be evicted and spilled the eviction onto
+/// live rows that were under the cap.
+/// Invariants: With exactly `cap` live rows plus extra expired rows present, no
+/// live row is evicted.
+#[tokio::test]
+async fn capacity_excess_ignores_expired_rows() {
+    let store = Arc::new(SQLiteVecStore::open_in_memory(0).await.expect("open"));
+    let embedder: Arc<dyn EmbeddingService> = Arc::new(StubEmbedder);
+    let cfg = DistillationConfig {
+        min_importance: 0.0,
+        conflict_threshold: 0.99,
+        max_memories_per_distillation: 100,
+        max_solutions_per_tenant: 3,
+        enable_cross_turn: false,
+    };
+    let d = PipelineDistiller::new(cfg, embedder, store.clone());
+
+    // Exactly `cap` live rows: already at the limit, so nothing may be evicted.
+    for i in 0..3 {
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, format!("live{i}"), 0.5);
+        exp.id = format!("live{i}");
+        store.create(&exp).await.expect("create live row");
+    }
+    // Four further rows that are already expired: counted physically, hidden
+    // from every read path.
+    let past = Utc::now() - chrono::Duration::days(1);
+    for i in 0..4 {
+        let mut exp = Experience::new("t1", MemoryType::Knowledge, format!("dead{i}"), 0.5);
+        exp.id = format!("dead{i}");
+        exp.expires_at = Some(past);
+        store.create(&exp).await.expect("create expired row");
+    }
+
+    d.phase_enforce_capacity("t1", &std::collections::HashSet::new())
+        .await
+        .expect("enforce capacity");
+
+    for i in 0..3 {
+        let id = format!("live{i}");
+        assert!(
+            store.get(&id).await.expect("get live row").is_some(),
+            "live row {id} is under the cap and must survive its expired siblings"
+        );
+    }
+}
+
 /// Objective: Verify capacity eviction breaks confidence ties by dropping the
 /// OLDEST row, not the newest (09-26/H9). The query feeds rows newest-first and
 /// the old code stable-sorted on confidence alone, so every tied group evicted

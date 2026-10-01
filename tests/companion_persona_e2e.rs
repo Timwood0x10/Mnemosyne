@@ -1,4 +1,4 @@
-//! End-to-end test for the companion-AI persona tools (阶段E2).
+//! End-to-end test for the companion-AI persona tools (phase E2).
 //!
 //! Verifies the full closed loop over an in-memory SQLite fact store:
 //!

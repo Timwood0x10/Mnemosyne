@@ -189,6 +189,101 @@ async fn world_state_slots_round_trip_and_append_history() {
     assert_eq!(one[0].entity_name, "董卓");
 }
 
+/// Objective: Pin the re-observation contract for world-state spans: the same
+/// (entity, slot, event, chapter) identity refreshes `value`/`confidence` and
+/// replaces a span only when the new observation supplies one.
+/// Invariants: a re-observation that omits both offsets keeps the stored span; a
+/// re-observation that supplies a span replaces it; no recorded offset is erased.
+#[tokio::test]
+async fn world_state_reobservation_replaces_span_only_when_supplied() {
+    let store = fresh().await;
+    let event_id = store
+        .upsert_world_event(NewWorldEvent {
+            title: "吕布 杀 董卓",
+            event_type: "action",
+            timestamp: Some(3),
+            description: "吕布杀董卓",
+            importance: 0.6,
+            start_offset: Some(100),
+            end_offset: Some(112),
+            ..NewWorldEvent::default()
+        })
+        .await
+        .expect("event");
+
+    store
+        .upsert_world_state(NewWorldState {
+            entity_name: "董卓",
+            slot: "status",
+            value: "deceased",
+            chapter: Some(3),
+            event_id: Some(event_id),
+            start_offset: Some(100),
+            end_offset: Some(112),
+            confidence: 0.75,
+        })
+        .await
+        .expect("initial state");
+
+    // A re-observation that omits the span must not erase the stored one.
+    store
+        .upsert_world_state(NewWorldState {
+            entity_name: "董卓",
+            slot: "status",
+            value: "dead",
+            chapter: Some(3),
+            event_id: Some(event_id),
+            start_offset: None,
+            end_offset: None,
+            confidence: 0.9,
+        })
+        .await
+        .expect("re-observation without a span");
+
+    let states = store.list_world_states(Some("董卓")).await.expect("list");
+    assert_eq!(states.len(), 1, "the identity must reuse the same row");
+    assert_eq!(states[0].value, "dead", "value must be refreshed");
+    assert_eq!(states[0].confidence, 0.9, "confidence must be refreshed");
+    assert_eq!(
+        states[0].start_offset,
+        Some(100),
+        "an omitted start offset must not erase the stored one"
+    );
+    assert_eq!(
+        states[0].end_offset,
+        Some(112),
+        "an omitted end offset must not erase the stored one"
+    );
+
+    // A re-observation that supplies a span replaces the stored one.
+    store
+        .upsert_world_state(NewWorldState {
+            entity_name: "董卓",
+            slot: "status",
+            value: "dead",
+            chapter: Some(3),
+            event_id: Some(event_id),
+            start_offset: Some(200),
+            end_offset: Some(212),
+            confidence: 0.9,
+        })
+        .await
+        .expect("re-observation with a span");
+
+    let states = store.list_world_states(Some("董卓")).await.expect("list");
+    assert_eq!(states.len(), 1, "still a single row for one identity");
+    assert_eq!(
+        states[0].start_offset,
+        Some(200),
+        "a supplied start offset must replace the stored one"
+    );
+    assert_eq!(
+        states[0].end_offset,
+        Some(212),
+        "a supplied end offset must replace the stored one"
+    );
+}
+
 /// Objective: Verify the world-write parameter objects default to the values
 /// their tables would have written, so a call site may omit a field without
 /// silently storing a different number (the columns are always bound

@@ -653,19 +653,30 @@ async fn build_server(
 
 #[tokio::main]
 async fn main() -> AnyhowResult<()> {
+    let cli = CliArgs::parse();
+
     // Initialize logging. Default to `warn` when `RUST_LOG` is unset or
     // unparsable: the library reports degradation (missing lexicon/dictionary
     // config, embedding failures, decayed facts) through `tracing`, and those
     // warnings must be visible without asking the user to configure logging
     // first. Any valid `RUST_LOG` still overrides it.
+    //
+    // The `ingest` subcommand raises its own default so the per-chapter progress
+    // the pipeline emits at DEBUG stays visible. The pipeline is library code —
+    // the `character_ingest` MCP tool reaches it too — so it reports through
+    // `tracing` rather than writing to the server's stderr unconditionally.
+    let default_filter = if matches!(&cli.command, Some(Command::Ingest { .. })) {
+        "mnemosyne::ingest=debug,warn"
+    } else {
+        "warn"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn")),
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter)),
         )
         .with_writer(std::io::stderr) // keep stdout clean for JSON-RPC
         .init();
 
-    let cli = CliArgs::parse();
     // Read transport options up front (before `match cli.command` partially
     // moves `command`), so the serve branch can dispatch on them without
     // touching the moved field.
