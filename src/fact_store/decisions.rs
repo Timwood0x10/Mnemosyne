@@ -165,16 +165,9 @@ impl SqliteFactStore {
         subject: i64,
         keyword: &str,
     ) -> Result<Vec<crate::decision::Decision>> {
-        // Escape the backslash FIRST (so the `\%`/`\_` inserted below are not
-        // re-escaped), then the LIKE wildcards: without this a keyword such as
-        // `%` matched every decision and `_` acted as a single-character
-        // wildcard (mirrors `knowledge/store.rs::search_evidence`).
-        let escaped = keyword
-            .to_lowercase()
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let pattern = format!("%{escaped}%");
+        // Lowercased for the case-insensitive match, then escaped so a keyword
+        // such as `%` cannot match every decision or `_` act as a wildcard.
+        let pattern = crate::sql::like_pattern(&keyword.to_lowercase());
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, subject, verb, object, made_at, because, outcome, status

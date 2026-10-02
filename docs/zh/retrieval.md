@@ -1,4 +1,4 @@
-# 模块：检索层（src/retrieval.rs + src/vector/ + store 检索）
+# 模块：检索层（src/retrieval.rs + store 检索）
 
 > 本文档实事求是地描述检索相关实现：它做什么、怎么实现、以及**为什么这么设计**（技术抉择）。图均为 mermaid。
 
@@ -19,7 +19,7 @@ flowchart TD
 
     KW --> F1["FTS5 MATCH（MEMORY_VECTOR_DIM=0）"]
     KW --> B1["BM25 全扫（无向量时）"]
-    VC --> V1["余弦相似度<br/>HNSW / brute_force"]
+    VC --> V1["余弦相似度<br/>sqlite-vec vec0 kNN"]
     HY --> M1["关键词分 + 向量分加权合并"]
 
     F1 --> R["RetrievalResult 列表<br/>(score + content + meta)"]
@@ -35,9 +35,7 @@ flowchart TD
 | `RetrievalEngine` | `retrieval.rs` | 检索编排：模式选择、外部知识注册表、合并评分 |
 | `RetrievalResult` | `retrieval.rs` | 单条结果：score + content + 元数据 |
 | `bm25_score` | `retrieval.rs` | 简化 BM25（仅 k1=1.2，tanh 归一化） |
-| `VectorIndex` trait | `vector/mod.rs` | 向量索引抽象 |
-| `HnswIndex` | `vector/hnsw.rs` | 近似最近邻（大图） |
-| `BruteForceIndex` | `vector/brute_force.rs` | 精确 O(N) 全扫（ground truth） |
+| `search_by_vector` | `store/repository.rs` | 对 `vec_memories`（`vec0` 虚表，sqlite-vec）做 kNN |
 | `fts5_query` | `store.rs` | FTS5 MATCH 查询转义 |
 
 ## 3. 技术抉择（为什么这么做）
@@ -63,15 +61,17 @@ flowchart TD
   （`unicode61` 对中文按整句），BM25 全扫（按词元匹配）是中文回退路径。
 - 两者都归一化到 [0,1]，保证后续合并评分量纲一致。
 
-### 3.3 为什么 HNSW 与 brute_force 并存？
+### 3.3 为什么向量检索交给 sqlite-vec？
 
-**抉择**：`HnswIndex`（近似）与 `BruteForceIndex`（精确）实现同一
-`VectorIndex` trait。
+**抉择**（`store/repository.rs::search_by_vector`）：kNN 在 SQLite 内部对
+`vec_memories`（`vec0` 虚表）执行（`vector MATCH ?1 AND k = ?2`），而不是
+进程内自建索引。
 
 **为什么**：
-- **规模分层**：小数据（测试、单文档）用精确全扫，大数据用 HNSW 近似。
-- **一致性锚点**：零向量在两处约定一致（距离 `sqrt(2)` ⇔ cosine=0.0），
-  测试断言两者结果可比——近似不能偏离精确太多。
+- **单一事实来源**：记忆行与它的向量由同一个事务写入，因此不存在「索引与
+  行不一致」的中间态。
+- **租户正确的 top-k**：`k` 在租户过滤**之前**放大到 `limit × 16`。kNN 是
+  全局排序的，小租户的行若落在全局 top-k 之外，会明明有匹配却返回零结果。
 
 ### 3.4 为什么混合检索要合并评分而非取交集？
 
@@ -103,13 +103,16 @@ flowchart TD
 | 信号 | 来源 | 量纲 |
 |---|---|---|
 | keyword | `bm25_score`（简化变体，仅 k1=1.2，无长度归一化）| tanh 归一化 [0,1] |
-| vector | 余弦相似度（HNSW / brute_force）| [0,1]（零向量约定 0.0）|
+| vector | sqlite-vec 余弦距离，转为 `1 - distance` | [0,1] |
 | importance | 记忆/事实重要性 | [0,1] |
 
-### 4.3 零向量约定
+### 4.3 没有嵌入的行
 
-`cosine = 1 - d²/2`，零向量下 `d = sqrt(2)` 使 cosine = 0.0——与
-`BruteForceIndex` 一致，避免 HNSW 与全扫对退化输入给出矛盾结果（修复项）。
+sqlite-vec 报告的是余弦**距离**（`[0, 2]`），引擎把它转成相似度
+`(1 - distance).clamp(0, 1)`。没有存储嵌入的记忆根本不会写入
+`vec_memories`，因此 `search_by_vector` 不会返回它——但 hybrid 模式仍会
+通过关键词通道命中它，不会静默丢失。已存储的全零向量是正交的，相似度为
+0.0，与「没有嵌入」取到同一个下界。
 
 ## 5. 相关
 

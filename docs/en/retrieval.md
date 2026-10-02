@@ -1,4 +1,4 @@
-# Module: Retrieval Layer (src/retrieval.rs + src/vector/ + store search)
+# Module: Retrieval Layer (src/retrieval.rs + store search)
 
 > This document faithfully describes the retrieval implementation: what it
 > does, how it works, and **why it is designed this way** (technical
@@ -22,7 +22,7 @@ flowchart TD
 
     KW --> F1["FTS5 MATCH (MEMORY_VECTOR_DIM=0)"]
     KW --> B1["BM25 full scan (no vectors)"]
-    VC --> V1["cosine similarity<br/>HNSW / brute_force"]
+    VC --> V1["cosine similarity<br/>sqlite-vec vec0 kNN"]
     HY --> M1["keyword + vector weighted merge"]
 
     F1 --> R["RetrievalResult list<br/>(score + content + meta)"]
@@ -38,9 +38,7 @@ flowchart TD
 | `RetrievalEngine` | `retrieval.rs` | orchestration: mode selection, external registry, merged scoring |
 | `RetrievalResult` | `retrieval.rs` | one result: score + content + metadata |
 | `bm25_score` | `retrieval.rs` | simplified BM25 (k1=1.2 only, tanh-normalized) |
-| `VectorIndex` trait | `vector/mod.rs` | vector-index abstraction |
-| `HnswIndex` | `vector/hnsw.rs` | approximate nearest neighbor (large graphs) |
-| `BruteForceIndex` | `vector/brute_force.rs` | exact O(N) full scan (ground truth) |
+| `search_by_vector` | `store/repository.rs` | kNN against the `vec_memories` `vec0` table (sqlite-vec) |
 | `fts5_query` | `store.rs` | FTS5 MATCH query escaping |
 
 ## 3. Technical decisions (why)
@@ -69,16 +67,18 @@ full scan (`search_by_keyword`).
   matching) is the Chinese fallback.
 - Both normalize to [0,1] so merged scoring stays dimension-consistent.
 
-### 3.3 Why HNSW and brute_force coexist?
+### 3.3 Why does the store delegate vector search to sqlite-vec?
 
-**Decision**: `HnswIndex` (approximate) and `BruteForceIndex` (exact) implement
-the same `VectorIndex` trait.
+**Decision** (`store/repository.rs::search_by_vector`): kNN runs inside SQLite
+against the `vec_memories` `vec0` virtual table (`vector MATCH ?1 AND k = ?2`),
+rather than against an in-process index.
 
 **Why**:
-- **Scale tiers**: exact scan for small data (tests, single documents); HNSW
-  approximation for large graphs.
-- **Consistency anchor**: zero vectors agree in both (distance `sqrt(2)` ⇔
-  cosine=0.0); tests assert the approximation does not drift from exact.
+- **One source of truth**: a memory row and its vector are written by the same
+  transaction, so a write can never leave the index and the rows disagreeing.
+- **Tenant-correct top-k**: `k` is over-fetched to `limit × 16` *before* the
+  tenant filter. kNN ranks globally, so a small tenant whose rows fall outside
+  the global top-k would otherwise get zero results despite matching rows.
 
 ### 3.4 Why merge scores instead of intersecting results in hybrid mode?
 
@@ -116,14 +116,17 @@ input safe (security fix).
 | Signal | Source | Scale |
 |---|---|---|
 | keyword | `bm25_score` (simplified, k1=1.2 only, no length normalization) | tanh-normalized [0,1] |
-| vector | cosine similarity (HNSW / brute_force) | [0,1] (zero vector → 0.0) |
+| vector | sqlite-vec cosine distance, converted as `1 - distance` | [0,1] |
 | importance | memory/fact importance | [0,1] |
 
-### 4.3 Zero-vector convention
+### 4.3 Rows without an embedding
 
-`cosine = 1 - d²/2`; for a zero vector, `d = sqrt(2)` gives cosine = 0.0 —
-identical to `BruteForceIndex`, so HNSW and the full scan never disagree on
-degenerate input (fixed bug).
+sqlite-vec reports cosine *distance* in `[0, 2]`; the engine converts it to a
+similarity as `(1 - distance).clamp(0, 1)`. A memory with no stored embedding is
+never inserted into `vec_memories`, so `search_by_vector` cannot return it — but
+hybrid mode still reaches it through the keyword channel, so such rows are never
+silently dropped. A stored all-zero vector is orthogonal and therefore scores
+0.0, the same floor an absent embedding gets.
 
 ## 5. Related
 

@@ -12,8 +12,8 @@ model** (entity nodes + events + relations + evidence) for later knowledge-graph
 queries and AI-agent reasoning.
 
 Unlike an LLM pipeline, **compilation is 100% LLM-free** — deterministic rules
-+ dictionaries (`JsonEntityProvider`) + statistics. Behavior is reproducible,
-testable, and traceable.
++ entity dictionaries + statistics. Behavior is reproducible, testable, and
+traceable.
 
 ## 2. Pipeline overview
 
@@ -103,7 +103,8 @@ chunk.
 
 **Decision**: event extraction (`extract.rs`) is driven by a language provider
 (`Config::from_language(&dyn LanguageProvider)`); entity recognition by
-`JsonEntityProvider` dictionaries (`config/entity_profiles/*.json`).
+`CorpusEntityProvider` (discovered from the text) merged with `NovelProvider`
+(curated tables for the Four Great Classical Novels) into one `EntityDictionary`.
 
 **Why**:
 - **Zero API dependency**: local computation, no cost, no network failure mode.

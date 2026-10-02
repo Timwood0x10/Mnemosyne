@@ -41,8 +41,8 @@ async fn full_pipeline() {
         "道".to_string(),
     ];
 
-    // Dummy mention resolver — since we have no EntityResolver here,
-    // we use a simple lookup table for the test
+    // This pipeline resolves mentions through its own dictionary rather than a
+    // resolver stage, so the test supplies a simple lookup table.
     let mention_map: std::collections::HashMap<&str, (i64, &str)> = [
         ("刘备", (10001, "刘备")),
         ("关羽", (10002, "关羽")),

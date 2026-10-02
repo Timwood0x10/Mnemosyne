@@ -471,21 +471,14 @@ impl KnowledgeStore for SQLiteKnowledgeStore {
         doc_id: Option<i64>,
         limit: usize,
     ) -> Result<Vec<KnowledgeObject>> {
-        // Clamp like search_evidence: `usize::MAX as i64` becomes -1, which
+        // Clamp like search_evidence: an oversized value would wrap to -1, which
         // SQLite treats as "no limit" and materializes the whole table.
-        let limit = limit.min(10_000) as i64;
-        // Escape LIKE wildcards so `%`/`_` in the user's query match
-        // literally instead of acting as wildcards (mirrors search_evidence).
-        let name_like = name_contains.map(|n| {
-            n.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        });
-        let prop_like = property_contains.map(|p| {
-            p.replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_")
-        });
+        let limit = crate::sql::sql_limit(limit);
+        // Escape LIKE wildcards so `%`/`_` in the user's query match literally
+        // instead of acting as wildcards; the SQL below concatenates the `%`
+        // wildcards itself, so only the body is escaped.
+        let name_like = name_contains.map(crate::sql::escape_like);
+        let prop_like = property_contains.map(crate::sql::escape_like);
         let object_type = object_type.map(str::to_string);
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(

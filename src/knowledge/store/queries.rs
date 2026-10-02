@@ -81,10 +81,7 @@ impl SQLiteKnowledgeStore {
         // failed to match a stored `oo_ba` even though
         // `"foo_bar".contains("oo_ba")` is true (the Rust filter below would
         // have accepted it had SQL returned the row).
-        let escaped = name
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
+        let escaped = crate::sql::escape_like(name);
         let candidates: Vec<KnowledgeObject> = match doc_id {
             Some(d) => self.list_objects_by_document(d).await?,
             None => {
@@ -497,18 +494,12 @@ impl SQLiteKnowledgeStore {
         doc_title: Option<&str>,
         limit: usize,
     ) -> Result<Vec<EvidenceHit>> {
-        // Clamp to avoid `usize::MAX as i64` overflow (which becomes -1 and is
-        // treated as "no limit" by SQLite) and to bound memory use.
-        let limit = limit.min(10_000) as i64;
-        // Escape the backslash FIRST (so the `\%`/`\_` inserted below are not
-        // re-escaped), then the LIKE wildcards. Without the backslash escape,
-        // a query containing `\` (e.g. `C:\`) produced a malformed pattern
-        // where the trailing `\` swallowed the closing `%` (audit finding).
-        let escaped = query
-            .replace('\\', "\\\\")
-            .replace('%', "\\%")
-            .replace('_', "\\_");
-        let like = format!("%{escaped}%");
+        // Clamp so an oversized request cannot wrap to SQLite's `LIMIT -1`
+        // ("no limit") and to bound memory use.
+        let limit = crate::sql::sql_limit(limit);
+        // A `\` in the query (e.g. `C:\`) must not swallow the closing
+        // wildcard; the escape order is owned by `crate::sql::like_pattern`.
+        let like = crate::sql::like_pattern(query);
         // The boxed parameter list must be `Send` to cross into the blocking
         // pool, hence the `+ Send` on the trait object.
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql + Send>>) =

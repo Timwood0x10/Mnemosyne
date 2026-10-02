@@ -52,9 +52,7 @@ fn resolve_config_path() -> PathBuf {
 /// Returns a description naming the offending path when the file cannot be
 /// read or is not valid JSON.
 pub fn load_config_from_path(path: &Path) -> Result<NameValidationConfig, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
-    serde_json::from_str(&text).map_err(|e| format!("invalid JSON in `{}`: {e}", path.display()))
+    crate::config::load_json_file(path)
 }
 
 /// Load the config, or report why it failed.

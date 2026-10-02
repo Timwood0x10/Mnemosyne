@@ -10,7 +10,7 @@
 //!   ├── Pass 1: World Builder (profiles → Entity nodes)
 //!   └── Pass 2: Story Compiler (body text → Events → Relations)
 //!   │
-//!   └── Timeline Builder → Writer → Store
+//!   └── Writer → Store
 //! ```
 
 pub mod chunk;

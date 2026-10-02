@@ -46,9 +46,9 @@ flowchart TB
         G3["fact_store.rs — SqliteFactStore"]
     end
 
-    subgraph RETR["检索 (src/retrieval.rs + src/vector/)"]
+    subgraph RETR["检索 (src/retrieval.rs + store 检索)"]
         R1["FTS5 关键词检索"]
-        R2["HNSW / brute_force 余弦相似度"]
+        R2["sqlite-vec vec0 余弦相似度"]
         R3["混合检索 hybrid"]
     end
 
@@ -120,12 +120,12 @@ flowchart LR
     C --> D["sentence.rs 分句"]
     D --> E["profile.rs Pass1 世界构建<br/>(实体/别名/画像)"]
     E --> F["extract.rs Pass2 故事编译<br/>(事件/动作/证据)"]
-    F --> G["resolver.rs + timeline.rs<br/>(别名消解/时间线)"]
+    F --> G["resolver.rs<br/>(别名消解)"]
     G --> H["writer.rs 写入知识库"]
 
     subgraph 消解器
         A1["resolver.rs 别名/名称消解"]
-        A3["entity/ 实体注册表<br/>(JsonEntityProvider 字典)"]
+        A3["entity/ 实体提供者<br/>(语料自动发现 + 小说词典)"]
     end
 
     E -.-> A1
@@ -133,8 +133,11 @@ flowchart LR
     F -.-> A1
 ```
 
-**实体提供者**（`config/entity_profiles/*.json`）：`sanguo` / `shuihu` / `honglou` /
-`xiyou` / `fengshen` / `warandpeace`，为每部小说提供规范实体名与别名。
+**实体提供者**（`compiler/entity/`）：`CorpusEntityProvider` 直接从正文发现
+人物（对话动词 + 首字母大写/中文人名启发式，按频次排序）；`NovelProvider`
+提供四大名著（水浒传 / 三国演义 / 红楼梦 / 西游记）的规范人名与别名表，
+复用 `ingest::characters` 而不重复数据。二者共同汇入编译器的
+`EntityDictionary`。
 
 ## 5. 对话 → 认知（cognition 层）
 

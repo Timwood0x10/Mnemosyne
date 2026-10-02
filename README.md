@@ -497,10 +497,11 @@ fixture.
 | `conversation_export_2026-08-02.json` | zh | dialog export |
 | `ques.json` | zh | auxiliary |
 
-Entity profile packs (`config/entity_profiles/`): `sanguo.json`, `shuihu.json`,
-`honglou.json`, `xiyou.json`, `fengshen.json`, `warandpeace.json` — each maps
-the novel's canonical entity names/aliases for the compiler's dictionary
-(`JsonEntityProvider`).
+Entity recognition needs no hand-maintained profile pack: `CorpusEntityProvider`
+discovers the cast from the source prose itself (dialogue-verb + capitalised
+name heuristics, ranked by frequency), and `NovelProvider` adds the curated
+name/alias tables for the Four Great Classical Novels by reusing the existing
+`ingest::characters` data. Both feed the compiler's `EntityDictionary`.
 
 
 ### Configuration

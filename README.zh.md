@@ -446,9 +446,10 @@ cargo test --test cognitive_state_e2e -- --nocapture
 | `conversation_export_2026-08-02.json` | 中 | 对话导出 |
 | `ques.json` | 中 | 辅助 |
 
-实体画像包（`config/entity_profiles/`）：`sanguo.json`、`shuihu.json`、
-`honglou.json`、`xiyou.json`、`fengshen.json`、`warandpeace.json`——每部小说
-为编译器词典（`JsonEntityProvider`）提供规范实体名/别名。
+实体识别不需要手工维护画像包：`CorpusEntityProvider` 直接从正文发现人物
+（对话动词 + 人名启发式，按频次排序），`NovelProvider` 则复用已有的
+`ingest::characters` 数据，为四大名著提供规范人名/别名表。二者共同汇入
+编译器的 `EntityDictionary`。
 
 ---
 

@@ -168,8 +168,16 @@ impl SQLiteKnowledgeStore {
     /// Returns [`StorageError::Schema`] if the file cannot be opened or the
     /// schema DDL fails.
     pub async fn open(path: &str) -> Result<Self> {
-        let conn = Connection::open(path)
-            .map_err(|e| StorageError::Schema(format!("open knowledge store: {e}")))?;
+        // `Connection::open` is synchronous too: on a network or slow disk it
+        // blocks the tokio worker that awaits it, exactly like the queries
+        // `with_conn` already moved off the worker (audit 09-26/H7).
+        let path = path.to_owned();
+        let conn = crate::blocking::run(move || {
+            let conn = Connection::open(&path)
+                .map_err(|e| StorageError::Schema(format!("open knowledge store: {e}")))?;
+            Ok(conn)
+        })
+        .await?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };
@@ -179,8 +187,12 @@ impl SQLiteKnowledgeStore {
 
     /// Open an in-memory store (for tests).
     pub async fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| StorageError::Schema(format!("open in-memory: {e}")))?;
+        let conn = crate::blocking::run(|| {
+            let conn = Connection::open_in_memory()
+                .map_err(|e| StorageError::Schema(format!("open in-memory: {e}")))?;
+            Ok(conn)
+        })
+        .await?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
         };

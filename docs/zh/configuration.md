@@ -71,7 +71,6 @@
 | `config/relation_rules.json` | 语料 ingest 的有向关系规则 |
 | `config/name_validation.json` | 编译器的人名校验规则 |
 | `config/faction_map.json` | 语料 ingest 的阵营映射 |
-| `config/anchor_seeds.json` | 取值抽取的锚点种子 |
 | `config/persona_prototypes.json` | `persona_check` 用的原型 |
 | `config/persona_cards.json` | `persona_inject` 用的角色卡（可选） |
 | `config/decay_config.json` | 衰减策略（可选，缺失时用内置默认） |

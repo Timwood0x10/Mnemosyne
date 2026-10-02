@@ -49,19 +49,12 @@ impl CharacterStore for SQLiteCharacterStore {
         let tenant_id = tenant_id.to_owned();
         let novel = novel.map(str::to_owned);
         self.with_conn(move |conn| {
-            // Escape the backslash BEFORE `%` and `_`. The reverse order leaves a
-            // lone `\` that combines with the appended trailing wildcard: the
-            // pattern `%foo\%` makes that wildcard a literal percent sign and
-            // silently drops the match for a query ending in `\` (09-27/M9).
-            let escaped = query
-                .replace('\\', "\\\\")
-                .replace('%', "\\%")
-                .replace('_', "\\_");
-            let like = format!("%{escaped}%");
-            // Clamp before the `as i64` cast: an oversized usize wraps to a
-            // negative i64, and SQLite treats LIMIT -1 as "no limit", returning
-            // the whole table (audit finding).
-            let limit = limit.min(10_000) as i64;
+            // The LIKE escape order and the limit clamp are owned by
+            // `crate::sql`, so this store cannot drift from the others again:
+            // `09-27/M9` fixed exactly this copy after it escaped `%`/`_`
+            // before `\` and dropped matches for backslash-terminated queries.
+            let like = crate::sql::like_pattern(&query);
+            let limit = crate::sql::sql_limit(limit);
 
             let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
                 if let Some(n) = novel {

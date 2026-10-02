@@ -8,8 +8,8 @@
 把非结构化的叙事文本（小说正文 + 人物小传）编译成**以实体为中心的世界模型**
 （实体节点 + 事件 + 关系 + 证据），供后续知识图谱查询与 AI Agent 推理。
 
-与 LLM 方案的本质区别：**整个编译过程零 LLM**，全部由确定性规则 + 词典
-（`JsonEntityProvider`）+ 统计完成——行为可复现、可测试、可追溯。
+与 LLM 方案的本质区别：**整个编译过程零 LLM**，全部由确定性规则 + 实体词典
++ 统计完成——行为可复现、可测试、可追溯。
 
 ## 2. 流水线总览
 
@@ -93,7 +93,8 @@ flowchart LR
 
 **抉择**：事件抽取（`extract.rs`）依赖语言提供者
 （`Config::from_language(&dyn LanguageProvider)`）配置的动词表/句型规则，
-实体识别依赖 `JsonEntityProvider` 词典（`config/entity_profiles/*.json`）。
+实体识别依赖 `CorpusEntityProvider`（从正文自动发现）与 `NovelProvider`
+（四大名著的规范人名/别名表）合并而成的 `EntityDictionary`。
 
 **为什么**：
 - **零 API 依赖**：本地纯计算，无外部调用、无成本、无网络故障面。

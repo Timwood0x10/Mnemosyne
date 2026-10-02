@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::Parser;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -21,6 +22,26 @@ use crate::error::{Error, Result};
 #[must_use]
 pub fn resolve_resource_path(relative: &str) -> PathBuf {
     resource_root().join(relative)
+}
+
+/// Read and parse a JSON config file, describing any failure with its path.
+///
+/// Shared by every module that loads a table from an operator-supplied path
+/// (name validation, relation rules): the two used to carry byte-identical
+/// copies of this function, so an improvement in one silently missed the other.
+///
+/// The error is a message rather than [`Error`] because callers report it
+/// through `tracing::warn!` and fall back to their built-in table; they need
+/// the offending path in the text, not a variant.
+///
+/// # Errors
+///
+/// Returns a message naming `path` when the file cannot be read or does not
+/// parse as JSON.
+pub fn load_json_file<T: DeserializeOwned>(path: &Path) -> std::result::Result<T, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("invalid JSON in `{}`: {e}", path.display()))
 }
 
 /// Locate the resource root: `MNEMOSYNE_HOME` if set, else an install-looking

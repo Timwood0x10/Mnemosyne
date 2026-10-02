@@ -49,9 +49,9 @@ flowchart TB
         G3["fact_store.rs — SqliteFactStore"]
     end
 
-    subgraph RETR["Retrieval (src/retrieval.rs + src/vector/)"]
+    subgraph RETR["Retrieval (src/retrieval.rs + store search)"]
         R1["FTS5 keyword search"]
-        R2["HNSW / brute_force cosine similarity"]
+        R2["sqlite-vec vec0 cosine similarity"]
         R3["hybrid retrieval"]
     end
 
@@ -123,12 +123,12 @@ flowchart LR
     C --> D["sentence.rs split"]
     D --> E["profile.rs Pass 1 world building<br/>(entities / aliases / profiles)"]
     E --> F["extract.rs Pass 2 story compilation<br/>(events / actions / evidence)"]
-    F --> G["resolver.rs + timeline.rs<br/>(alias resolution / timeline)"]
+    F --> G["resolver.rs<br/>(alias resolution)"]
     G --> H["writer.rs persist to store"]
 
     subgraph resolvers
         A1["resolver.rs alias/name resolution"]
-        A3["entity/ registry<br/>(JsonEntityProvider dictionaries)"]
+        A3["entity/ providers<br/>(corpus discovery + novel dictionary)"]
     end
 
     E -.-> A1
@@ -136,9 +136,12 @@ flowchart LR
     F -.-> A1
 ```
 
-**Entity providers** (`config/entity_profiles/*.json`): `sanguo` / `shuihu` /
-`honglou` / `xiyou` / `fengshen` / `warandpeace` — canonical names and aliases
-per novel.
+**Entity providers** (`compiler/entity/`): `CorpusEntityProvider` discovers the
+cast straight from the source prose (dialogue-verb + capitalised-name
+heuristics, ranked by frequency), and `NovelProvider` supplies the curated
+name/alias tables for the Four Great Classical Novels (水浒传 / 三国演义 /
+红楼梦 / 西游记), reusing `ingest::characters` rather than duplicating the
+data. Both feed the compiler's `EntityDictionary`.
 
 ## 5. Conversation → cognition (cognition layer)
 

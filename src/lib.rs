@@ -23,6 +23,7 @@
 //! | `filter` | Noise + Security filters |
 //! | `classifier` | Memory type classification |
 //! | `scorer` | Importance scoring |
+//! | `sql` | Shared SQLite text/limit helpers (LIKE escaping, limit clamping) |
 //! | `extractor` | Problem-Solution pair extraction |
 //! | `resolver` | Conflict detection and resolution |
 //! | `embed` | EmbeddingService trait + remote impl |
@@ -69,6 +70,7 @@ pub mod resolver;
 pub mod retrieval;
 pub mod scorer;
 pub mod self_disclosure;
+pub mod sql;
 pub mod state;
 pub mod storage;
 pub mod store;

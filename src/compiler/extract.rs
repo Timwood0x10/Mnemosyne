@@ -240,9 +240,9 @@ pub fn compile(
 /// Supports both Arabic numerals ("第1回") and Chinese numerals
 /// ("第一百二十回"). Returns `None` if no chapter heading is found.
 ///
-/// `pub(crate)` for the timeline raw-text cursor, which advances its
-/// chapter tracker on the same heading lines.
-pub(crate) fn parse_chapter_number(text: &str) -> Option<i32> {
+/// Private: chapter tracking is driven entirely from [`compile`], which calls
+/// this on each sentence.
+fn parse_chapter_number(text: &str) -> Option<i32> {
     // Only treat the sentence as a chapter heading when "第" appears at the
     // START (after trimming leading whitespace). This prevents false-positive
     // chapter resets on narrative text that merely contains "第X回" somewhere

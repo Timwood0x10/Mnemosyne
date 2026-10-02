@@ -3,6 +3,8 @@
 use super::*;
 use async_trait::async_trait;
 
+use crate::sql::{like_pattern, sql_limit};
+
 #[async_trait]
 impl ExperienceRepository for SQLiteVecStore {
     async fn create(&self, exp: &Experience) -> Result<()> {
@@ -468,36 +470,6 @@ impl ExperienceRepository for SQLiteVecStore {
     }
 }
 
-/// Largest row limit the store ever submits to SQLite in a `LIMIT`/`k` clause.
-const MAX_SQL_LIMIT: usize = 10_000;
-
-/// Clamp a caller-supplied row limit before the `i64` cast.
-///
-/// A `usize` above `i64::MAX` wraps to a negative `i64`, and SQLite reads
-/// `LIMIT -1` as "no limit" — the oversized request silently becomes a
-/// whole-table scan. Only values that reach SQL are clamped; in-memory
-/// truncation keeps the caller's original limit.
-fn sql_limit(limit: usize) -> i64 {
-    limit.min(MAX_SQL_LIMIT) as i64
-}
-
-/// Build a parameterised `LIKE` pattern (`%query%`) with every `LIKE`
-/// metacharacter escaped for the `ESCAPE '\'` clause used by the FTS-fallback
-/// queries.
-///
-/// The backslash MUST be escaped before `%` and `_`: escaping the wildcards
-/// first leaves a lone `\` that the next escape step turns into `\\`, but a
-/// query already ending in a single `\` would otherwise combine with the
-/// appended trailing `%` — the pattern `%foo\%` makes the trailing wildcard a
-/// literal percent sign and silently drops the "ends-with" match.
-fn like_pattern(query: &str) -> String {
-    let escaped = query
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    format!("%{escaped}%")
-}
-
 /// Insert one `Experience` into `memories` — and into `vec_memories` when it
 /// carries a vector — on an open transaction.
 ///
@@ -560,56 +532,6 @@ mod tests {
     /// Build a sample experience for the read-path tests.
     fn exp(tenant: &str, mt: MemoryType, content: &str) -> Experience {
         Experience::new(tenant, mt, content, 0.8)
-    }
-
-    /// Objective: Verify `like_pattern` escapes the backslash BEFORE `%`/`_`,
-    /// so a query ending in `\` keeps its trailing wildcard (the old order
-    /// produced `%foo\%`, whose trailing `%%` became a literal percent sign).
-    /// Invariants: each metacharacter in the pattern is backslash-escaped and
-    /// the surrounding `%…%` wildcards survive.
-    #[test]
-    fn like_pattern_escapes_backslash_before_wildcards() {
-        assert_eq!(
-            like_pattern("foo\\"),
-            r"%foo\\%",
-            "trailing backslash must be doubled, not eat the trailing wildcard"
-        );
-        assert_eq!(like_pattern("50%"), r"%50\%%", "percent must be escaped");
-        assert_eq!(like_pattern("a_b"), r"%a\_b%", "underscore must be escaped");
-        assert_eq!(
-            like_pattern(r"a\%_"),
-            r"%a\\\%\_%",
-            "backslash, percent and underscore must all escape independently"
-        );
-    }
-
-    /// Objective: Verify an oversized row limit cannot reach SQLite as a
-    /// negative number, where `LIMIT -1` would silently mean "no limit".
-    /// Invariants: the ceiling and everything above it clamp to `MAX_SQL_LIMIT`;
-    /// in-range values pass through; the result is never negative.
-    #[test]
-    fn sql_limit_clamps_oversized_requests() {
-        assert_eq!(
-            sql_limit(usize::MAX),
-            MAX_SQL_LIMIT as i64,
-            "usize::MAX must clamp to the ceiling instead of wrapping negative"
-        );
-        assert_eq!(
-            sql_limit(MAX_SQL_LIMIT + 1),
-            MAX_SQL_LIMIT as i64,
-            "one above the ceiling must clamp too"
-        );
-        assert_eq!(
-            sql_limit(MAX_SQL_LIMIT),
-            MAX_SQL_LIMIT as i64,
-            "the ceiling itself is allowed"
-        );
-        assert_eq!(
-            sql_limit(250),
-            250,
-            "in-range limits pass through unchanged"
-        );
-        assert_eq!(sql_limit(0), 0, "zero must stay zero (empty result set)");
     }
 
     /// Objective: Verify the clamp is wired into the SQL path: a read called

@@ -394,8 +394,9 @@ pub async fn run_decay_loop(
     stop: Arc<AtomicBool>,
 ) -> Result<()> {
     let mut ticker = tokio::time::interval(interval);
-    // The first tick completes immediately, so one pass runs right away, then
-    // every `interval` thereafter.
+    // The first tick completes immediately, so one pass runs right away — unless
+    // `stop` is already set when the task is first polled, in which case the
+    // loop exits without doing any work. Every later pass runs `interval` apart.
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -761,13 +762,19 @@ mod tests {
 
     /// Objective: Verify the background decay task (D2) runs a pass and exits
     /// cleanly when the stop flag is set.
-    /// Invariants: after `run_decay_loop` returns Ok, the loop stopped without
-    /// error; a decayable fact was archived by the single tick.
+    /// Invariants: a decayable fact is archived by the loop's own tick, and
+    /// `run_decay_loop` returns `Ok` once the flag is set.
+    ///
+    /// The pass is awaited rather than assumed: the loop checks `stop` before
+    /// its first tick, so setting the flag after a fixed sleep raced a task the
+    /// scheduler had not polled yet and failed intermittently. Waiting for the
+    /// observable effect keeps the assertion — the loop must run a pass — while
+    /// removing the timing assumption.
     #[tokio::test]
     async fn background_decay_loop_runs_and_stops() {
         let store = SqliteFactStore::open_in_memory().expect("fact store");
         let eid = store.resolve_user("tenant-a", "bob").expect("resolve user");
-        // One very old event → should be archived by the first tick.
+        // One very old event → should be archived by the first pass.
         store
             .insert_fact(&Fact {
                 id: None,
@@ -780,6 +787,9 @@ mod tests {
                 ..Fact::default()
             })
             .expect("insert old event");
+        let fact_id = store.get_facts(eid).expect("facts")[0]
+            .id
+            .expect("stored fact id");
 
         let stop = Arc::new(AtomicBool::new(false));
         let stop_task = stop.clone();
@@ -795,15 +805,24 @@ mod tests {
             stop_task,
         ));
 
-        // Let the first tick run, then ask the loop to stop.
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // Bounded wait: a loop that never runs a pass fails the test instead of
+        // hanging it (200 × 10 ms = 2 s, ten tick intervals).
+        let mut archived = false;
+        for _ in 0..200 {
+            let (_, flag) = store.get_decay(fact_id).expect("flags");
+            if flag {
+                archived = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         stop.store(true, Ordering::Relaxed);
         handle.await.expect("join").expect("loop must exit Ok");
 
-        let (_, archived) = store
-            .get_decay(store.get_facts(eid).expect("facts")[0].id.expect("id"))
-            .expect("flags");
-        assert!(archived, "the first tick archived the stale event");
+        assert!(
+            archived,
+            "the loop must archive the stale event on one of its passes"
+        );
     }
 
     /// Objective: Verify a JSON config file is parsed and validated.
