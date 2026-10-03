@@ -71,7 +71,7 @@ graph TD
     A --> E["knowledge/ — 知识存储/迁移/导出"]
     A --> F["ingest/ — V1 语料摄入"]
     A --> H["persona/ — 人设检查/时间线"]
-    A --> J["storage/ — schema 定义"]
+    A --> J["persistence/ — schema 定义 + 共享持久化工具"]
     A --> K["顶层: cognition / cognition_compiler / distiller / conversation_compiler / fact_store / retrieval / language / embed / ..."]
 
     C --> C1["document / sentence / chunk / profile / extract"]

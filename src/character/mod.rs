@@ -165,16 +165,8 @@ fn parse_aliases(s: &str) -> Vec<String> {
     serde_json::from_str(s).unwrap_or_default()
 }
 
-fn aliases_to_json(a: &[String]) -> String {
-    serde_json::to_string(a).unwrap_or_else(|_| "[]".to_string())
-}
-
 fn parse_char_list(s: &str) -> Vec<String> {
     serde_json::from_str(s).unwrap_or_default()
-}
-
-fn char_list_to_json(c: &[String]) -> String {
-    serde_json::to_string(c).unwrap_or_else(|_| "[]".to_string())
 }
 
 fn row_to_character(row: &rusqlite::Row) -> rusqlite::Result<CharacterAttribute> {
@@ -516,6 +508,52 @@ mod tests {
         assert_eq!(
             results[0].name, "路径测试",
             "the matched row must be the one that was stored"
+        );
+    }
+
+    /// Objective: Prove the optional novel filter still scopes the search after
+    /// the two near-identical SQL branches were collapsed into one statement
+    /// (`?3 IS NULL OR novel = ?3`).
+    /// Invariants: with `None` both novels match; with a novel supplied only
+    /// that novel's row survives, and it is the row that was stored.
+    #[tokio::test]
+    async fn search_scopes_by_optional_novel() {
+        let store = SQLiteCharacterStore::open_in_memory().await.expect("open");
+        let mut shuihu = sample_char("武松", "水浒传");
+        shuihu.personality = "勇猛刚直".to_string();
+        store
+            .create_character(&shuihu)
+            .await
+            .expect("create 水浒传 row");
+        let mut sanguo = sample_char("关羽", "三国演义");
+        sanguo.personality = "勇猛刚直".to_string();
+        store
+            .create_character(&sanguo)
+            .await
+            .expect("create 三国演义 row");
+
+        let unfiltered = store
+            .search_characters("勇猛", "novels", None, 10)
+            .await
+            .expect("search without a novel");
+        assert_eq!(
+            unfiltered.len(),
+            2,
+            "without a novel filter both novels must match"
+        );
+
+        let filtered = store
+            .search_characters("勇猛", "novels", Some("水浒传"), 10)
+            .await
+            .expect("search within one novel");
+        assert_eq!(
+            filtered.len(),
+            1,
+            "the novel filter must scope the result to one novel"
+        );
+        assert_eq!(
+            filtered[0].name, "武松",
+            "the surviving row must come from the requested novel"
         );
     }
 

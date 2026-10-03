@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 
 use mnemosyne::knowledge::store::{KnowledgeStore, SQLiteKnowledgeStore};
-use mnemosyne::storage::{KNOWLEDGE_SCHEMA, WORLD_SCHEMA};
+use mnemosyne::persistence::{KNOWLEDGE_SCHEMA, WORLD_SCHEMA};
 
 /// Create a file-backed database with both schemas applied and foreign keys ON
 /// (the state `init` leaves the connection in), seeded by `seed`.

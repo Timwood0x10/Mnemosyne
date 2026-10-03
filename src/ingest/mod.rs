@@ -405,11 +405,14 @@ impl IngestionPipeline {
         // relation type detection. Pre-computes keyword and character positions
         // from the alias-matching phase.
         let relation_index = relation::ChapterRelationIndex::build(text);
-        let char_positions_simple: HashMap<String, Vec<usize>> = chars_positions
+        // Spans, not bare starts: relation typing has to reject a keyword that
+        // falls INSIDE a name (`夫人` ⊂ `王夫人`), which needs the end offset.
+        let char_spans_simple: HashMap<String, Vec<(usize, usize)>> = chars_positions
             .iter()
             .map(|(name, positions)| {
-                let starts: Vec<usize> = positions.iter().map(|(s, _, _)| *s).collect();
-                (name.clone(), starts)
+                let spans: Vec<(usize, usize)> =
+                    positions.iter().map(|(s, e, _)| (*s, *e)).collect();
+                (name.clone(), spans)
             })
             .collect();
 
@@ -455,9 +458,9 @@ impl IngestionPipeline {
                     .map(|info| info.relation_text.contains_key(&key))
                     .unwrap_or(false);
                 if current_is_generic {
-                    let new_type = relation_index.detect_type(&char_positions_simple, a, b);
+                    let new_type = relation_index.detect_type(&char_spans_simple, a, b);
                     let ctx =
-                        relation::find_relation_context_indexed(text, &char_positions_simple, a, b);
+                        relation::find_relation_context_indexed(text, &char_spans_simple, a, b);
                     // Store when: (1) no context yet, or (2) we found a
                     // specific type that should replace the generic one.
                     let should_store = !has_context || new_type != "关联";
@@ -519,7 +522,7 @@ impl IngestionPipeline {
             if current_is_generic || !has_context {
                 let ctx = relation::find_relation_context_indexed(
                     text,
-                    &char_positions_simple,
+                    &char_spans_simple,
                     &dr.speaker,
                     &dr.addressee,
                 );

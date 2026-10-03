@@ -411,35 +411,76 @@ pub fn detect_relation_type(context: &str, a: &str, b: &str) -> String {
         return "关联".to_string();
     }
 
-    let a_names = all_names_for(a);
-    let b_names = all_names_for(b);
+    let a_spans: Vec<(usize, usize)> = all_names_for(a)
+        .iter()
+        .flat_map(|name| {
+            context
+                .match_indices(name.as_str())
+                .map(|(start, matched)| (start, start + matched.len()))
+        })
+        .collect();
+    let b_spans: Vec<(usize, usize)> = all_names_for(b)
+        .iter()
+        .flat_map(|name| {
+            context
+                .match_indices(name.as_str())
+                .map(|(start, matched)| (start, start + matched.len()))
+        })
+        .collect();
 
     for (keywords, rtype) in relation_type_rules() {
         for kw in keywords {
-            if !context.contains(kw.as_str()) {
-                continue;
-            }
-            for (kw_pos, _) in context.match_indices(kw.as_str()) {
-                let a_near = a_names.iter().any(|an| {
-                    context.match_indices(an.as_str()).any(|(p, _)| {
-                        (p as i32 - kw_pos as i32).unsigned_abs()
-                            < RELATION_KEYWORD_PROXIMITY as u32
-                    })
-                });
-                let b_near = b_names.iter().any(|bn| {
-                    context.match_indices(bn.as_str()).any(|(p, _)| {
-                        (p as i32 - kw_pos as i32).unsigned_abs()
-                            < RELATION_KEYWORD_PROXIMITY as u32
-                    })
-                });
-
-                if a_near && b_near {
-                    return rtype.clone();
-                }
+            if context.match_indices(kw.as_str()).any(|(kw_pos, matched)| {
+                keyword_types_relation(&a_spans, &b_spans, kw_pos, matched.len())
+            }) {
+                return rtype.clone();
             }
         }
     }
     "关联".to_string()
+}
+
+/// Whether a keyword occurrence of `kw_len` bytes at `kw_pos` types the
+/// relation between `a` and `b` (spans are `(start, end)` byte ranges of any
+/// alias occurrence).
+///
+/// Two conditions, both forced by what the shipped corpus exposed:
+///
+/// - **Not inside a name.** The match must not fall within an occurrence of
+///   either name. `夫人` is a substring of `王夫人`, so "王夫人对宝玉说…"
+///   married 王夫人 to everyone she spoke to — the bulk of the 68 surviving
+///   `夫妻` edges in 红楼梦.
+/// - **One clause.** The pair and the keyword must share a single
+///   [`RELATION_KEYWORD_PROXIMITY`]-byte window. The rule this replaces asked
+///   only that the keyword be near each name **taken separately**, which also
+///   accepts two names two windows apart — with a whole chapter as the context,
+///   any common keyword (`夫人`/`娶`/`兄弟`) between two unrelated names
+///   asserted the relation.
+///
+/// Every genuine form keeps all three together, so the window costs nothing:
+/// `A娶B`, `A与B配为夫妇`, `A、B…结义为兄弟` and `A拜B为师` all fit one clause.
+fn keyword_types_relation(
+    a_spans: &[(usize, usize)],
+    b_spans: &[(usize, usize)],
+    kw_pos: usize,
+    kw_len: usize,
+) -> bool {
+    let kw_end = kw_pos + kw_len;
+    let inside = |spans: &[(usize, usize)]| {
+        spans
+            .iter()
+            .any(|&(start, end)| start <= kw_pos && kw_end <= end)
+    };
+    if inside(a_spans) || inside(b_spans) {
+        return false;
+    }
+    a_spans.iter().any(|&(ap, _)| {
+        b_spans.iter().any(|&(bp, _)| {
+            let lo = ap.min(bp).min(kw_pos);
+            let hi = ap.max(bp).max(kw_end);
+            hi - lo <= RELATION_KEYWORD_PROXIMITY
+        })
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -478,45 +519,38 @@ impl ChapterRelationIndex {
 
     /// Fast relation type detection using pre-computed index.
     ///
-    /// `char_positions` maps character name → all byte positions of any alias
-    /// in this chapter (derived from the alias-matching phase). Returns the
-    /// first matching relation type, or `"关联"` if none found.
+    /// `char_spans` maps character name → the `(start, end)` byte range of
+    /// every alias occurrence in this chapter (derived from the alias-matching
+    /// phase). The end is needed, not just the start: a keyword match that falls
+    /// *inside* one of the names is part of that name, not a relation
+    /// ([`keyword_types_relation`]). Returns the first matching relation type,
+    /// or `"关联"` if none found.
     pub fn detect_type(
         &self,
-        char_positions: &HashMap<String, Vec<usize>>,
+        char_spans: &HashMap<String, Vec<(usize, usize)>>,
         a: &str,
         b: &str,
     ) -> String {
-        let a_positions = match char_positions.get(a) {
-            Some(p) => p,
+        let a_spans = match char_spans.get(a) {
+            Some(spans) => spans,
             None => return "关联".to_string(),
         };
-        let b_positions = match char_positions.get(b) {
-            Some(p) => p,
+        let b_spans = match char_spans.get(b) {
+            Some(spans) => spans,
             None => return "关联".to_string(),
         };
 
         for (keywords, rtype) in relation_type_rules() {
             for kw in keywords {
                 let kw_positions = match self.keyword_positions.get(kw) {
-                    Some(p) => p,
+                    Some(positions) => positions,
                     None => continue,
                 };
-                for &kw_pos in kw_positions {
-                    let a_near = a_positions.iter().any(|&p| {
-                        (p as i32 - kw_pos as i32).unsigned_abs()
-                            < RELATION_KEYWORD_PROXIMITY as u32
-                    });
-                    if !a_near {
-                        continue;
-                    }
-                    let b_near = b_positions.iter().any(|&p| {
-                        (p as i32 - kw_pos as i32).unsigned_abs()
-                            < RELATION_KEYWORD_PROXIMITY as u32
-                    });
-                    if b_near {
-                        return rtype.clone();
-                    }
+                if kw_positions
+                    .iter()
+                    .any(|&kw_pos| keyword_types_relation(a_spans, b_spans, kw_pos, kw.len()))
+                {
+                    return rtype.clone();
                 }
             }
         }
@@ -524,26 +558,26 @@ impl ChapterRelationIndex {
     }
 }
 
-/// Fast context-window finder using pre-computed positions.
+/// Fast context-window finder using pre-computed spans.
 ///
 /// Instead of scanning the full text for alias strings (the original
-/// `find_relation_context`), this uses the pre-computed `char_positions`
+/// `find_relation_context`), this uses the pre-computed `char_spans`
 /// map to check proximity in constant time per position.
 pub fn find_relation_context_indexed(
     text: &str,
-    char_positions: &HashMap<String, Vec<usize>>,
+    char_spans: &HashMap<String, Vec<(usize, usize)>>,
     a: &str,
     b: &str,
 ) -> Option<String> {
-    let a_positions = char_positions.get(a)?;
-    let b_positions = char_positions.get(b)?;
+    let a_spans = char_spans.get(a)?;
+    let b_spans = char_spans.get(b)?;
 
-    for &a_pos in a_positions {
+    for &(a_pos, _) in a_spans {
         let ctx_start = floor_char_boundary(text, a_pos.saturating_sub(30));
         let ctx_end = floor_char_boundary(text, (a_pos + 200).min(text.len()));
-        if !b_positions
+        if !b_spans
             .iter()
-            .any(|&bp| bp >= ctx_start && bp < ctx_end)
+            .any(|&(bp, _)| bp >= ctx_start && bp < ctx_end)
         {
             continue;
         }
@@ -587,6 +621,44 @@ mod tests {
         let ctx = "那孙悟空拜唐僧为师，跟随师父西行。";
         let rtype = detect_relation_type(ctx, "孙悟空", "唐僧");
         assert_eq!(rtype, "师徒", "师徒 keywords must map to the 师徒 type");
+    }
+
+    /// Objective: Verify a relation keyword types the pair only when all three
+    /// fit in one clause. The rule this replaced accepted a keyword that was
+    /// merely near each name separately, so two unrelated characters with a
+    /// stray `夫人` between them were married — on the shipped corpus that
+    /// produced 75 `夫妻` edges of which about two are real.
+    /// Invariants: a marriage stated in one clause fires; the same keyword with
+    /// the pair spread beyond one clause does not.
+    #[test]
+    fn keyword_types_a_relation_only_within_one_clause() {
+        assert_eq!(
+            detect_relation_type("王英娶扈三娘为妻。", "王英", "扈三娘"),
+            "夫妻",
+            "a marriage stated in one clause must still be detected"
+        );
+        assert_eq!(
+            detect_relation_type("宋江与扈三娘配为夫妇，众人皆贺。", "宋江", "扈三娘"),
+            "夫妻",
+            "a clause-final marker must still be detected"
+        );
+
+        // Identical keyword and names, but the pair is spread across the
+        // sentence so no single clause contains both names and the marker.
+        let spread = format!("贾母{}夫人{}贾政", "说".repeat(20), "听".repeat(20));
+        assert_eq!(
+            detect_relation_type(&spread, "贾母", "贾政"),
+            "关联",
+            "a stray 夫人 far from both names must not assert a marriage"
+        );
+
+        // `夫人` is a substring of `王夫人`, so the match is part of that name
+        // rather than a marker, however close the clause is.
+        assert_eq!(
+            detect_relation_type("王夫人对贾宝玉说：你这孽障。", "王夫人", "贾宝玉"),
+            "关联",
+            "a keyword lying inside one of the names must not type the relation"
+        );
     }
 
     /// Objective: Verify a context with no relation keyword falls back to the generic 关联 type.

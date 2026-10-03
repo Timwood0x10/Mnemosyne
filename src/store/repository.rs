@@ -50,8 +50,7 @@ impl ExperienceRepository for SQLiteVecStore {
         let exp = exp.clone();
         let dim = self.dim;
         self.with_conn(move |conn| {
-            let vector_json =
-                serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
+            let vector_json = crate::persistence::json::json_array(&exp.vector);
             // Single transaction: the memories UPDATE and the vec_memories
             // upsert must land together, mirroring `create`.
             let tx = conn.transaction()?;
@@ -64,7 +63,7 @@ impl ExperienceRepository for SQLiteVecStore {
                     exp.confidence, exp.source,
                     extraction_method_to_str(exp.extraction_method),
                     exp.created_at.to_rfc3339(),
-                    serde_json::to_string(&exp.metadata).unwrap_or_default(),
+                    crate::persistence::json::json_object(&exp.metadata),
                     vector_json,
                     exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
                 ],
@@ -480,7 +479,7 @@ impl ExperienceRepository for SQLiteVecStore {
 ///
 /// Returns a storage error when the row or its vector cannot be written.
 fn insert_experience(tx: &rusqlite::Transaction<'_>, exp: &Experience) -> Result<()> {
-    let vector_json = serde_json::to_string(&exp.vector).unwrap_or_else(|_| "[]".to_string());
+    let vector_json = crate::persistence::json::json_array(&exp.vector);
     tx.execute(
         "INSERT INTO memories (id, tenant_id, user_id, memory_type, problem, solution, content, confidence, source, extraction_method, created_at, expires_at, metadata, vector)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
@@ -492,7 +491,7 @@ fn insert_experience(tx: &rusqlite::Transaction<'_>, exp: &Experience) -> Result
             extraction_method_to_str(exp.extraction_method),
             exp.created_at.to_rfc3339(),
             exp.expires_at.map(|t| t.to_rfc3339()).unwrap_or_default(),
-            serde_json::to_string(&exp.metadata).unwrap_or_default(),
+            crate::persistence::json::json_object(&exp.metadata),
             vector_json,
         ],
     )?;

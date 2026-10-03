@@ -220,9 +220,7 @@ fn latest_by_payload_key(facts: &[Fact], fact_type: FactType, keys: &[&str]) -> 
             .iter()
             .find_map(|key| fact.payload.get(*key).and_then(|value| value.as_str()))
             .map(str::to_owned)
-            .unwrap_or_else(|| {
-                serde_json::to_string(&fact.payload).unwrap_or_else(|_| "{}".to_string())
-            });
+            .unwrap_or_else(|| crate::persistence::json::json_object(&fact.payload));
         // Newest wins (facts are already chronological).
         latest.insert(semantic_key, fact.clone());
     }

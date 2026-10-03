@@ -10,7 +10,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::cognition::{Fact, FactStatus, FactStore, FactType};
 use crate::error::{Error, Result, StorageError};
-use crate::storage::unique_index::{UniqueIndex, ensure_unique_index};
+use crate::persistence::unique_index::{UniqueIndex, ensure_unique_index};
 
 mod decisions;
 mod entities;
@@ -122,9 +122,24 @@ const UNIQUE_INDEXES: &[UniqueIndex] = &[UniqueIndex {
         "IFNULL(end_offset, -1)",
         "IFNULL(content, '')",
     ],
-    // `facts.evidence_id` points at the anchor, so a duplicate's id has to be
-    // moved onto the surviving row before the duplicate is removed.
-    referencing: &[("facts", "evidence_id")],
+    // Every table pointing at the anchor has to be moved onto the surviving row
+    // before a duplicate is removed, or the delete is refused by the foreign
+    // keys — bundled SQLite is compiled with `SQLITE_DEFAULT_FOREIGN_KEYS=1`,
+    // so enforcement is ON for every connection without anyone asking — and the
+    // store then refuses to open.
+    //
+    // `facts` is this store's own child. `knowledge_evidence` and
+    // `world_entity_profiles` belong to the KNOWLEDGE store, and they matter
+    // here because both stores share one SQLite file: after the documented
+    // `ingest` → `migrate` flow the knowledge graph holds thousands of links to
+    // `evidence` rows the migration duplicated (14,865 rows / 10,657 identities
+    // on the shipped corpus), so repairing only `facts` made `serve` abort with
+    // `dedupe for ux_evidence_identity: FOREIGN KEY constraint failed`.
+    referencing: &[
+        ("facts", "evidence_id"),
+        ("knowledge_evidence", "evidence_id"),
+        ("world_entity_profiles", "evidence_id"),
+    ],
 }];
 
 /// The single fact insert every write path uses.
@@ -229,7 +244,7 @@ impl SqliteFactStore {
         )?;
         // Identity indexes, installed after `ensure_column` added the columns
         // they index. Deduplication is the DATABASE's job (see
-        // `storage::unique_index`): in-process bookkeeping lets two connections
+        // `persistence::unique_index`): in-process bookkeeping lets two connections
         // both pass a check-then-insert.
         for spec in UNIQUE_INDEXES {
             ensure_unique_index(conn, spec)?;

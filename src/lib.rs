@@ -28,6 +28,7 @@
 //! | `resolver` | Conflict detection and resolution |
 //! | `embed` | EmbeddingService trait + remote impl |
 //! | `store` | ExperienceRepository trait + sqlite-vec impl |
+//! | `persistence` | Frozen schema DDL + shared persistence utilities |
 //! | `distiller` | 8-stage distillation pipeline orchestrator |
 //! | `character` | Character knowledge graph store + network traversal |
 //! | `ingest` | Character corpus distillation (Python `ingest_characters.py` port) |
@@ -63,6 +64,7 @@ pub mod language;
 pub mod lexicon;
 pub mod mcp;
 pub mod observation_compiler;
+pub mod persistence;
 pub mod persona;
 pub mod prompt;
 pub mod relationship;
@@ -72,7 +74,6 @@ pub mod scorer;
 pub mod self_disclosure;
 pub mod sql;
 pub mod state;
-pub mod storage;
 pub mod store;
 pub mod story_bridge;
 pub mod temporal;

@@ -425,3 +425,79 @@ fn duplicate_evidence_rows_are_collapsed_and_facts_repointed() {
         "both facts must follow their anchor onto the surviving row"
     );
 }
+
+/// Objective: Verify the identity repair survives the OTHER store's children.
+///
+/// The fact store and the knowledge store share one SQLite file and one
+/// `evidence` table, so after the documented `ingest` → `migrate` flow the
+/// anchors are referenced by `knowledge_evidence` (6,412 rows on the shipped
+/// corpus). Repairing only `facts` left those references in place, so
+/// `DELETE FROM evidence` was refused — foreign keys are ON by default because
+/// bundled SQLite is compiled with `SQLITE_DEFAULT_FOREIGN_KEYS=1` — and
+/// `serve` then aborted with
+/// `dedupe for ux_evidence_identity: FOREIGN KEY constraint failed`, i.e. the
+/// server could not start on a freshly migrated database at all.
+///
+/// Invariants: the repair completes; knowledge links follow their anchor onto
+/// the survivor; a link that would become a duplicate of an existing one is
+/// dropped rather than blocking the repair.
+#[test]
+fn identity_repair_moves_the_knowledge_stores_children_too() {
+    let conn = Connection::open_in_memory().expect("open database");
+    // Both stores on one file. The knowledge schema lands first in production
+    // (`migrate` writes it; only afterwards does `serve` open the fact store),
+    // so its children already exist when the fact store installs its index.
+    conn.execute_batch(crate::persistence::KNOWLEDGE_SCHEMA)
+        .expect("install knowledge schema");
+    conn.execute_batch(crate::persistence::WORLD_SCHEMA)
+        .expect("install world schema");
+    SqliteFactStore::initialize_schema(&conn).expect("install fact schema");
+
+    // Reproduce a migrated corpus database: duplicate anchors plus knowledge
+    // links pointing at BOTH copies of the same anchor.
+    conn.execute_batch(
+        "DROP INDEX ux_evidence_identity;
+         INSERT INTO evidence (id, tenant_id, start_offset, end_offset, content)
+         VALUES (1, 't', 10, 18, '重复的句子。'),
+                (2, 't', 10, 18, '重复的句子。'),
+                (3, 't', 300, 308, '另一句。');
+         INSERT INTO knowledge_evidence (source_type, source_id, evidence_id)
+         VALUES ('object', 10, 1),
+                ('object', 10, 2),
+                ('object', 20, 1);
+         INSERT INTO world_entities (id, name) VALUES (7, '刘备');
+         INSERT INTO world_entity_profiles (entity_id, key, value, evidence_id)
+         VALUES (7, 'courtesy_name', '玄德', 1);",
+    )
+    .expect("create duplicates and knowledge links");
+
+    SqliteFactStore::initialize_schema(&conn).expect("repair must not be refused");
+
+    let anchors: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT evidence_id FROM knowledge_evidence ORDER BY evidence_id, source_id")
+            .expect("prepare");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query")
+            .collect::<std::result::Result<Vec<i64>, _>>()
+            .expect("collect")
+    };
+    assert_eq!(
+        anchors,
+        vec![2, 2],
+        "the link that would duplicate an existing one is dropped; the rest follow the survivor"
+    );
+    let profile_anchor: i64 = conn
+        .query_row("SELECT evidence_id FROM world_entity_profiles", [], |r| {
+            r.get(0)
+        })
+        .expect("profile anchor");
+    assert_eq!(
+        profile_anchor, 2,
+        "the world profile must follow its anchor onto the survivor"
+    );
+    let survivors: i64 = conn
+        .query_row("SELECT COUNT(*) FROM evidence", [], |r| r.get(0))
+        .expect("count evidence");
+    assert_eq!(survivors, 2, "one row per identity survives");
+}

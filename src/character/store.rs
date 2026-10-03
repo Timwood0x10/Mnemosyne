@@ -13,10 +13,10 @@ impl CharacterStore for SQLiteCharacterStore {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     c.id, c.tenant_id, c.name, c.novel,
-                    aliases_to_json(&c.aliases),
+                    crate::persistence::json::json_array(&c.aliases),
                     c.clothing, c.personality, c.description,
                     c.importance, c.created_at.to_rfc3339(),
-                    serde_json::to_string(&c.metadata).unwrap_or_default(),
+                    crate::persistence::json::json_object(&c.metadata),
                 ],
             )?;
             Ok(())
@@ -56,55 +56,25 @@ impl CharacterStore for SQLiteCharacterStore {
             let like = crate::sql::like_pattern(&query);
             let limit = crate::sql::sql_limit(limit);
 
-            let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
-                if let Some(n) = novel {
-                    (
-                        "SELECT * FROM character_attributes \
-                     WHERE (name LIKE ?1 ESCAPE '\\' \
-                            OR aliases LIKE ?1 ESCAPE '\\' \
-                            OR clothing LIKE ?1 ESCAPE '\\' \
-                            OR personality LIKE ?1 ESCAPE '\\' \
-                            OR description LIKE ?1 ESCAPE '\\') \
-                       AND tenant_id = ?2 AND novel = ?3 \
-                     ORDER BY \
-                       CASE WHEN name LIKE ?1 ESCAPE '\\' THEN 0 ELSE 1 END, \
-                       importance DESC \
-                     LIMIT ?4"
-                            .to_string(),
-                        vec![
-                            Box::new(like.clone()) as Box<dyn rusqlite::types::ToSql>,
-                            Box::new(tenant_id.to_string()),
-                            Box::new(n.to_string()),
-                            Box::new(limit),
-                        ],
-                    )
-                } else {
-                    (
-                        "SELECT * FROM character_attributes \
-                     WHERE (name LIKE ?1 ESCAPE '\\' \
-                            OR aliases LIKE ?1 ESCAPE '\\' \
-                            OR clothing LIKE ?1 ESCAPE '\\' \
-                            OR personality LIKE ?1 ESCAPE '\\' \
-                            OR description LIKE ?1 ESCAPE '\\') \
-                       AND tenant_id = ?2 \
-                     ORDER BY \
-                       CASE WHEN name LIKE ?1 ESCAPE '\\' THEN 0 ELSE 1 END, \
-                       importance DESC \
-                     LIMIT ?3"
-                            .to_string(),
-                        vec![
-                            Box::new(like) as Box<dyn rusqlite::types::ToSql>,
-                            Box::new(tenant_id.to_string()),
-                            Box::new(limit),
-                        ],
-                    )
-                };
-
-            let mut stmt = conn.prepare(&sql)?;
-            let rows = stmt.query_map(
-                rusqlite::params_from_iter(params_vec.iter().map(|p| p.as_ref())),
-                row_to_character,
+            // One statement with an optional novel filter, spelled
+            // `?3 IS NULL OR novel = ?3` — the shape `knowledge/store` already
+            // uses. The two near-identical SQL strings this replaced differed
+            // only in that clause and the placeholder numbering it shifted.
+            let mut stmt = conn.prepare(
+                "SELECT * FROM character_attributes \
+                 WHERE (name LIKE ?1 ESCAPE '\\' \
+                        OR aliases LIKE ?1 ESCAPE '\\' \
+                        OR clothing LIKE ?1 ESCAPE '\\' \
+                        OR personality LIKE ?1 ESCAPE '\\' \
+                        OR description LIKE ?1 ESCAPE '\\') \
+                   AND tenant_id = ?2 \
+                   AND (?3 IS NULL OR novel = ?3) \
+                 ORDER BY \
+                   CASE WHEN name LIKE ?1 ESCAPE '\\' THEN 0 ELSE 1 END, \
+                   importance DESC \
+                 LIMIT ?4",
             )?;
+            let rows = stmt.query_map(params![like, tenant_id, novel, limit], row_to_character)?;
             let mut results = Vec::new();
             for row in rows {
                 results.push(row?);
@@ -166,10 +136,10 @@ impl CharacterStore for SQLiteCharacterStore {
                 "UPDATE character_attributes SET name=?2, novel=?3, aliases=?4, clothing=?5, personality=?6, description=?7, importance=?8, metadata=?9 WHERE id=?1",
                 params![
                     c.id, c.name, c.novel,
-                    aliases_to_json(&c.aliases),
+                    crate::persistence::json::json_array(&c.aliases),
                     c.clothing, c.personality, c.description,
                     c.importance,
-                    serde_json::to_string(&c.metadata).unwrap_or_default(),
+                    crate::persistence::json::json_object(&c.metadata),
                 ],
             )?;
             if affected == 0 {
@@ -204,9 +174,9 @@ impl CharacterStore for SQLiteCharacterStore {
                 params![
                     e.id, e.tenant_id, e.character_name, e.event_name,
                     e.description, e.chapter, e.novel,
-                    char_list_to_json(&e.related_characters),
+                    crate::persistence::json::json_array(&e.related_characters),
                     e.importance, e.created_at.to_rfc3339(),
-                    serde_json::to_string(&e.metadata).unwrap_or_default(),
+                    crate::persistence::json::json_object(&e.metadata),
                 ],
             )?;
             Ok(())
@@ -280,7 +250,7 @@ impl CharacterStore for SQLiteCharacterStore {
                     r.id, r.tenant_id, r.source_character, r.target_character,
                     r.relation_type, r.description, r.chapter, r.novel,
                     r.bidirections as i32, r.importance, r.created_at.to_rfc3339(),
-                    serde_json::to_string(&r.metadata).unwrap_or_default(),
+                    crate::persistence::json::json_object(&r.metadata),
                 ],
             )?;
             Ok(())

@@ -128,6 +128,15 @@ fn repair_duplicates(conn: &Connection, spec: &UniqueIndex) -> Result<usize> {
              DELETE FROM mn_dupe_map WHERE old_id = new_id;"
         ))?;
         for (child_table, child_column) in spec.referencing {
+            // A referencing table can belong to a DIFFERENT store that merely
+            // shares this file — `ux_evidence_identity` lists the knowledge
+            // store's children — and whichever store opens first sees none of
+            // the other's tables. There is then no row to move, so skipping the
+            // absent table is correct and keeps the repair from failing on a
+            // lookup error that would hide the real one.
+            if !table_exists(conn, child_table)? {
+                continue;
+            }
             conn.execute_batch(&format!(
                 "UPDATE OR IGNORE {child_table} \
                  SET {child_column} = (SELECT new_id FROM mn_dupe_map \
@@ -156,6 +165,22 @@ fn repair_duplicates(conn: &Connection, spec: &UniqueIndex) -> Result<usize> {
             Err(error)
         }
     }
+}
+
+/// Whether `table` exists in the database.
+///
+/// # Errors
+///
+/// Returns the SQLite error when `sqlite_master` cannot be read.
+fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            params![table],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
 }
 
 /// Normalize a `CREATE INDEX` statement for comparison: SQLite echoes the

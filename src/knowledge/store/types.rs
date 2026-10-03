@@ -10,7 +10,7 @@ pub(super) fn row_to_document(row: &rusqlite::Row) -> rusqlite::Result<Document>
         doc_type: row.get("doc_type")?,
         source: row.get("source")?,
         // `unwrap_or(0)` — databases created while the DDL default was
-        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // broken (see `persistence::schema`) hold NULL here. "Written before we
         // recorded times" must not make the row unreadable.
         created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
@@ -50,7 +50,7 @@ pub(super) fn row_to_object(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeOb
             .unwrap_or(serde_json::Value::Object(serde_json::Map::new())),
         confidence: row.get("confidence")?,
         // `unwrap_or(0)` — databases created while the DDL default was
-        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // broken (see `persistence::schema`) hold NULL here. "Written before we
         // recorded times" must not make the row unreadable.
         created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
@@ -79,7 +79,7 @@ pub(super) fn row_to_edge(row: &rusqlite::Row) -> rusqlite::Result<KnowledgeEdge
         valid_from: row.get("valid_from")?,
         valid_to: row.get("valid_to")?,
         // `unwrap_or(0)` — databases created while the DDL default was
-        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // broken (see `persistence::schema`) hold NULL here. "Written before we
         // recorded times" must not make the row unreadable.
         created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
@@ -98,7 +98,7 @@ pub(super) fn row_to_evidence(row: &rusqlite::Row) -> rusqlite::Result<Evidence>
         end_offset: row.get("end_offset")?,
         content: row.get("content")?,
         // `unwrap_or(0)` — databases created while the DDL default was
-        // broken (see `storage::schema`) hold NULL here. "Written before we
+        // broken (see `persistence::schema`) hold NULL here. "Written before we
         // recorded times" must not make the row unreadable.
         created_at: row.get::<_, Option<i64>>("created_at")?.unwrap_or(0),
     })
@@ -119,12 +119,13 @@ pub(super) fn row_to_mention(row: &rusqlite::Row) -> rusqlite::Result<Mention> {
 
 /// Serialize a `serde_json::Value` for the `properties`/`statistics` JSON
 /// columns. A null value is stored as the empty object so the column default
-/// semantics are preserved.
+/// semantics are preserved; every other value goes through the shared object
+/// serializer, which owns the failure fallback.
 pub(super) fn json_to_string(v: &serde_json::Value) -> String {
     if v.is_null() {
         "{}".to_string()
     } else {
-        serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string())
+        crate::persistence::json::json_object(v)
     }
 }
 

@@ -21,7 +21,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::character::{CharacterAttribute, CharacterEvent, CharacterRelation, CharacterStore};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::ingest::corpus;
 use crate::ingest::extract;
 
@@ -165,9 +165,15 @@ impl<'a> Migrator<'a> {
     async fn load_v1_snapshot(&self) -> Result<V1Snapshot> {
         let mut snapshot = V1Snapshot::default();
         for novel in NOVELS {
+            // The cast is read in ONE query, and `search_characters` clamps its
+            // limit to `MAX_SQL_LIMIT`. Requesting more than that used to look
+            // like "unlimited" while actually truncating, so the migration
+            // reported success having dropped characters. Bound the cast first
+            // and ask for exactly the page size the clamp permits.
+            ensure_cast_fits_page(self.v1.count_characters(TENANT, Some(novel)).await?, novel)?;
             let characters = self
                 .v1
-                .search_characters("", TENANT, Some(novel), 100_000)
+                .search_characters("", TENANT, Some(novel), crate::sql::MAX_SQL_LIMIT)
                 .await?;
             let mut events: HashMap<String, Vec<CharacterEvent>> = HashMap::new();
             let mut relations: HashMap<String, Vec<CharacterRelation>> = HashMap::new();
@@ -566,6 +572,28 @@ impl<'a> Migrator<'a> {
     }
 }
 
+/// Refuse a novel whose cast is larger than one `search_characters` page.
+///
+/// [`crate::sql::MAX_SQL_LIMIT`] is the most rows a single query can be asked
+/// for, so the preload cannot read a larger cast. Silently truncating would be
+/// the worst outcome: a partial migration is indistinguishable from a complete
+/// one from the outside, and the missing characters are simply gone.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] naming the novel and the cap when its cast
+/// exceeds one page.
+fn ensure_cast_fits_page(cast_size: i64, novel: &str) -> Result<()> {
+    if cast_size as usize > crate::sql::MAX_SQL_LIMIT {
+        return Err(Error::InvalidInput(format!(
+            "novel `{novel}` has {cast_size} characters, more than the {} this migration \
+             can read in one pass",
+            crate::sql::MAX_SQL_LIMIT
+        )));
+    }
+    Ok(())
+}
+
 /// Find the first occurrence in `text` of any of `names` (longest-first
 /// preferred via the caller's sort). Returns `(alias, start, end)` on the
 /// earliest match, or `None`.
@@ -925,6 +953,35 @@ mod tests {
         assert!(
             !zhaoyun.evidences.iter().any(|e| e.chapter_id == 0),
             "no evidence should carry a dangling chapter_id=0"
+        );
+    }
+
+    /// Objective: Verify a cast larger than one `search_characters` page is
+    /// refused instead of being truncated silently — a partial migration is
+    /// indistinguishable from a complete one from the outside.
+    /// Invariants: the cap itself is accepted; one above it returns an
+    /// `InvalidInput` naming the novel and the cap.
+    #[test]
+    fn cast_larger_than_one_page_is_refused() {
+        let cap = crate::sql::MAX_SQL_LIMIT as i64;
+        assert!(
+            ensure_cast_fits_page(cap, "三国演义").is_ok(),
+            "a cast exactly at the page size must be readable"
+        );
+        assert!(
+            ensure_cast_fits_page(0, "三国演义").is_ok(),
+            "an empty cast is trivially readable"
+        );
+
+        let err = ensure_cast_fits_page(cap + 1, "三国演义")
+            .expect_err("a cast one above the page size must be refused");
+        assert!(
+            err.to_string().contains("三国演义"),
+            "the error must name the novel, got: {err}"
+        );
+        assert!(
+            err.to_string().contains(&cap.to_string()),
+            "the error must state the readable cap, got: {err}"
         );
     }
 }

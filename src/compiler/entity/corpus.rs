@@ -17,6 +17,15 @@ use std::collections::HashMap;
 use super::provider::{EntityEntry, EntityProvider};
 use crate::ingest::extract::DIALOG_VERBS;
 
+/// Longest shape a CJK person name may have, mirroring the `2–4` character
+/// shape gate in [`crate::compiler::name_validation`].
+const MAX_NAME_CHARS: usize = 4;
+
+/// Words that separate a speaker from an addressee in the text before a
+/// dialogue verb ("姜子牙对哪吒曰"). Everything ahead of the first one is the
+/// subject, so it bounds the name without guessing its length.
+const ADDRESSEE_MARKERS: &[&str] = &["对", "向", "与", "和", "谓", "问", "告"];
+
 /// Common phrases that precede a dialogue verb but are not person names.
 const NON_NAMES: &[&str] = &[
     "有人", "一人", "众人", "旁人", "路人", "世人", "小人", "某", "自称", "某人", "我们", "他们",
@@ -286,12 +295,31 @@ fn name_before(prefix: &str) -> Option<String> {
         }
     }
     let run = &prefix[run_start..end];
-    let chars: Vec<char> = run.chars().collect();
-    if chars.len() < 2 || chars.len() > 6 {
+    // The subject is everything before the first addressee marker
+    // ("姜子牙对哪吒曰" → 姜子牙, "刘备谓曹操曰" → 刘备): the marker bounds it on
+    // the right, so that segment can be taken whole.
+    let subject = ADDRESSEE_MARKERS
+        .iter()
+        .filter_map(|marker| run.find(marker))
+        .min()
+        .map_or(run, |cut| &run[..cut]);
+    let chars: Vec<char> = subject.chars().collect();
+    if chars.len() < 2 {
         return None;
     }
-    // The speaker is the leading chars of the run (verb is at the tail).
-    Some(chars.iter().take(2).collect())
+    // No marker ("申公豹闻之大怒曰"): the run still trails into narration, so the
+    // name is the longest prefix that the shared validator accepts.
+    //
+    // A fixed two characters — what this replaced — silently truncated every
+    // longer name on the generalization path, which is where non-curated
+    // corpora land: 姜子牙 → 姜子, 诸葛亮 → 诸葛, 司马懿 → 司马.
+    for len in (2..=chars.len().min(MAX_NAME_CHARS)).rev() {
+        let candidate: String = chars[..len].iter().collect();
+        if crate::compiler::name_validation::is_plausible_person_name(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// A candidate character qualifies as a name if it is a CJK name-shaped token
@@ -440,6 +468,42 @@ mod tests {
         assert!(
             provider.entries().is_empty(),
             "only a non-name speaker → no entities"
+        );
+    }
+
+    /// Objective: Verify a discovered speaker keeps its whole name. The
+    /// generalization path is where non-curated corpora land, and it used to
+    /// hard-truncate every speaker to two characters — 姜子牙 became 姜子, so
+    /// the graph was built on invented names.
+    /// Invariants: an addressee marker bounds the subject; a name that is not
+    /// separated by one keeps all of its characters; trailing narration never
+    /// leaks into the name.
+    #[test]
+    fn speaker_names_are_not_truncated_to_two_characters() {
+        assert_eq!(
+            name_before("姜子牙对哪吒"),
+            Some("姜子牙".to_string()),
+            "the addressee marker must bound the subject"
+        );
+        assert_eq!(
+            name_before("刘备谓曹操"),
+            Some("刘备".to_string()),
+            "谓 is an addressee marker as well"
+        );
+        assert_eq!(
+            name_before("诸葛亮"),
+            Some("诸葛亮".to_string()),
+            "a three-character name must survive intact"
+        );
+        assert_eq!(
+            name_before("司马懿"),
+            Some("司马懿".to_string()),
+            "a compound surname must survive intact"
+        );
+        assert_eq!(
+            name_before("李逵"),
+            Some("李逵".to_string()),
+            "a two-character name keeps working"
         );
     }
 }

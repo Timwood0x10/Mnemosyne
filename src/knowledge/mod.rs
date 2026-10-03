@@ -13,7 +13,7 @@
 //! relations which change over the narrative — e.g. 吕布→丁原 `serves` ch1 →
 //! `kills` ch3 — do not pollute time-scoped queries (dev_guide §3.5).
 //!
-//! The schema DDL lives in [`crate::storage::schema`]; the SQLite store and
+//! The schema DDL lives in [`crate::persistence::schema`]; the SQLite store and
 //! high-level queries live in [`store`] and the V1→general migrator in
 //! [`migration`] (both registered as submodules once implemented).
 

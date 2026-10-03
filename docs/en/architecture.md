@@ -74,7 +74,7 @@ graph TD
     A --> E["knowledge/ — knowledge storage / migration / export"]
     A --> F["ingest/ — V1 corpus ingestion"]
     A --> H["persona/ — persona check / timeline"]
-    A --> J["storage/ — schema definitions"]
+    A --> J["persistence/ — schema definitions + shared persistence utilities"]
     A --> K["top-level: cognition / cognition_compiler / distiller / conversation_compiler / fact_store / retrieval / language / embed / ..."]
 
     C --> C1["document / sentence / chunk / profile / extract"]
