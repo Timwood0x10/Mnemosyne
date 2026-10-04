@@ -14,13 +14,36 @@ use serde::Deserialize;
 pub struct RelationRulesConfig {
     relation_type_rules: Vec<RelationTypeRuleConfig>,
     dialog_address_rules: Vec<DialogAddressRuleConfig>,
+    /// Byte window the two names and an assertion must share to count as one
+    /// clause. Optional so a config written before the field existed keeps
+    /// loading; [`DEFAULT_RELATION_KEYWORD_PROXIMITY`] then applies.
+    #[serde(default)]
+    relation_keyword_proximity: Option<usize>,
 }
 
+/// Clause width assumed when the config does not state one.
+///
+/// Clauses are short — `A娶B`, `A与B配为夫妇`, `A、B…结义为兄弟` — and 40 bytes is
+/// roughly thirteen CJK characters, which fits every form in the shipped rules
+/// while still excluding "both names merely appear in this chapter".
+const DEFAULT_RELATION_KEYWORD_PROXIMITY: usize = 40;
+
+/// A word that **states** a bond (`桃园结义`, `配为夫妇`, `拜师`).
+///
+/// Deliberately not the same set as [`DialogAddressRuleConfig::keywords`]. An
+/// address form (`夫人`, `主公`, `哥哥`) is an ordinary noun or title that only
+/// implies a relation when someone actually uses it *to address* another
+/// character; listing one here let a whole chapter's prose type any pair that
+/// shared a clause with it. [`validate`] rejects a config that lists one word in
+/// both places.
 #[derive(Debug, Deserialize, Clone)]
 pub struct RelationTypeRuleConfig {
     #[serde(rename = "type")]
     r#type: String,
-    keywords: Vec<String>,
+    /// Accepted under the old `keywords` name too, so an operator's existing
+    /// config keeps loading; the new name distinguishes it from an address form.
+    #[serde(alias = "keywords")]
+    assertions: Vec<String>,
     faction_constraint: String,
 }
 
@@ -30,7 +53,7 @@ pub struct DialogAddressRuleConfig {
     relation_type: String,
 }
 
-/// Parse relation rules from an explicit path.
+/// Parse relation rules from an explicit path, rejecting an unusable rule set.
 ///
 /// Callers that were handed a path by the operator (rather than falling back
 /// to the bundled default) use this to surface a broken config as an error
@@ -38,10 +61,13 @@ pub struct DialogAddressRuleConfig {
 ///
 /// # Errors
 ///
-/// Returns a description naming the offending path when the file cannot be
-/// read or is not valid JSON.
+/// Returns a description naming the offending path when the file cannot be read
+/// or is not valid JSON, or [`validate`]'s message when it parses but describes
+/// rules that cannot be honoured.
 pub fn load_config_from_path(path: &Path) -> Result<RelationRulesConfig, String> {
-    crate::config::load_json_file(path)
+    let config: RelationRulesConfig = crate::config::load_json_file(path)?;
+    validate(&config)?;
+    Ok(config)
 }
 
 /// Load the config from the resource root, or report why it failed.
@@ -70,36 +96,72 @@ static CONFIG: LazyLock<RelationRulesConfig> = LazyLock::new(|| {
 });
 
 /// Builtin fallback rules used when no JSON config is found.
+///
+/// Mirrors `config/relation_rules.json`: assertions state a bond, address forms
+/// are separate, and no word appears in both ([`validate`] enforces that on both
+/// this set and any loaded one, so the built-in cannot drift from the shipped
+/// config into the `夫人`-asserts-a-marriage mistake).
 fn fallback_config() -> RelationRulesConfig {
     RelationRulesConfig {
+        relation_keyword_proximity: None,
         relation_type_rules: vec![
-            rtc("夫妻", &["夫妻", "夫妇", "配为夫妇", "嫁与", "娶"], "any"),
-            rtc("结义", &["结义", "兄弟", "义兄", "义妹", "拜为兄弟"], "any"),
+            rtc(
+                "夫妻",
+                &["夫妻", "夫妇", "配为夫妇", "嫁与", "娶", "结亲"],
+                "any",
+            ),
+            rtc(
+                "结义",
+                &["结义", "结拜", "兄弟", "义兄", "义弟", "桃园结义"],
+                "any",
+            ),
             rtc("父子", &["父子", "父女"], "any"),
             rtc("母女", &["母子", "母女"], "any"),
-            rtc("师徒", &["师徒", "师父", "徒弟", "拜师"], "same"),
-            rtc("君臣", &["君臣", "丞相", "陛下"], "same"),
+            rtc(
+                "师徒",
+                &["师父", "师傅", "师尊", "徒弟", "拜师", "授业", "为师"],
+                "same",
+            ),
+            rtc(
+                "君臣",
+                &[
+                    "主公", "陛下", "大王", "王上", "天子", "丞相", "都督", "将军", "圣上",
+                ],
+                "same",
+            ),
             rtc("挚友", &["挚友", "好友"], "any"),
-            rtc("仇敌", &["仇敌", "仇人", "对头"], "different"),
+            rtc(
+                "仇敌",
+                &["仇敌", "仇人", "对头", "战败", "败阵", "讨伐"],
+                "different",
+            ),
             rtc("姐妹", &["姐妹", "姊妹"], "any"),
             rtc("亲戚", &["亲戚", "亲属", "亲家"], "any"),
         ],
         dialog_address_rules: vec![
-            dac(&["主公", "陛下", "大王", "王上", "皇上", "天子"], "君臣"),
+            dac(
+                &["主公", "陛下", "大王", "王上", "皇上", "天子", "圣上"],
+                "君臣",
+            ),
             dac(&["丞相", "军师", "都督", "将军"], "君臣"),
-            dac(&["哥哥", "大哥", "义兄", "贤弟", "兄弟", "义弟"], "结义"),
-            dac(&["师父", "师傅", "师尊", "恩师"], "师徒"),
-            dac(&["夫人", "娘子", "贤妻", "拙荆"], "夫妻"),
+            dac(
+                &[
+                    "哥哥", "大哥", "二哥", "三弟", "义兄", "义弟", "贤弟", "兄弟",
+                ],
+                "结义",
+            ),
+            dac(&["师父", "师傅", "师尊", "恩师", "老师", "徒弟"], "师徒"),
+            dac(&["夫人", "娘子", "贤妻", "拙荆", "内人"], "夫妻"),
             dac(&["父亲", "父王", "爹爹", "岳父"], "父子"),
             dac(&["母亲", "娘亲"], "母女"),
         ],
     }
 }
 
-fn rtc(r#type: &str, keywords: &[&str], faction_constraint: &str) -> RelationTypeRuleConfig {
+fn rtc(r#type: &str, assertions: &[&str], faction_constraint: &str) -> RelationTypeRuleConfig {
     RelationTypeRuleConfig {
         r#type: r#type.to_string(),
-        keywords: keywords.iter().map(|s| s.to_string()).collect(),
+        assertions: assertions.iter().map(|s| s.to_string()).collect(),
         faction_constraint: faction_constraint.to_string(),
     }
 }
@@ -111,6 +173,78 @@ fn dac(keywords: &[&str], relation_type: &str) -> DialogAddressRuleConfig {
     }
 }
 
+/// `faction_constraint` values the importance weighting understands.
+const KNOWN_FACTION_CONSTRAINTS: &[&str] = &["any", "same", "different"];
+
+/// Reject a rule set that cannot be honoured, naming the first problem found.
+///
+/// The checks are structural rather than novel-specific, so they hold for any
+/// vocabulary an operator supplies:
+///
+/// - no empty relation type, assertion or address keyword — the empty string
+///   matches everywhere and would type every pair,
+/// - at least one assertion per relation type,
+/// - `faction_constraint` must be one of [`KNOWN_FACTION_CONSTRAINTS`], because
+///   it feeds the importance weighting rather than being ignored.
+///
+/// Deliberately **not** checked: a word appearing in both lists. That looked like
+/// a mistake but is not one — `兄弟` names the bond in 水浒传 narration *and*
+/// serves as a form of address, and forbidding the overlap removed real signal
+/// and let weaker rules re-type those pairs (`宋江→吴用` became 君臣,
+/// `刘备→关羽` became 夫妻). Only a word with no asserting use at all (`夫人`,
+/// `哥哥`) has to stay out of `assertions`, and that is a vocabulary judgement,
+/// not a structural one.
+///
+/// # Errors
+///
+/// Returns a description of the first violation.
+fn validate(config: &RelationRulesConfig) -> Result<(), String> {
+    for rule in &config.relation_type_rules {
+        if rule.r#type.trim().is_empty() {
+            return Err("a `relation_type_rules` entry has an empty `type`".to_string());
+        }
+        if !KNOWN_FACTION_CONSTRAINTS.contains(&rule.faction_constraint.as_str()) {
+            return Err(format!(
+                "relation type `{}` has unknown `faction_constraint` `{}` (expected one of {})",
+                rule.r#type,
+                rule.faction_constraint,
+                KNOWN_FACTION_CONSTRAINTS.join(" / ")
+            ));
+        }
+        if rule.assertions.is_empty() {
+            return Err(format!(
+                "relation type `{}` lists no `assertions`",
+                rule.r#type
+            ));
+        }
+        if let Some(empty) = rule.assertions.iter().find(|word| word.trim().is_empty()) {
+            return Err(format!(
+                "relation type `{}` lists an empty assertion ({empty:?})",
+                rule.r#type
+            ));
+        }
+    }
+
+    for rule in &config.dialog_address_rules {
+        if rule.relation_type.trim().is_empty() {
+            return Err("a `dialog_address_rules` entry has an empty `relation_type`".to_string());
+        }
+        if rule.keywords.is_empty() {
+            return Err(format!(
+                "`dialog_address_rules` entry for `{}` lists no keywords",
+                rule.relation_type
+            ));
+        }
+        if let Some(empty) = rule.keywords.iter().find(|word| word.trim().is_empty()) {
+            return Err(format!(
+                "`dialog_address_rules` entry for `{}` lists an empty keyword ({empty:?})",
+                rule.relation_type
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════
 // Public API
 // ═══════════════════════════════════════════════════════════════
@@ -120,10 +254,17 @@ pub fn relation_type_rules() -> &'static [(Vec<String>, String)] {
         CONFIG
             .relation_type_rules
             .iter()
-            .map(|r| (r.keywords.clone(), r.r#type.clone()))
+            .map(|r| (r.assertions.clone(), r.r#type.clone()))
             .collect()
     });
     &RULES
+}
+
+/// Byte window the pair and an assertion must share to count as one clause.
+pub fn relation_keyword_proximity() -> usize {
+    CONFIG
+        .relation_keyword_proximity
+        .unwrap_or(DEFAULT_RELATION_KEYWORD_PROXIMITY)
 }
 
 pub fn dialog_address_rules() -> &'static [(Vec<String>, String)] {
@@ -173,6 +314,18 @@ pub struct DialogRelation {
 }
 
 const DIALOG_MARKERS: &[&str] = &["曰：", "道："];
+
+/// Whether `speech` opens with `keyword` — the vocative position.
+///
+/// Leading punctuation and whitespace are skipped so a quotation mark or an
+/// opening bracket does not hide the vocative (`“夫人，…`). The scan stops at
+/// the first alphanumeric character, which includes CJK ideographs: anything
+/// from there on is the utterance itself, not a form of address opening it.
+fn speech_starts_with(speech: &str, keyword: &str) -> bool {
+    speech
+        .trim_start_matches(|c: char| !c.is_alphanumeric())
+        .starts_with(keyword)
+}
 
 pub fn extract_dialog_relations(
     text: &str,
@@ -236,8 +389,18 @@ pub fn extract_dialog_relations(
         }
 
         for (keywords, rtype) in dialog_address_rules() {
-            let kw_found = keywords.iter().any(|kw| speech.contains(kw.as_str()));
-            if !kw_found {
+            // An address form types a relation only in the VOCATIVE position:
+            // it has to open the utterance. Anywhere else it is narration that
+            // merely mentions the word, and `extract_speech_span` reaches up to
+            // 300 bytes into the text that follows — so
+            // "王夫人道：袭人，你过来。夫人今日…" paired 王夫人 with 袭人 as a
+            // marriage purely because the narration two clauses later contained
+            // `夫人`. Vocatives are how address forms are actually used, and
+            // that is genre- and language-independent.
+            if !keywords
+                .iter()
+                .any(|kw| speech_starts_with(speech, kw.as_str()))
+            {
                 continue;
             }
 
@@ -389,8 +552,6 @@ fn extract_speech_span<'a>(text: &'a str, start: usize, all_markers: &[usize]) -
 // Proximity-based relation detection
 // ═══════════════════════════════════════════════════════════════
 
-const RELATION_KEYWORD_PROXIMITY: usize = 40;
-
 fn all_names_for(name: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     for novel in NOVELS {
@@ -431,7 +592,13 @@ pub fn detect_relation_type(context: &str, a: &str, b: &str) -> String {
     for (keywords, rtype) in relation_type_rules() {
         for kw in keywords {
             if context.match_indices(kw.as_str()).any(|(kw_pos, matched)| {
-                keyword_types_relation(&a_spans, &b_spans, kw_pos, matched.len())
+                keyword_types_relation(
+                    &a_spans,
+                    &b_spans,
+                    kw_pos,
+                    matched.len(),
+                    relation_keyword_proximity(),
+                )
             }) {
                 return rtype.clone();
             }
@@ -451,7 +618,7 @@ pub fn detect_relation_type(context: &str, a: &str, b: &str) -> String {
 ///   married 王夫人 to everyone she spoke to — the bulk of the 68 surviving
 ///   `夫妻` edges in 红楼梦.
 /// - **One clause.** The pair and the keyword must share a single
-///   [`RELATION_KEYWORD_PROXIMITY`]-byte window. The rule this replaces asked
+///   same [`relation_keyword_proximity`]-byte window. The rule this replaces asked
 ///   only that the keyword be near each name **taken separately**, which also
 ///   accepts two names two windows apart — with a whole chapter as the context,
 ///   any common keyword (`夫人`/`娶`/`兄弟`) between two unrelated names
@@ -464,6 +631,7 @@ fn keyword_types_relation(
     b_spans: &[(usize, usize)],
     kw_pos: usize,
     kw_len: usize,
+    proximity: usize,
 ) -> bool {
     let kw_end = kw_pos + kw_len;
     let inside = |spans: &[(usize, usize)]| {
@@ -478,7 +646,7 @@ fn keyword_types_relation(
         b_spans.iter().any(|&(bp, _)| {
             let lo = ap.min(bp).min(kw_pos);
             let hi = ap.max(bp).max(kw_end);
-            hi - lo <= RELATION_KEYWORD_PROXIMITY
+            hi - lo <= proximity
         })
     })
 }
@@ -546,10 +714,15 @@ impl ChapterRelationIndex {
                     Some(positions) => positions,
                     None => continue,
                 };
-                if kw_positions
-                    .iter()
-                    .any(|&kw_pos| keyword_types_relation(a_spans, b_spans, kw_pos, kw.len()))
-                {
+                if kw_positions.iter().any(|&kw_pos| {
+                    keyword_types_relation(
+                        a_spans,
+                        b_spans,
+                        kw_pos,
+                        kw.len(),
+                        relation_keyword_proximity(),
+                    )
+                }) {
                     return rtype.clone();
                 }
             }
@@ -658,6 +831,122 @@ mod tests {
             detect_relation_type("王夫人对贾宝玉说：你这孽障。", "王夫人", "贾宝玉"),
             "关联",
             "a keyword lying inside one of the names must not type the relation"
+        );
+    }
+
+    /// Objective: Verify the shipped rule set and the built-in fallback both
+    /// validate, and that a word which is *purely* a form of address — one that
+    /// names no bond and therefore has no asserting use — is never listed as an
+    /// assertion.
+    /// Invariants: both rule sets validate; each of these words appears only as
+    /// an address form.
+    #[test]
+    fn pure_address_forms_are_not_assertions() {
+        validate(&fallback_config()).expect("the built-in fallback must validate");
+
+        let path = std::env::var("RELATION_RULES_PATH")
+            .unwrap_or_else(|_| "config/relation_rules.json".to_string());
+        let shipped = load_config_from_path(Path::new(&path))
+            .expect("config/relation_rules.json must load and validate");
+
+        // Sharing a clause with one of these is evidence of nothing: none of them
+        // names a bond, so only an actual vocative may draw a relation from it.
+        // (`兄弟` is deliberately absent: in 水浒传 it both names the bond and
+        // serves as a form of address, so it belongs in both lists.)
+        for word in [
+            "夫人", "娘子", "贤妻", "拙荆", "内人", "哥哥", "大哥", "二哥", "三弟", "贤弟", "皇上",
+            "军师", "老师", "父亲", "爹爹", "岳父", "母亲",
+        ] {
+            assert!(
+                !shipped
+                    .relation_type_rules
+                    .iter()
+                    .any(|rule| rule.assertions.iter().any(|a| a == word)),
+                "`{word}` names no bond and must not be an `assertions` entry"
+            );
+        }
+    }
+
+    /// Objective: Verify `validate` refuses rule sets that cannot be honoured.
+    /// Invariants: each malformed rule set is refused rather than silently
+    /// degraded to a different rule set.
+    #[test]
+    fn validate_rejects_unusable_rules() {
+        let unknown_constraint = RelationRulesConfig {
+            relation_keyword_proximity: None,
+            relation_type_rules: vec![rtc("夫妻", &["夫妻"], "sometimes")],
+            dialog_address_rules: vec![],
+        };
+        assert!(
+            validate(&unknown_constraint).is_err(),
+            "an unknown `faction_constraint` must be refused rather than ignored"
+        );
+
+        let no_assertions = RelationRulesConfig {
+            relation_keyword_proximity: None,
+            relation_type_rules: vec![rtc("夫妻", &[], "any")],
+            dialog_address_rules: vec![],
+        };
+        assert!(
+            validate(&no_assertions).is_err(),
+            "a relation type with no assertions must be refused"
+        );
+    }
+
+    /// Objective: Verify the clause window is read from the configuration rather
+    /// than fixed, so a language whose relation phrase sits further from its
+    /// arguments can widen it.
+    /// Invariants: a span too wide for the default window is refused by a narrow
+    /// one and accepted by a wider one.
+    #[test]
+    fn clause_window_comes_from_the_configuration() {
+        let a_spans = [(0usize, 6usize)];
+        let b_spans = [(60usize, 66usize)];
+        let kw_pos = 30; // 30 bytes from each name, 66 bytes end to end
+
+        assert!(
+            !keyword_types_relation(&a_spans, &b_spans, kw_pos, 3, 40),
+            "a 66-byte span must not fit the 40-byte default window"
+        );
+        assert!(
+            keyword_types_relation(&a_spans, &b_spans, kw_pos, 3, 80),
+            "the same span must fit when the configuration widens the window"
+        );
+    }
+
+    /// Objective: Verify a title that names a bond still types a pair when the
+    /// two names and the title share one clause.
+    /// Invariants: `主公` between two names yields 君臣.
+    #[test]
+    fn a_bond_naming_title_types_a_shared_clause() {
+        assert_eq!(
+            detect_relation_type("孔明向主公刘备进言。", "孔明", "刘备"),
+            "君臣",
+            "a title that names the bond must type the pair it sits between"
+        );
+    }
+
+    /// Objective: Verify an address form counts only in the vocative position,
+    /// so narration later in the same speech cannot type a couple.
+    /// Invariants: a leading vocative is accepted even behind punctuation; the
+    /// same word buried inside the utterance is not an address.
+    #[test]
+    fn address_forms_count_only_in_the_vocative() {
+        assert!(
+            speech_starts_with("主公有何吩咐？", "主公"),
+            "a leading vocative must count"
+        );
+        assert!(
+            speech_starts_with("“夫人，你来了。”", "夫人"),
+            "leading punctuation must not hide the vocative"
+        );
+        assert!(
+            !speech_starts_with("袭人，夫人叫你呢。", "夫人"),
+            "a mere mention inside the utterance is not a form of address"
+        );
+        assert!(
+            !speech_starts_with("袭人，你过来。", "夫人"),
+            "an absent address form must not count"
         );
     }
 
